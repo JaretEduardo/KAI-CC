@@ -358,6 +358,7 @@ Initial monorepo:
     KAI-CC/
     |
     +-- compiler/
+    |   +-- source/
     |   +-- lexer/
     |   +-- parser/
     |   +-- ast/
@@ -381,6 +382,11 @@ Initial monorepo:
     +-- SYNTAX.md
     +-- COMPILER_ARCHITECTURE.md
     +-- ROADMAP.md
+
+`source/` holds shared source-file and source-location infrastructure
+(for example `SourceManager`, `SourceLocation`, `SourceSpan`) used by the
+lexer, parser, AST, semantic analysis, and diagnostics. It has no
+dependency on any other compiler stage or on LLVM.
 
 This structure may evolve as KAI grows.
 
