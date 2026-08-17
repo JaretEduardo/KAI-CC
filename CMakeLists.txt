@@ -49,6 +49,27 @@ target_include_directories(kai_compiler
 
 kai_enable_warnings(kai_compiler)
 
+# CLI-only formatting/orchestration helpers (e.g. the --tokens debug dump).
+#
+# Kept separate from kai_compiler so the compiler/frontend core never
+# acquires CLI presentation responsibilities. Dependency direction is
+# strictly kaicc -> kaicc_cli -> kai_compiler, never the reverse.
+add_library(kaicc_cli STATIC
+    compiler/src/cli/TokenPrinter.cpp
+)
+
+target_include_directories(kaicc_cli
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/compiler/include
+)
+
+target_link_libraries(kaicc_cli
+    PUBLIC
+        kai_compiler
+)
+
+kai_enable_warnings(kaicc_cli)
+
 # Main compiler executable
 add_executable(kaicc
     compiler/src/main.cpp
@@ -56,7 +77,7 @@ add_executable(kaicc
 
 target_link_libraries(kaicc
     PRIVATE
-        kai_compiler
+        kaicc_cli
 )
 
 kai_enable_warnings(kaicc)
