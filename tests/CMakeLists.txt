@@ -26,3 +26,4 @@ kai_add_test(source_manager_tests source/SourceManagerTests.cpp)
 
 kai_add_test(token_kind_tests lexer/TokenKindTests.cpp)
 kai_add_test(token_tests lexer/TokenTests.cpp)
+kai_add_test(lexer_tests lexer/LexerTests.cpp)

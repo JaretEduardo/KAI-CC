@@ -20,12 +20,20 @@ Later language features should extend this document rather than bypassing it.
     identifier =
         letter { letter | digit | "_" }
 
+    letter =
+        "A".."Z" | "a".."z" | "_"
+
+For the initial KAI 0.1 lexer, `letter` and `digit` are restricted to
+ASCII. Unicode identifiers are not supported yet.
+
 Examples:
 
     user
     load_user
     value2
     Buffer
+    x2
+    _private
 
 Identifiers are case-sensitive.
 
@@ -73,6 +81,80 @@ Future keywords may include:
     string_literal
     char_literal
     boolean_literal
+
+Integer:
+
+    integer_literal =
+        digit { digit }
+
+Example:
+
+    0
+    42
+    123456
+
+Hexadecimal, octal, and binary prefixes, digit separators, and typed
+suffixes are not part of the initial KAI 0.1 lexer.
+
+Float:
+
+    float_literal =
+        digit { digit } "." digit { digit }
+
+A float requires at least one digit before and after the decimal point.
+
+Example:
+
+    0.0
+    1.5
+    3.14
+
+    3      -> integer_literal
+    3.14   -> float_literal
+    3.foo  -> integer_literal "." identifier (not a float)
+
+Exponent notation and typed suffixes are not part of the initial KAI 0.1
+lexer.
+
+String:
+
+A string literal is delimited by double quotes.
+
+    string_literal =
+        '"' { string_char } '"'
+
+Supported escape sequences:
+
+    \n
+    \r
+    \t
+    \\
+    \"
+    \0
+
+A raw, unescaped newline is not permitted inside an ordinary KAI 0.1
+string literal.
+
+Character:
+
+A character literal is delimited by single quotes and contains exactly
+one ASCII byte or one supported escape sequence.
+
+    char_literal =
+        "'" ( ascii_char | char_escape ) "'"
+
+Supported escape sequences:
+
+    \n
+    \r
+    \t
+    \\
+    \'
+    \0
+
+Full Unicode scalar character literals (see TYPE_SYSTEM.md) are not
+supported by the initial KAI 0.1 lexer; this is an implementation
+limitation, not a change to the language-level definition of `char`.
 
 Boolean:
 
