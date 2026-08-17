@@ -29,6 +29,16 @@
 - Are default arguments allowed?
 - Are named arguments allowed?
 
+## Lexical Grammar
+
+- What is the exact character grammar for integer literals (decimal only, or hex/octal/binary prefixes)?
+- What is the exact character grammar for float literals (exponents, leading/trailing dot)?
+- Will numeric literals support suffixes (e.g. `100u64`, `0.5f32`)?
+- Will numeric literals support digit separators (e.g. `1_000`)?
+- What escape sequences do string literals support (`\n`, `\"`, `\\`, unicode escapes)?
+- What escape sequences do character literals support?
+- What is a `char_literal` exactly — a single byte, a Unicode scalar value, or a grapheme? How is this validated?
+
 ## Tooling
 
 - What information should diagnostics expose?

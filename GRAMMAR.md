@@ -52,6 +52,7 @@ Initial reserved keywords:
 
     use
     pub
+    as
 
     true
     false

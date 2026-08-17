@@ -37,6 +37,7 @@ endfunction()
 # so the same code is exercised by both.
 add_library(kai_compiler STATIC
     compiler/src/source/SourceManager.cpp
+    compiler/src/lexer/TokenKind.cpp
 )
 
 # Public compiler headers
