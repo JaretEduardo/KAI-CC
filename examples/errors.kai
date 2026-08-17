@@ -1,0 +1,14 @@
+fn add(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+fn main() {
+    let age: i32 = "twenty"
+
+    let x = add(10, "20")
+
+    let immutable = 5
+    immutable = 10
+
+    print(unknown_variable)
+}

@@ -1,0 +1,26 @@
+fn main() {
+    let numbers = [10, 20, 30, 40]
+
+    print(numbers[0])
+    print(numbers[1])
+
+    for n in numbers {
+        print(n)
+    }
+}
+
+fn sum(values: [i32]) -> i32 {
+    mut result = 0
+
+    for value in values {
+        result = result + value
+    }
+
+    return result
+}
+
+fn main() {
+    let values = [10, 20, 30]
+
+    print(sum(values))
+}

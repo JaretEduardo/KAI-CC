@@ -1,0 +1,42 @@
+fn average(values: [f64]) -> f64 {
+    mut total = 0.0
+
+    for value in values {
+        total = total + value
+    }
+
+    return total / values.len
+}
+
+fn grade(score: f64) -> str {
+    if score >= 90.0 {
+        return "A"
+    } else if score >= 80.0 {
+        return "B"
+    } else if score >= 70.0 {
+        return "C"
+    } else if score >= 60.0 {
+        return "D"
+    }
+
+    return "F"
+}
+
+fn print_report(name: str, scores: [f64]) {
+    let avg = average(scores)
+
+    print("Student")
+    print(name)
+
+    print("Average")
+    print(avg)
+
+    print("Grade")
+    print(grade(avg))
+}
+
+fn main() {
+    let scores = [95.0, 82.5, 91.0, 88.0]
+
+    print_report("Alice", scores)
+}

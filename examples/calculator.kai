@@ -1,0 +1,26 @@
+fn calculate(a: f64, b: f64, op: str) -> f64 {
+    if op == "+" {
+        return a + b
+    }
+
+    if op == "-" {
+        return a - b
+    }
+
+    if op == "*" {
+        return a * b
+    }
+
+    if op == "/" {
+        return a / b
+    }
+
+    return 0.0
+}
+
+fn main() {
+    print(calculate(20.0, 10.0, "+"))
+    print(calculate(20.0, 10.0, "-"))
+    print(calculate(20.0, 10.0, "*"))
+    print(calculate(20.0, 10.0, "/"))
+}

@@ -1,0 +1,375 @@
+# KAI Syntax
+
+> Status: Experimental Draft  
+> Target version: KAI 0.1
+
+This document describes the proposed syntax for the first implementation of KAI.
+
+Nothing in this document should be considered stable until KAI reaches a versioned language specification.
+
+---
+
+## 1. File Extension
+
+KAI source files use:
+
+    .kai
+
+Example:
+
+    main.kai
+
+---
+
+## 2. Hello World
+
+    fn main() {
+        print("Hello from KAI")
+    }
+
+Semicolons are not required.
+
+---
+
+## 3. Comments
+
+Single-line comments:
+
+    // This is a comment
+
+Block comments are not required for KAI 0.1.
+
+---
+
+## 4. Variables
+
+Immutable variables are declared using `let`.
+
+    let age = 20
+
+Explicit types are optional when they can be inferred.
+
+    let age: i32 = 20
+
+Mutable variables use `mut`.
+
+    mut counter = 0
+
+    counter = counter + 1
+
+Reassignment of immutable values is a compile-time error.
+
+---
+
+## 5. Primitive Types
+
+Initial integer types:
+
+    i8
+    i16
+    i32
+    i64
+
+    u8
+    u16
+    u32
+    u64
+
+Floating-point types:
+
+    f32
+    f64
+
+Additional basic types:
+
+    bool
+    char
+    str
+
+Examples:
+
+    let age: i32 = 21
+    let temperature: f32 = 24.5
+    let active: bool = true
+    let name: str = "KAI"
+
+---
+
+## 6. Functions
+
+Functions use `fn`.
+
+    fn add(a: i32, b: i32) -> i32 {
+        return a + b
+    }
+
+Functions without a return value omit the return type.
+
+    fn greet(name: str) {
+        print(name)
+    }
+
+KAI may eventually support implicit final-expression returns, but KAI 0.1 will initially prefer explicit `return`.
+
+---
+
+## 7. Main Function
+
+Program execution begins at:
+
+    fn main() {
+        ...
+    }
+
+An integer-returning main function may also be supported:
+
+    fn main() -> i32 {
+        return 0
+    }
+
+---
+
+## 8. Operators
+
+Arithmetic:
+
+    +
+    -
+    *
+    /
+    %
+
+Comparison:
+
+    ==
+    !=
+    <
+    <=
+    >
+    >=
+
+Logical:
+
+    &&
+    ||
+    !
+
+Assignment:
+
+    =
+
+Compound assignment operators may be added later.
+
+---
+
+## 9. Conditional Statements
+
+    if age >= 18 {
+        print("adult")
+    } else {
+        print("minor")
+    }
+
+Parentheses around conditions are not required.
+
+---
+
+## 10. While Loops
+
+    mut i = 0
+
+    while i < 10 {
+        print(i)
+        i = i + 1
+    }
+
+---
+
+## 11. For Loops
+
+Proposed syntax:
+
+    for i in 0..10 {
+        print(i)
+    }
+
+Range semantics are not yet finalized.
+
+Initial proposal:
+
+    0..10
+
+means:
+
+    0 <= i < 10
+
+---
+
+## 12. Arrays
+
+Initial proposal:
+
+    let values = [1, 2, 3, 4]
+
+Explicit type:
+
+    let values: [i32] = [1, 2, 3, 4]
+
+Indexing:
+
+    let first = values[0]
+
+Array implementation details are still under design.
+
+---
+
+## 13. Strings
+
+    let name = "KAI"
+
+String interpolation is not required for KAI 0.1.
+
+Initial output:
+
+    print("Hello")
+    print(name)
+
+---
+
+## 14. Type Inference
+
+KAI should infer types when the result is unambiguous.
+
+    let x = 42
+
+Equivalent to:
+
+    let x: i32 = 42
+
+Default literal types for KAI 0.1:
+
+    integer literal -> i32
+    floating literal -> f64
+    true / false -> bool
+    string literal -> str
+
+These defaults may change before the language becomes stable.
+
+---
+
+## 15. Type Conversions
+
+Implicit type conversions should be limited.
+
+This should be rejected:
+
+    let age: i32 = "20"
+
+Explicit conversion syntax is not yet finalized.
+
+Possible future direction:
+
+    let value = i64(x)
+
+---
+
+## 16. Structs
+
+Structs are planned shortly after the core KAI 0.1 compiler is operational.
+
+Proposed syntax:
+
+    struct User {
+        id: u64
+        name: str
+        active: bool
+    }
+
+Construction syntax is still under design.
+
+Possible direction:
+
+    let user = User {
+        id: 1
+        name: "Jaret"
+        active: true
+    }
+
+---
+
+## 17. Modules
+
+Module syntax is not required for the first compiler milestone.
+
+Proposed future direction:
+
+    use math
+    use net.http
+
+Exact module semantics will be designed separately.
+
+---
+
+## 18. Generics
+
+Generics are not part of the initial KAI 0.1 implementation.
+
+Future direction:
+
+    fn first<T>(values: [T]) -> T {
+        return values[0]
+    }
+
+---
+
+## 19. Traits
+
+Traits are not part of KAI 0.1.
+
+Possible future syntax:
+
+    trait Display {
+        fn display(self) -> str
+    }
+
+    impl Display for User {
+        fn display(self) -> str {
+            return self.name
+        }
+    }
+
+---
+
+## 20. Unsafe Operations
+
+Low-level memory operations may eventually require explicit unsafe blocks.
+
+Possible direction:
+
+    unsafe {
+        // low-level operation
+    }
+
+No unsafe operations are required for the first KAI implementation.
+
+---
+
+# KAI 0.1 Minimum Syntax
+
+The first compiler only needs to understand:
+
+- literals
+- variables
+- primitive types
+- arithmetic
+- comparisons
+- functions
+- function calls
+- return
+- if / else
+- while
+- basic for loops
+- basic arrays
+- print
+
+Everything else should wait until this subset is stable.

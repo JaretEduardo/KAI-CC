@@ -1,0 +1,23 @@
+fn classify(value: i32) {
+    if value > 0 {
+        print("positive")
+    } else if value < 0 {
+        print("negative")
+    } else {
+        print("zero")
+    }
+}
+
+fn main() {
+    let age = 21
+
+    if age >= 18 {
+        print("adult")
+    } else {
+        print("minor")
+    }
+
+    classify(10)
+    classify(-4)
+    classify(0)
+}

@@ -1,0 +1,14 @@
+fn main() {
+    let name = "KAI"
+    let version: f32 = 0.1
+    let year: i32 = 2026
+
+    mut builds = 0
+
+    builds = builds + 1
+
+    print(name)
+    print(version)
+    print(year)
+    print(builds)
+}
