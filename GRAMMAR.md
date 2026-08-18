@@ -255,6 +255,7 @@ Initial grammar:
         | named_type
         | reference_type
         | array_type
+        | slice_type
         | generic_type
         | unit_type
 
@@ -318,17 +319,20 @@ Example:
 
 # 16. Slice Type
 
-Slices appear through references:
+    slice_type =
+        "[" type "]"
+
+Slices most commonly appear through references:
 
     &[T]
     &mut [T]
 
-Conceptual grammar extension:
-
-    slice_type =
-        "[" type "]"
-
-A bare slice type cannot normally exist as a local owned value.
+`[T]` is real slice type syntax and is part of the `type` production
+(see §11): the parser accepts it wherever a `type` is expected,
+including bare (non-referenced) occurrences. A bare slice type cannot
+normally exist as a local owned value, but that restriction is a
+semantic-analysis concern, not a parsing concern — the parser does not
+reject a bare `[T]` itself.
 
 ---
 
@@ -742,6 +746,7 @@ Generic enum declaration grammar will be finalized when user-defined generics ar
 # 46. Imports
 
     import_declaration =
+        [ "pub" ]
         "use"
         module_path
         [ "as" identifier ]
@@ -754,6 +759,9 @@ Examples:
     use std.io
     use net.http.Server
     use database.postgres as pg
+    pub use parser.Parser
+
+A leading `pub` re-exports the imported name from the current module.
 
 ---
 
@@ -764,6 +772,7 @@ Examples:
     fn
     struct
     enum
+    use
 
 and struct fields.
 

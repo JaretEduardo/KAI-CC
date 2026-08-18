@@ -28,6 +28,13 @@ kai_add_test(token_kind_tests lexer/TokenKindTests.cpp)
 kai_add_test(token_tests lexer/TokenTests.cpp)
 kai_add_test(lexer_tests lexer/LexerTests.cpp)
 
+kai_add_test(ast_node_tests ast/NodeTests.cpp)
+kai_add_test(ast_expr_tests ast/ExprTests.cpp)
+kai_add_test(ast_type_syntax_tests ast/TypeSyntaxTests.cpp)
+kai_add_test(ast_stmt_tests ast/StmtTests.cpp)
+kai_add_test(ast_decl_tests ast/DeclTests.cpp)
+kai_add_test(ast_source_file_tests ast/SourceFileTests.cpp)
+
 # kaicc_cli-specific tests: linked against kaicc_cli (not kai_compiler
 # directly) since kai_add_test() always links kai_compiler and
 # kaicc_cli's TokenPrinter helpers live one layer above that.

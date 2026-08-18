@@ -290,10 +290,12 @@ Construction syntax is still under design.
 Possible direction:
 
     let user = User {
-        id: 1
-        name: "Jaret"
+        id: 1,
+        name: "Jaret",
         active: true
     }
+
+Struct literal fields are comma-separated (see GRAMMAR.md §44).
 
 ---
 
