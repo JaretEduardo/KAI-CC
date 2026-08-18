@@ -29,6 +29,17 @@
 - Are default arguments allowed?
 - Are named arguments allowed?
 
+## Lexical Grammar
+
+- Will KAI ever support hexadecimal/octal/binary integer literals (e.g. `0xFF`, `0b1010`, `0o755`)?
+- Will KAI ever support digit separators (e.g. `1_000`)?
+- Will KAI ever support numeric literal suffixes (e.g. `100u64`, `0.5f32`)?
+- Will KAI ever support exponent notation for float literals (e.g. `1e10`, `1.2e-5`)?
+- What escape sequences beyond the initial set (`\n \r \t \\ \" \0` for strings, `\n \r \t \\ \' \0` for chars) will eventually be supported (e.g. unicode escapes like `\u{1F600}`)?
+- Full Unicode identifier support (the KAI 0.1 lexer is ASCII-only; see GRAMMAR.md §2).
+- Full Unicode scalar value validation for character literals (the KAI 0.1 lexer accepts only a single ASCII byte or a supported escape; `char` remains defined as a Unicode scalar value at the language level per TYPE_SYSTEM.md).
+- Will KAI ever support multiline string literals? (KAI 0.1 treats a raw newline inside `"..."` as invalid lexical input.)
+
 ## Tooling
 
 - What information should diagnostics expose?
