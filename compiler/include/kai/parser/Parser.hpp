@@ -23,21 +23,24 @@ namespace kai::parser {
 /// Parses one file's token stream into the existing syntax AST
 /// (kai::ast). Recognizes function declarations with a comma-separated,
 /// named-type-only parameter list and an optional named return type;
-/// `let`/`mut` variable declarations and `return` statements; and the
-/// full expression precedence ladder (assignment, logical or/and,
-/// equality, comparison, range, additive, multiplicative, unary, and
-/// postfix/primary) built from literals, identifiers, calls, and
-/// parenthesized expressions - enough for:
+/// `let`/`mut` variable declarations and `return` statements; `if`/
+/// `else if`/`else` and `while`/`for` control flow; and the full
+/// expression precedence ladder (assignment, logical or/and, equality,
+/// comparison, range, additive, multiplicative, unary, and postfix/
+/// primary) built from literals, identifiers, calls, and parenthesized
+/// expressions - enough for:
 ///
-///     fn add(a: i32, b: i32) -> i32 {
-///         return a + b
+///     fn fibonacci(n: i32) -> i32 {
+///         if n <= 1 {
+///             return n
+///         }
+///         return fibonacci(n - 1) + fibonacci(n - 2)
 ///     }
 ///
 ///     fn main() {
-///         let x = 20
-///         mut y = 22
-///         y = y + x
-///         print(y)
+///         for i in 0..10 {
+///             print(fibonacci(i))
+///         }
 ///     }
 ///
 /// Parser recognizes syntax only: it performs no semantic analysis, no
@@ -101,6 +104,9 @@ private:
     ParseResult<ast::StmtPtr> parseStatement();
     ParseResult<ast::StmtPtr> parseVarDeclStmt();
     ParseResult<ast::StmtPtr> parseReturnStmt();
+    ParseResult<ast::StmtPtr> parseIfStmt();
+    ParseResult<ast::StmtPtr> parseWhileStmt();
+    ParseResult<ast::StmtPtr> parseForStmt();
 
     // --- expressions ---
     // Precedence ladder, lowest to highest (GRAMMAR.md §26-41), each tier

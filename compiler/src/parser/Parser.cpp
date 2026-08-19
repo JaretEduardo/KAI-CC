@@ -218,11 +218,14 @@ ParseResult<ast::StmtPtr> Parser::parseStatement() {
             return parseReturnStmt();
 
         case TokenKind::KwIf:
+            return parseIfStmt();
+
         case TokenKind::KwWhile:
+            return parseWhileStmt();
+
         case TokenKind::KwFor:
-            // Valid GRAMMAR.md statements - no StmtKind for them yet in
-            // this milestone's AST.
-            return fail(ParseErrorKind::UnsupportedSyntax);
+            return parseForStmt();
+
         default:
             break;
     }
@@ -318,6 +321,126 @@ ParseResult<ast::StmtPtr> Parser::parseReturnStmt() {
 
     const SourceSpan span(returnTok->span().begin(), end);
     ast::StmtPtr stmt = std::make_unique<ast::ReturnStmt>(std::move(value), span);
+    return stmt;
+}
+
+ParseResult<ast::StmtPtr> Parser::parseIfStmt() {
+    std::vector<ast::IfBranch> branches;
+    std::optional<ast::ElseClause> elseClause;
+
+    SourceLocation branchBegin = current().span().begin(); // `if`
+    auto ifTok = expect(TokenKind::KwIf);
+    if (!ifTok) {
+        return std::unexpected(ifTok.error());
+    }
+
+    while (true) {
+        auto condition = parseExpression();
+        if (!condition) {
+            return std::unexpected(condition.error());
+        }
+
+        auto body = parseBlock();
+        if (!body) {
+            return std::unexpected(body.error());
+        }
+
+        const SourceSpan branchSpan(branchBegin, (*body)->span().end());
+        branches.push_back(ast::IfBranch{std::move(*condition), std::move(*body), branchSpan});
+
+        // Narrow lookahead: skip Newline only (never Semicolon) to see
+        // whether the same if_statement continues with `else`
+        // (GRAMMAR.md §23's documented newline-before-else rule). If no
+        // `else` follows, any Newlines consumed here would have been
+        // consumed by the enclosing parseBlock()'s own skipSeparators()
+        // anyway - harmless.
+        while (check(TokenKind::Newline)) {
+            advance();
+        }
+
+        if (!check(TokenKind::KwElse)) {
+            break;
+        }
+        const Token elseTok = advance(); // consume `else`
+
+        // No newline tolerance between `else` and what follows it: not
+        // `else\nif`, not `else\n{`. Only the immediately-adjacent forms
+        // are valid, so no skipSeparators() call here.
+        if (match(TokenKind::KwIf)) {
+            branchBegin = elseTok.span().begin();
+            continue;
+        }
+
+        auto finalBody = parseBlock();
+        if (!finalBody) {
+            return std::unexpected(finalBody.error());
+        }
+
+        const SourceSpan elseSpan(elseTok.span().begin(), (*finalBody)->span().end());
+        elseClause = ast::ElseClause{std::move(*finalBody), elseSpan};
+        break;
+    }
+
+    const SourceSpan span(branches.front().span.begin(),
+                           elseClause ? elseClause->span.end() : branches.back().span.end());
+    ast::StmtPtr stmt = std::make_unique<ast::IfStmt>(std::move(branches), std::move(elseClause), span);
+    return stmt;
+}
+
+ParseResult<ast::StmtPtr> Parser::parseWhileStmt() {
+    auto whileTok = expect(TokenKind::KwWhile);
+    if (!whileTok) {
+        return std::unexpected(whileTok.error());
+    }
+
+    auto condition = parseExpression();
+    if (!condition) {
+        return std::unexpected(condition.error());
+    }
+
+    auto body = parseBlock();
+    if (!body) {
+        return std::unexpected(body.error());
+    }
+
+    const SourceSpan span(whileTok->span().begin(), (*body)->span().end());
+    ast::StmtPtr stmt = std::make_unique<ast::WhileStmt>(std::move(*condition), std::move(*body), span);
+    return stmt;
+}
+
+ParseResult<ast::StmtPtr> Parser::parseForStmt() {
+    auto forTok = expect(TokenKind::KwFor);
+    if (!forTok) {
+        return std::unexpected(forTok.error());
+    }
+
+    auto varTok = expect(TokenKind::Identifier);
+    if (!varTok) {
+        return std::unexpected(varTok.error());
+    }
+
+    if (auto inTok = expect(TokenKind::KwIn); !inTok) {
+        return std::unexpected(inTok.error());
+    }
+
+    // The iterable is an arbitrary expression - the Parser never assumes
+    // it is a range (GRAMMAR.md §25). `{` is not a continuation token
+    // for any expression precedence tier, so parseExpression() naturally
+    // stops with current() == LeftBrace and parseBlock() picks up from
+    // there; no delimiter hack is needed.
+    auto iterable = parseExpression();
+    if (!iterable) {
+        return std::unexpected(iterable.error());
+    }
+
+    auto body = parseBlock();
+    if (!body) {
+        return std::unexpected(body.error());
+    }
+
+    const SourceSpan span(forTok->span().begin(), (*body)->span().end());
+    ast::StmtPtr stmt = std::make_unique<ast::ForStmt>(ast::Identifier{varTok->span()}, std::move(*iterable),
+                                                        std::move(*body), span);
     return stmt;
 }
 

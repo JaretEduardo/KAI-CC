@@ -21,11 +21,16 @@ using kai::ast::BinaryOperator;
 using kai::ast::BindingKind;
 using kai::ast::CallExpr;
 using kai::ast::DeclKind;
+using kai::ast::ElseClause;
 using kai::ast::Expr;
 using kai::ast::ExprKind;
 using kai::ast::ExprStmt;
+using kai::ast::ForStmt;
 using kai::ast::FunctionDecl;
+using kai::ast::Identifier;
 using kai::ast::IdentifierExpr;
+using kai::ast::IfBranch;
+using kai::ast::IfStmt;
 using kai::ast::LiteralExpr;
 using kai::ast::LiteralKind;
 using kai::ast::ParenExpr;
@@ -36,6 +41,7 @@ using kai::ast::TypeSyntaxKind;
 using kai::ast::UnaryExpr;
 using kai::ast::UnaryOperator;
 using kai::ast::VarDeclStmt;
+using kai::ast::WhileStmt;
 using kai::parser::ParseError;
 using kai::parser::ParseErrorKind;
 using kai::parser::Parser;
@@ -432,35 +438,6 @@ void testSyntacticallyInvalidFunctionNameIsUnexpectedTokenNotInvalidToken() {
     const ParseError& error = result.error();
     KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
     KAI_CHECK(error.actual == TokenKind::IntegerLiteral);
-}
-
-void testControlFlowKeywordsRemainUnsupportedSyntax() {
-    // `let`/`mut` and binary operators are now supported (Phase 2); `if`/
-    // `while`/`for` are still deliberately not.
-    struct Case {
-        const char* source;
-        TokenKind actual;
-    };
-    const Case cases[] = {
-        {"fn main() {\n    if true {\n    }\n}", TokenKind::KwIf},
-        {"fn main() {\n    while true {\n    }\n}", TokenKind::KwWhile},
-        {"fn main() {\n    for x in y {\n    }\n}", TokenKind::KwFor},
-    };
-
-    for (const Case& c : cases) {
-        SourceManager sm;
-        const FileId file = sm.addVirtualFile("a.kai", c.source);
-        Parser parser(sm, file);
-        auto result = parser.parseSourceFile();
-
-        KAI_CHECK(!result.has_value());
-        if (result) {
-            continue;
-        }
-        const ParseError& error = result.error();
-        KAI_CHECK(error.kind == ParseErrorKind::UnsupportedSyntax);
-        KAI_CHECK(error.actual == c.actual);
-    }
 }
 
 void testArrayLiteralStartIsUnsupportedSyntax() {
@@ -1442,6 +1419,588 @@ void testEOFAfterUnaryOperator() {
     KAI_CHECK(error.actual == TokenKind::EndOfFile);
 }
 
+// --- If statements ---
+
+void testIfTrueEmptyBodyParses() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if true {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    KAI_CHECK(fn.body().statements()[0]->kind() == StmtKind::If);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(ifStmt.branches().size() == 1);
+    KAI_CHECK(!ifStmt.elseClause().has_value());
+    KAI_CHECK(ifStmt.branches()[0].condition->kind() == ExprKind::Literal);
+    KAI_CHECK(ifStmt.branches()[0].body->statements().empty());
+}
+
+void testIfBodyContainsExpressionStatement() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if true {\n        print(x)\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(ifStmt.branches()[0].body->statements().size() == 1);
+    KAI_CHECK(ifStmt.branches()[0].body->statements()[0]->kind() == StmtKind::Expr);
+}
+
+void testIfElseBothBranchesEmpty() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a > b {} else {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(ifStmt.branches().size() == 1);
+    KAI_CHECK(ifStmt.branches()[0].condition->kind() == ExprKind::Binary);
+    const auto& cond = static_cast<const BinaryExpr&>(*ifStmt.branches()[0].condition);
+    KAI_CHECK(cond.op() == BinaryOperator::Greater);
+    KAI_CHECK(ifStmt.elseClause().has_value());
+    KAI_CHECK(ifStmt.elseClause()->body->statements().empty());
+}
+
+void testIfElseIfElseIfElseBranchCountOrderAndConditions() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {} else if b {} else if c {} else {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(ifStmt.branches().size() == 3);
+    KAI_CHECK(sm.text(ifStmt.branches()[0].condition->span()) == "a");
+    KAI_CHECK(sm.text(ifStmt.branches()[1].condition->span()) == "b");
+    KAI_CHECK(sm.text(ifStmt.branches()[2].condition->span()) == "c");
+    KAI_CHECK(ifStmt.elseClause().has_value());
+}
+
+void testIfBranchSpansCoverIfAndElseIfKeywords() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {} else if b {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+
+    // Initial branch span begins at `if`, not the condition.
+    KAI_CHECK(sm.text(ifStmt.branches()[0].span) == "if a {}");
+    // else-if branch span begins at `else`, not the following `if`.
+    KAI_CHECK(sm.text(ifStmt.branches()[1].span) == "else if b {}");
+}
+
+void testElseClauseSpanBeginsAtElseKeyword() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {} else {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(ifStmt.elseClause().has_value());
+    KAI_CHECK(sm.text(ifStmt.elseClause()->span) == "else {}");
+}
+
+void testFullIfStmtSpanCoversIfThroughFinalElse() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {} else if b {} else {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(sm.text(ifStmt.span()) == "if a {} else if b {} else {}");
+}
+
+void testFullIfStmtSpanWithNoElseEndsAtLastBranch() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {} else if b {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(!ifStmt.elseClause().has_value());
+    KAI_CHECK(sm.text(ifStmt.span()) == "if a {} else if b {}");
+}
+
+void testIfNonBoolConditionSucceedsSyntactically() {
+    // No bool/type validation belongs in the parser.
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if 42 {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(ifStmt.branches()[0].condition->kind() == ExprKind::Literal);
+}
+
+// --- Newline-before-else behavior ---
+
+void testNewlineBeforeElseSucceeds() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {\n    }\n    else {\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(ifStmt.elseClause().has_value());
+}
+
+void testMultipleNewlinesBeforeElseSucceeds() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {\n    }\n\n\n    else {\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(ifStmt.elseClause().has_value());
+}
+
+void testNewlineBeforeElseIfSucceeds() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {\n    }\n    else if b {\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& ifStmt = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(ifStmt.branches().size() == 2);
+    KAI_CHECK(!ifStmt.elseClause().has_value());
+}
+
+void testSemicolonBeforeElseFails() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {}; else {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.actual == TokenKind::KwElse);
+}
+
+void testElseNewlineIfIsInvalid() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {\n    }\n    else\n    if b {\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::LeftBrace);
+    KAI_CHECK(error.actual == TokenKind::Newline);
+}
+
+void testElseNewlineBraceIsInvalid() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {\n    }\n    else\n    {\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::LeftBrace);
+    KAI_CHECK(error.actual == TokenKind::Newline);
+}
+
+void testNewlineAfterIfKeywordIsInvalid() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if\n    true {\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.actual == TokenKind::Newline);
+}
+
+// --- Nested if / dangling else ---
+
+void testNestedIfOuterElseBindsToOuter() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if a {\n        if b {\n        }\n    } else {\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& outer = static_cast<const IfStmt&>(*fn.body().statements()[0]);
+
+    // The outer if has the else - it did not get attached to the inner one.
+    KAI_CHECK(outer.branches().size() == 1);
+    KAI_CHECK(outer.elseClause().has_value());
+
+    KAI_CHECK(outer.branches()[0].body->statements().size() == 1);
+    KAI_CHECK(outer.branches()[0].body->statements()[0]->kind() == StmtKind::If);
+    const auto& inner = static_cast<const IfStmt&>(*outer.branches()[0].body->statements()[0]);
+    KAI_CHECK(inner.branches().size() == 1);
+    KAI_CHECK(!inner.elseClause().has_value());
+}
+
+// --- While statements ---
+
+void testWhileTrueEmptyBodyParses() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    while true {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    KAI_CHECK(fn.body().statements()[0]->kind() == StmtKind::While);
+    const auto& whileStmt = static_cast<const WhileStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(whileStmt.condition().kind() == ExprKind::Literal);
+    KAI_CHECK(whileStmt.body().statements().empty());
+}
+
+void testWhileWithAssignmentBody() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    while i < 10 {\n        i = i + 1\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& whileStmt = static_cast<const WhileStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(whileStmt.condition().kind() == ExprKind::Binary);
+    KAI_CHECK(static_cast<const BinaryExpr&>(whileStmt.condition()).op() == BinaryOperator::Less);
+    KAI_CHECK(whileStmt.body().statements().size() == 1);
+    const auto& bodyStmt = static_cast<const ExprStmt&>(*whileStmt.body().statements()[0]);
+    KAI_CHECK(bodyStmt.expr().kind() == ExprKind::Assignment);
+}
+
+void testWhileNonBoolConditionSucceedsSyntactically() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    while 42 {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& whileStmt = static_cast<const WhileStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(whileStmt.condition().kind() == ExprKind::Literal);
+}
+
+void testWhileFullSpan() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    while a {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& whileStmt = static_cast<const WhileStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(sm.text(whileStmt.span()) == "while a {}");
+}
+
+void testMalformedWhileMissingCondition() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    while {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.actual == TokenKind::LeftBrace);
+}
+
+// --- For statements ---
+
+void testForRangeIterable() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for i in 0..10 {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    KAI_CHECK(fn.body().statements()[0]->kind() == StmtKind::For);
+    const auto& forStmt = static_cast<const ForStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(sm.text(forStmt.variable().span) == "i");
+    KAI_CHECK(forStmt.iterable().kind() == ExprKind::Binary);
+    KAI_CHECK(static_cast<const BinaryExpr&>(forStmt.iterable()).op() == BinaryOperator::Range);
+    KAI_CHECK(forStmt.body().statements().empty());
+}
+
+void testForIdentifierIterable() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for value in values {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& forStmt = static_cast<const ForStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(sm.text(forStmt.variable().span) == "value");
+    KAI_CHECK(forStmt.iterable().kind() == ExprKind::Identifier);
+    KAI_CHECK(sm.text(forStmt.iterable().span()) == "values");
+}
+
+void testForBodyContainsCall() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for i in 0..10 {\n        print(i)\n    }\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& forStmt = static_cast<const ForStmt&>(*fn.body().statements()[0]);
+
+    KAI_CHECK(forStmt.body().statements().size() == 1);
+    const auto& bodyStmt = static_cast<const ExprStmt&>(*forStmt.body().statements()[0]);
+    KAI_CHECK(bodyStmt.expr().kind() == ExprKind::Call);
+}
+
+void testForVariableIdentifierSpan() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for index in 0..10 {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& forStmt = static_cast<const ForStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(sm.text(forStmt.variable().span) == "index");
+}
+
+void testForFullSpan() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for i in 0..10 {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& forStmt = static_cast<const ForStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(sm.text(forStmt.span()) == "for i in 0..10 {}");
+}
+
+void testMalformedForMissingIdentifier() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for in values {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::Identifier);
+    KAI_CHECK(error.actual == TokenKind::KwIn);
+}
+
+void testMalformedForMissingIn() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for i values {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::KwIn);
+    KAI_CHECK(error.actual == TokenKind::Identifier);
+}
+
+void testMalformedForMissingIterable() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for i in {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.actual == TokenKind::LeftBrace);
+}
+
+void testMalformedForMissingBody() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for i in values\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::LeftBrace);
+}
+
+// --- InvalidToken in control-flow headers ---
+
+void testInvalidTokenInIfCondition() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    if $ {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::InvalidToken);
+    KAI_CHECK(error.actual == TokenKind::Invalid);
+}
+
+void testInvalidTokenInWhileCondition() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    while $ {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::InvalidToken);
+    KAI_CHECK(error.actual == TokenKind::Invalid);
+}
+
+void testInvalidTokenInForIterable() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    for x in $ {}\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::InvalidToken);
+    KAI_CHECK(error.actual == TokenKind::Invalid);
+}
+
 } // namespace
 
 int main() {
@@ -1471,7 +2030,6 @@ int main() {
 
     testInvalidLexerTokenWhereExpressionExpected();
     testSyntacticallyInvalidFunctionNameIsUnexpectedTokenNotInvalidToken();
-    testControlFlowKeywordsRemainUnsupportedSyntax();
     testArrayLiteralStartIsUnsupportedSyntax();
 
     testEOFInsideFunctionParameterList();
@@ -1531,6 +2089,46 @@ int main() {
     testTryOperatorRemainsUnsupportedSyntax();
     testEOFAfterBinaryOperator();
     testEOFAfterUnaryOperator();
+
+    testIfTrueEmptyBodyParses();
+    testIfBodyContainsExpressionStatement();
+    testIfElseBothBranchesEmpty();
+    testIfElseIfElseIfElseBranchCountOrderAndConditions();
+    testIfBranchSpansCoverIfAndElseIfKeywords();
+    testElseClauseSpanBeginsAtElseKeyword();
+    testFullIfStmtSpanCoversIfThroughFinalElse();
+    testFullIfStmtSpanWithNoElseEndsAtLastBranch();
+    testIfNonBoolConditionSucceedsSyntactically();
+
+    testNewlineBeforeElseSucceeds();
+    testMultipleNewlinesBeforeElseSucceeds();
+    testNewlineBeforeElseIfSucceeds();
+    testSemicolonBeforeElseFails();
+    testElseNewlineIfIsInvalid();
+    testElseNewlineBraceIsInvalid();
+    testNewlineAfterIfKeywordIsInvalid();
+
+    testNestedIfOuterElseBindsToOuter();
+
+    testWhileTrueEmptyBodyParses();
+    testWhileWithAssignmentBody();
+    testWhileNonBoolConditionSucceedsSyntactically();
+    testWhileFullSpan();
+    testMalformedWhileMissingCondition();
+
+    testForRangeIterable();
+    testForIdentifierIterable();
+    testForBodyContainsCall();
+    testForVariableIdentifierSpan();
+    testForFullSpan();
+    testMalformedForMissingIdentifier();
+    testMalformedForMissingIn();
+    testMalformedForMissingIterable();
+    testMalformedForMissingBody();
+
+    testInvalidTokenInIfCondition();
+    testInvalidTokenInWhileCondition();
+    testInvalidTokenInForIterable();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }
