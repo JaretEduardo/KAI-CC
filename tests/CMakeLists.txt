@@ -55,3 +55,19 @@ target_include_directories(token_printer_tests
 kai_enable_warnings(token_printer_tests)
 
 add_test(NAME token_printer_tests COMMAND token_printer_tests)
+
+add_executable(ast_printer_tests cli/AstPrinterTests.cpp)
+
+target_link_libraries(ast_printer_tests
+    PRIVATE
+        kaicc_cli
+)
+
+target_include_directories(ast_printer_tests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+kai_enable_warnings(ast_printer_tests)
+
+add_test(NAME ast_printer_tests COMMAND ast_printer_tests)

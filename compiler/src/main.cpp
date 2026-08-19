@@ -1,3 +1,4 @@
+#include "kai/cli/AstPrinter.hpp"
 #include "kai/cli/TokenPrinter.hpp"
 #include "kai/source/SourceManager.hpp"
 
@@ -14,7 +15,11 @@ void printVersion() {
 
 void printUsage() {
     std::cout << "KAI-CC compiler\n";
-    std::cout << "Usage: kaicc [options] <file.kai>\n";
+    std::cout << "Usage:\n";
+    std::cout << "  kaicc --version\n";
+    std::cout << "  kaicc --tokens <file.kai>\n";
+    std::cout << "  kaicc --ast <file.kai>\n";
+    std::cout << "  kaicc <file.kai>\n";
     std::cout << "Try 'kaicc --version'\n";
 }
 
@@ -42,6 +47,17 @@ int main(int argc, char* argv[]) {
 
         kai::SourceManager sources;
         return kai::cli::runTokensCommand(sources, argv[2], std::cout, std::cerr);
+    }
+
+    if (firstArg == "--ast") {
+        if (argc != 3) {
+            std::cerr << "kaicc: error: --ast requires exactly one file argument\n";
+            std::cerr << "Usage: kaicc --ast <file.kai>\n";
+            return 1;
+        }
+
+        kai::SourceManager sources;
+        return kai::cli::runAstCommand(sources, argv[2], std::cout, std::cerr);
     }
 
     if (firstArg.starts_with("--")) {
