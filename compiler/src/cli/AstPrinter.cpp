@@ -58,6 +58,70 @@ std::string_view literalKindName(ast::LiteralKind kind) {
     return "Unknown";
 }
 
+// No `default:` case, same idiom.
+std::string_view bindingKindName(ast::BindingKind kind) {
+    switch (kind) {
+        case ast::BindingKind::Immutable:
+            return "Immutable";
+        case ast::BindingKind::Mutable:
+            return "Mutable";
+    }
+
+    return "Unknown";
+}
+
+// No `default:` case, same idiom.
+std::string_view unaryOperatorName(ast::UnaryOperator op) {
+    switch (op) {
+        case ast::UnaryOperator::Negate:
+            return "Negate";
+        case ast::UnaryOperator::Not:
+            return "Not";
+        case ast::UnaryOperator::Ref:
+            return "Ref";
+        case ast::UnaryOperator::RefMut:
+            return "RefMut";
+    }
+
+    return "Unknown";
+}
+
+// No `default:` case, same idiom.
+std::string_view binaryOperatorName(ast::BinaryOperator op) {
+    switch (op) {
+        case ast::BinaryOperator::Or:
+            return "Or";
+        case ast::BinaryOperator::And:
+            return "And";
+        case ast::BinaryOperator::Equal:
+            return "Equal";
+        case ast::BinaryOperator::NotEqual:
+            return "NotEqual";
+        case ast::BinaryOperator::Less:
+            return "Less";
+        case ast::BinaryOperator::LessEqual:
+            return "LessEqual";
+        case ast::BinaryOperator::Greater:
+            return "Greater";
+        case ast::BinaryOperator::GreaterEqual:
+            return "GreaterEqual";
+        case ast::BinaryOperator::Range:
+            return "Range";
+        case ast::BinaryOperator::Add:
+            return "Add";
+        case ast::BinaryOperator::Subtract:
+            return "Subtract";
+        case ast::BinaryOperator::Multiply:
+            return "Multiply";
+        case ast::BinaryOperator::Divide:
+            return "Divide";
+        case ast::BinaryOperator::Modulo:
+            return "Modulo";
+    }
+
+    return "Unknown";
+}
+
 void printExpr(std::ostream& out, const SourceManager& sources, const ast::Expr& expr, int depth);
 void printStmt(std::ostream& out, const SourceManager& sources, const ast::Stmt& stmt, int depth);
 
@@ -114,6 +178,42 @@ void printParenExpr(std::ostream& out, const SourceManager& sources, const ast::
     printExpr(out, sources, expr.inner(), depth + 1);
 }
 
+void printUnaryExpr(std::ostream& out, const SourceManager& sources, const ast::UnaryExpr& expr, int depth) {
+    writeIndent(out, depth);
+    out << "UnaryExpr op=" << unaryOperatorName(expr.op()) << '\n';
+
+    writeIndent(out, depth + 1);
+    out << "Operand\n";
+    printExpr(out, sources, expr.operand(), depth + 2);
+}
+
+void printBinaryExpr(std::ostream& out, const SourceManager& sources, const ast::BinaryExpr& expr, int depth) {
+    writeIndent(out, depth);
+    out << "BinaryExpr op=" << binaryOperatorName(expr.op()) << '\n';
+
+    writeIndent(out, depth + 1);
+    out << "Left\n";
+    printExpr(out, sources, expr.left(), depth + 2);
+
+    writeIndent(out, depth + 1);
+    out << "Right\n";
+    printExpr(out, sources, expr.right(), depth + 2);
+}
+
+void printAssignmentExpr(std::ostream& out, const SourceManager& sources, const ast::AssignmentExpr& expr,
+                          int depth) {
+    writeIndent(out, depth);
+    out << "AssignmentExpr\n";
+
+    writeIndent(out, depth + 1);
+    out << "Target\n";
+    printExpr(out, sources, expr.target(), depth + 2);
+
+    writeIndent(out, depth + 1);
+    out << "Value\n";
+    printExpr(out, sources, expr.value(), depth + 2);
+}
+
 // No `default:` case: ExprKind is fully implemented today, so -Wswitch
 // should catch a forgotten case the moment a new ExprKind is added.
 void printExpr(std::ostream& out, const SourceManager& sources, const ast::Expr& expr, int depth) {
@@ -129,6 +229,15 @@ void printExpr(std::ostream& out, const SourceManager& sources, const ast::Expr&
             return;
         case ast::ExprKind::Paren:
             printParenExpr(out, sources, static_cast<const ast::ParenExpr&>(expr), depth);
+            return;
+        case ast::ExprKind::Unary:
+            printUnaryExpr(out, sources, static_cast<const ast::UnaryExpr&>(expr), depth);
+            return;
+        case ast::ExprKind::Binary:
+            printBinaryExpr(out, sources, static_cast<const ast::BinaryExpr&>(expr), depth);
+            return;
+        case ast::ExprKind::Assignment:
+            printAssignmentExpr(out, sources, static_cast<const ast::AssignmentExpr&>(expr), depth);
             return;
     }
 }
@@ -147,6 +256,33 @@ void printExprStmt(std::ostream& out, const SourceManager& sources, const ast::E
     printExpr(out, sources, stmt.expr(), depth + 1);
 }
 
+void printVarDeclStmt(std::ostream& out, const SourceManager& sources, const ast::VarDeclStmt& stmt, int depth) {
+    writeIndent(out, depth);
+    out << "VarDeclStmt binding=" << bindingKindName(stmt.binding())
+        << " name=" << wrapInQuotes(sources.text(stmt.name().span)) << '\n';
+
+    if (const ast::TypeSyntax* type = stmt.type(); type != nullptr) {
+        writeIndent(out, depth + 1);
+        out << "Type\n";
+        printTypeSyntax(out, sources, *type, depth + 2);
+    }
+
+    writeIndent(out, depth + 1);
+    out << "Initializer\n";
+    printExpr(out, sources, stmt.initializer(), depth + 2);
+}
+
+void printReturnStmt(std::ostream& out, const SourceManager& sources, const ast::ReturnStmt& stmt, int depth) {
+    writeIndent(out, depth);
+    out << "ReturnStmt\n";
+
+    if (const ast::Expr* value = stmt.value(); value != nullptr) {
+        writeIndent(out, depth + 1);
+        out << "Value\n";
+        printExpr(out, sources, *value, depth + 2);
+    }
+}
+
 // No `default:` case: StmtKind is fully implemented today.
 void printStmt(std::ostream& out, const SourceManager& sources, const ast::Stmt& stmt, int depth) {
     switch (stmt.kind()) {
@@ -155,6 +291,12 @@ void printStmt(std::ostream& out, const SourceManager& sources, const ast::Stmt&
             return;
         case ast::StmtKind::Expr:
             printExprStmt(out, sources, static_cast<const ast::ExprStmt&>(stmt), depth);
+            return;
+        case ast::StmtKind::VarDecl:
+            printVarDeclStmt(out, sources, static_cast<const ast::VarDeclStmt&>(stmt), depth);
+            return;
+        case ast::StmtKind::Return:
+            printReturnStmt(out, sources, static_cast<const ast::ReturnStmt&>(stmt), depth);
             return;
     }
 }

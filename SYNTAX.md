@@ -154,6 +154,19 @@ Logical:
     ||
     !
 
+Reference:
+
+    &
+    &mut
+
+See GRAMMAR.md §14 (reference types) and §35 (unary expressions).
+
+Range:
+
+    ..
+
+See GRAMMAR.md §32. The upper bound is exclusive.
+
 Assignment:
 
     =

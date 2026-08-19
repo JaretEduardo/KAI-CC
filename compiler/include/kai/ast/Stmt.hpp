@@ -2,6 +2,7 @@
 
 #include "kai/ast/Expr.hpp"
 #include "kai/ast/Node.hpp"
+#include "kai/ast/TypeSyntax.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -10,11 +11,12 @@
 namespace kai::ast {
 
 /// This vocabulary covers only the Stmt node kinds implemented so far.
-/// Extend it as later parser milestones add VarDeclStmt, ReturnStmt,
-/// IfStmt, WhileStmt, ForStmt.
+/// Extend it as later parser milestones add IfStmt, WhileStmt, ForStmt.
 enum class StmtKind : std::uint8_t {
     Block,
     Expr,
+    VarDecl,
+    Return,
 };
 
 /// Base class for every statement syntax node.
@@ -54,6 +56,58 @@ public:
 
 private:
     ExprPtr expr_;
+};
+
+/// Whether a VarDeclStmt was introduced with `let` (Immutable) or `mut`
+/// (Mutable). One node covers both, rather than separate LetStmt/MutStmt
+/// classes - the two forms differ only in this flag (GRAMMAR.md §21).
+enum class BindingKind : std::uint8_t {
+    Immutable,
+    Mutable,
+};
+
+/// A variable declaration: `let name [: type] = initializer` or
+/// `mut name [: type] = initializer`. The initializer is grammatically
+/// required (GRAMMAR.md §21); the type annotation is optional. Neither
+/// the type annotation nor the initializer is validated against the
+/// other here - that is semantic analysis's job, not the parser's.
+class VarDeclStmt final : public Stmt {
+public:
+    VarDeclStmt(BindingKind binding, Identifier name, TypeSyntaxPtr type, ExprPtr initializer,
+                SourceSpan span) noexcept
+        : Stmt(StmtKind::VarDecl, span),
+          binding_(binding),
+          name_(name),
+          type_(std::move(type)),
+          initializer_(std::move(initializer)) {}
+
+    BindingKind binding() const noexcept { return binding_; }
+    const Identifier& name() const noexcept { return name_; }
+
+    /// nullptr when the declaration has no `: type` annotation
+    /// (GRAMMAR.md §21: the annotation is optional).
+    const TypeSyntax* type() const noexcept { return type_.get(); }
+
+    const Expr& initializer() const noexcept { return *initializer_; }
+
+private:
+    BindingKind binding_;
+    Identifier name_;
+    TypeSyntaxPtr type_;
+    ExprPtr initializer_;
+};
+
+/// A `return` statement: `return` or `return expression`
+/// (GRAMMAR.md §22).
+class ReturnStmt final : public Stmt {
+public:
+    ReturnStmt(ExprPtr value, SourceSpan span) noexcept : Stmt(StmtKind::Return, span), value_(std::move(value)) {}
+
+    /// nullptr for a bare `return` with no expression.
+    const Expr* value() const noexcept { return value_.get(); }
+
+private:
+    ExprPtr value_;
 };
 
 } // namespace kai::ast
