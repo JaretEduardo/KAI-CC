@@ -212,7 +212,11 @@ ParseResult<ast::StmtPtr> Parser::parseStatement() {
     switch (current().kind()) {
         case TokenKind::KwLet:
         case TokenKind::KwMut:
+            return parseVarDeclStmt();
+
         case TokenKind::KwReturn:
+            return parseReturnStmt();
+
         case TokenKind::KwIf:
         case TokenKind::KwWhile:
         case TokenKind::KwFor:
@@ -238,38 +242,329 @@ ParseResult<ast::StmtPtr> Parser::parseStatement() {
     return stmt;
 }
 
-// --- expressions ---
+ParseResult<ast::StmtPtr> Parser::parseVarDeclStmt() {
+    const bool isMutable = check(TokenKind::KwMut);
+    auto keywordTok = isMutable ? expect(TokenKind::KwMut) : expect(TokenKind::KwLet);
+    if (!keywordTok) {
+        return std::unexpected(keywordTok.error());
+    }
 
-ParseResult<ast::ExprPtr> Parser::parseExpression() {
-    auto expr = parsePostfixExpression();
-    if (!expr) {
+    auto nameTok = expect(TokenKind::Identifier);
+    if (!nameTok) {
+        return std::unexpected(nameTok.error());
+    }
+
+    ast::TypeSyntaxPtr type;
+    if (match(TokenKind::Colon)) {
+        auto parsedType = parseTypeSyntax();
+        if (!parsedType) {
+            return std::unexpected(parsedType.error());
+        }
+        type = std::move(*parsedType);
+    }
+
+    if (auto eq = expect(TokenKind::Equal); !eq) {
+        return std::unexpected(eq.error());
+    }
+
+    // The initializer is grammatically required (GRAMMAR.md §21). Its
+    // value is never checked against the type annotation here - that is
+    // semantic analysis's job, not the parser's.
+    auto initializer = parseExpression();
+    if (!initializer) {
+        return std::unexpected(initializer.error());
+    }
+
+    if (!check(TokenKind::Newline) && !check(TokenKind::Semicolon) && !check(TokenKind::RightBrace) &&
+        !check(TokenKind::EndOfFile)) {
+        return fail(ParseErrorKind::UnexpectedToken);
+    }
+
+    const ast::BindingKind binding = isMutable ? ast::BindingKind::Mutable : ast::BindingKind::Immutable;
+    const SourceSpan span(keywordTok->span().begin(), (*initializer)->span().end());
+    ast::StmtPtr stmt = std::make_unique<ast::VarDeclStmt>(binding, ast::Identifier{nameTok->span()}, std::move(type),
+                                                            std::move(*initializer), span);
+    return stmt;
+}
+
+ParseResult<ast::StmtPtr> Parser::parseReturnStmt() {
+    auto returnTok = expect(TokenKind::KwReturn);
+    if (!returnTok) {
+        return std::unexpected(returnTok.error());
+    }
+
+    ast::ExprPtr value;
+    SourceLocation end = returnTok->span().end();
+
+    // A terminator immediately after `return` means a bare return; this
+    // lookahead happens before attempting to parse an expression at all,
+    // so `return\nvalue` correctly becomes two statements rather than
+    // `return value`.
+    const bool atTerminator = check(TokenKind::Newline) || check(TokenKind::Semicolon) ||
+                               check(TokenKind::RightBrace) || check(TokenKind::EndOfFile);
+    if (!atTerminator) {
+        auto expr = parseExpression();
+        if (!expr) {
+            return std::unexpected(expr.error());
+        }
+        value = std::move(*expr);
+        end = value->span().end();
+    }
+
+    if (!check(TokenKind::Newline) && !check(TokenKind::Semicolon) && !check(TokenKind::RightBrace) &&
+        !check(TokenKind::EndOfFile)) {
+        return fail(ParseErrorKind::UnexpectedToken);
+    }
+
+    const SourceSpan span(returnTok->span().begin(), end);
+    ast::StmtPtr stmt = std::make_unique<ast::ReturnStmt>(std::move(value), span);
+    return stmt;
+}
+
+// --- expressions ---
+//
+// Precedence ladder, lowest to highest (GRAMMAR.md §26-41). Each tier is
+// a plain recursive-descent function; left-associative tiers loop,
+// assignment/unary recurse on themselves (right-associative/prefix), and
+// range parses at most one ".." (GRAMMAR.md §32 uses "[...]", not
+// "{...}").
+
+ParseResult<ast::ExprPtr> Parser::parseExpression() { return parseAssignment(); }
+
+ParseResult<ast::ExprPtr> Parser::parseAssignment() {
+    auto left = parseLogicalOr();
+    if (!left) {
+        return left;
+    }
+
+    if (check(TokenKind::Equal)) {
+        const Token eqTok = advance();
+        auto value = parseAssignment(); // right-associative
+        if (!value) {
+            return value;
+        }
+
+        const SourceSpan span((*left)->span().begin(), (*value)->span().end());
+        ast::ExprPtr expr =
+            std::make_unique<ast::AssignmentExpr>(std::move(*left), eqTok.span(), std::move(*value), span);
         return expr;
     }
 
-    switch (current().kind()) {
-        case TokenKind::Equal:
-        case TokenKind::PipePipe:
-        case TokenKind::AmpAmp:
-        case TokenKind::EqualEqual:
-        case TokenKind::BangEqual:
-        case TokenKind::Less:
-        case TokenKind::LessEqual:
-        case TokenKind::Greater:
-        case TokenKind::GreaterEqual:
-        case TokenKind::DotDot:
-        case TokenKind::Plus:
-        case TokenKind::Minus:
-        case TokenKind::Star:
-        case TokenKind::Slash:
-        case TokenKind::Percent:
-            // Valid GRAMMAR.md binary/assignment operators - no
-            // BinaryExpr/AssignmentExpr node yet in this milestone's
-            // AST.
-            return fail(ParseErrorKind::UnsupportedSyntax);
-        default:
-            break;
+    return left;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseLogicalOr() {
+    auto left = parseLogicalAnd();
+    if (!left) {
+        return left;
     }
 
+    while (check(TokenKind::PipePipe)) {
+        const Token opTok = advance();
+        auto right = parseLogicalAnd();
+        if (!right) {
+            return right;
+        }
+
+        const SourceSpan span((*left)->span().begin(), (*right)->span().end());
+        ast::ExprPtr expr = std::make_unique<ast::BinaryExpr>(ast::BinaryOperator::Or, opTok.span(),
+                                                                std::move(*left), std::move(*right), span);
+        left = std::move(expr);
+    }
+
+    return left;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseLogicalAnd() {
+    auto left = parseEquality();
+    if (!left) {
+        return left;
+    }
+
+    while (check(TokenKind::AmpAmp)) {
+        const Token opTok = advance();
+        auto right = parseEquality();
+        if (!right) {
+            return right;
+        }
+
+        const SourceSpan span((*left)->span().begin(), (*right)->span().end());
+        ast::ExprPtr expr = std::make_unique<ast::BinaryExpr>(ast::BinaryOperator::And, opTok.span(),
+                                                                std::move(*left), std::move(*right), span);
+        left = std::move(expr);
+    }
+
+    return left;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseEquality() {
+    auto left = parseComparison();
+    if (!left) {
+        return left;
+    }
+
+    while (check(TokenKind::EqualEqual) || check(TokenKind::BangEqual)) {
+        const Token opTok = advance();
+        const ast::BinaryOperator op =
+            opTok.kind() == TokenKind::EqualEqual ? ast::BinaryOperator::Equal : ast::BinaryOperator::NotEqual;
+
+        auto right = parseComparison();
+        if (!right) {
+            return right;
+        }
+
+        const SourceSpan span((*left)->span().begin(), (*right)->span().end());
+        ast::ExprPtr expr =
+            std::make_unique<ast::BinaryExpr>(op, opTok.span(), std::move(*left), std::move(*right), span);
+        left = std::move(expr);
+    }
+
+    return left;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseComparison() {
+    auto left = parseRange();
+    if (!left) {
+        return left;
+    }
+
+    while (check(TokenKind::Less) || check(TokenKind::LessEqual) || check(TokenKind::Greater) ||
+           check(TokenKind::GreaterEqual)) {
+        const Token opTok = advance();
+        ast::BinaryOperator op = ast::BinaryOperator::Less;
+        if (opTok.kind() == TokenKind::LessEqual) {
+            op = ast::BinaryOperator::LessEqual;
+        } else if (opTok.kind() == TokenKind::Greater) {
+            op = ast::BinaryOperator::Greater;
+        } else if (opTok.kind() == TokenKind::GreaterEqual) {
+            op = ast::BinaryOperator::GreaterEqual;
+        }
+
+        auto right = parseRange();
+        if (!right) {
+            return right;
+        }
+
+        const SourceSpan span((*left)->span().begin(), (*right)->span().end());
+        ast::ExprPtr expr =
+            std::make_unique<ast::BinaryExpr>(op, opTok.span(), std::move(*left), std::move(*right), span);
+        left = std::move(expr);
+    }
+
+    return left;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseRange() {
+    auto left = parseAdditive();
+    if (!left) {
+        return left;
+    }
+
+    if (check(TokenKind::DotDot)) {
+        const Token opTok = advance();
+        auto right = parseAdditive();
+        if (!right) {
+            return right;
+        }
+
+        const SourceSpan span((*left)->span().begin(), (*right)->span().end());
+        ast::ExprPtr expr = std::make_unique<ast::BinaryExpr>(ast::BinaryOperator::Range, opTok.span(),
+                                                                std::move(*left), std::move(*right), span);
+        return expr;
+    }
+
+    return left;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseAdditive() {
+    auto left = parseMultiplicative();
+    if (!left) {
+        return left;
+    }
+
+    while (check(TokenKind::Plus) || check(TokenKind::Minus)) {
+        const Token opTok = advance();
+        const ast::BinaryOperator op =
+            opTok.kind() == TokenKind::Plus ? ast::BinaryOperator::Add : ast::BinaryOperator::Subtract;
+
+        auto right = parseMultiplicative();
+        if (!right) {
+            return right;
+        }
+
+        const SourceSpan span((*left)->span().begin(), (*right)->span().end());
+        ast::ExprPtr expr =
+            std::make_unique<ast::BinaryExpr>(op, opTok.span(), std::move(*left), std::move(*right), span);
+        left = std::move(expr);
+    }
+
+    return left;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseMultiplicative() {
+    auto left = parseUnary();
+    if (!left) {
+        return left;
+    }
+
+    while (check(TokenKind::Star) || check(TokenKind::Slash) || check(TokenKind::Percent)) {
+        const Token opTok = advance();
+        ast::BinaryOperator op = ast::BinaryOperator::Multiply;
+        if (opTok.kind() == TokenKind::Slash) {
+            op = ast::BinaryOperator::Divide;
+        } else if (opTok.kind() == TokenKind::Percent) {
+            op = ast::BinaryOperator::Modulo;
+        }
+
+        auto right = parseUnary();
+        if (!right) {
+            return right;
+        }
+
+        const SourceSpan span((*left)->span().begin(), (*right)->span().end());
+        ast::ExprPtr expr =
+            std::make_unique<ast::BinaryExpr>(op, opTok.span(), std::move(*left), std::move(*right), span);
+        left = std::move(expr);
+    }
+
+    return left;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseUnary() {
+    if (!check(TokenKind::Bang) && !check(TokenKind::Minus) && !check(TokenKind::Amp)) {
+        return parsePostfixExpression();
+    }
+
+    const Token opTok = advance();
+    ast::UnaryOperator op = ast::UnaryOperator::Not;
+    SourceSpan operatorSpan = opTok.span();
+
+    if (opTok.kind() == TokenKind::Bang) {
+        op = ast::UnaryOperator::Not;
+    } else if (opTok.kind() == TokenKind::Minus) {
+        op = ast::UnaryOperator::Negate;
+    } else {
+        // TokenKind::Amp. `&mut` and `& mut` both tokenize as Amp then
+        // KwMut - whitespace between them is not significant - so both
+        // spellings are accepted here identically. `&&x` lexes as a
+        // single AmpAmp token (logical-and), never as two Amp tokens, so
+        // it never reaches this branch as `& &x` would.
+        if (check(TokenKind::KwMut)) {
+            const Token mutTok = advance();
+            op = ast::UnaryOperator::RefMut;
+            operatorSpan = SourceSpan(opTok.span().begin(), mutTok.span().end());
+        } else {
+            op = ast::UnaryOperator::Ref;
+        }
+    }
+
+    auto operand = parseUnary(); // right-associative prefix
+    if (!operand) {
+        return operand;
+    }
+
+    const SourceSpan span(operatorSpan.begin(), (*operand)->span().end());
+    ast::ExprPtr expr = std::make_unique<ast::UnaryExpr>(op, operatorSpan, std::move(*operand), span);
     return expr;
 }
 
@@ -337,10 +632,9 @@ ParseResult<ast::ExprPtr> Parser::parsePrimary() {
         case TokenKind::LeftParen:
             return parseParenExpression();
 
-        case TokenKind::Bang:
-        case TokenKind::Minus:
-        case TokenKind::Amp:
-            // Valid GRAMMAR.md unary operators - no UnaryExpr node yet.
+        case TokenKind::LeftBracket:
+            // `[1, 2, 3]` array-literal syntax (GRAMMAR.md §41/§42) is
+            // valid grammar with no ArrayLiteralExpr node yet.
             return fail(ParseErrorKind::UnsupportedSyntax);
 
         default:

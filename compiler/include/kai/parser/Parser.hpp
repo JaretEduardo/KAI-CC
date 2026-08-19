@@ -21,14 +21,23 @@ namespace kai::parser {
 /// The initial KAI recursive-descent parser.
 ///
 /// Parses one file's token stream into the existing syntax AST
-/// (kai::ast). This first milestone recognizes only enough grammar to
-/// represent function declarations with a comma-separated, named-type-
-/// only parameter list, an optional named return type, and a body made
-/// of expression statements built from literals, identifiers, calls,
-/// and parenthesized expressions - enough for:
+/// (kai::ast). Recognizes function declarations with a comma-separated,
+/// named-type-only parameter list and an optional named return type;
+/// `let`/`mut` variable declarations and `return` statements; and the
+/// full expression precedence ladder (assignment, logical or/and,
+/// equality, comparison, range, additive, multiplicative, unary, and
+/// postfix/primary) built from literals, identifiers, calls, and
+/// parenthesized expressions - enough for:
+///
+///     fn add(a: i32, b: i32) -> i32 {
+///         return a + b
+///     }
 ///
 ///     fn main() {
-///         print("Hello from KAI")
+///         let x = 20
+///         mut y = 22
+///         y = y + x
+///         print(y)
 ///     }
 ///
 /// Parser recognizes syntax only: it performs no semantic analysis, no
@@ -90,9 +99,24 @@ private:
     // --- statements ---
     ParseResult<ast::BlockPtr> parseBlock();
     ParseResult<ast::StmtPtr> parseStatement();
+    ParseResult<ast::StmtPtr> parseVarDeclStmt();
+    ParseResult<ast::StmtPtr> parseReturnStmt();
 
     // --- expressions ---
+    // Precedence ladder, lowest to highest (GRAMMAR.md §26-41), each tier
+    // a plain recursive-descent function - no Pratt/precedence-table
+    // machinery. parseExpression is the single entry point; every other
+    // tier is reached only by the one above it.
     ParseResult<ast::ExprPtr> parseExpression();
+    ParseResult<ast::ExprPtr> parseAssignment();
+    ParseResult<ast::ExprPtr> parseLogicalOr();
+    ParseResult<ast::ExprPtr> parseLogicalAnd();
+    ParseResult<ast::ExprPtr> parseEquality();
+    ParseResult<ast::ExprPtr> parseComparison();
+    ParseResult<ast::ExprPtr> parseRange();
+    ParseResult<ast::ExprPtr> parseAdditive();
+    ParseResult<ast::ExprPtr> parseMultiplicative();
+    ParseResult<ast::ExprPtr> parseUnary();
     ParseResult<ast::ExprPtr> parsePostfixExpression();
     ParseResult<ast::ExprPtr> parsePrimary();
     ParseResult<ast::ExprPtr> parseParenExpression();
