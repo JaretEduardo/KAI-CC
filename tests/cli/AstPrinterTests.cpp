@@ -32,12 +32,16 @@ using kai::ast::BindingKind;
 using kai::ast::BlockPtr;
 using kai::ast::BlockStmt;
 using kai::ast::DeclPtr;
+using kai::ast::ElseClause;
 using kai::ast::Expr;
 using kai::ast::ExprPtr;
 using kai::ast::ExprStmt;
+using kai::ast::ForStmt;
 using kai::ast::FunctionDecl;
 using kai::ast::Identifier;
 using kai::ast::IdentifierExpr;
+using kai::ast::IfBranch;
+using kai::ast::IfStmt;
 using kai::ast::LiteralExpr;
 using kai::ast::LiteralKind;
 using kai::ast::NamedTypeSyntax;
@@ -49,6 +53,7 @@ using kai::ast::TypeSyntaxPtr;
 using kai::ast::UnaryExpr;
 using kai::ast::UnaryOperator;
 using kai::ast::VarDeclStmt;
+using kai::ast::WhileStmt;
 using kai::cli::escapeLexeme;
 using kai::cli::formatParseError;
 using kai::cli::printAst;
@@ -545,6 +550,202 @@ void testParenExprRemainsVisible() {
     KAI_CHECK(parenPos < callPos);
 }
 
+// --- control flow (Parser does not build these node kinds yet, so
+// these are hand-built like the rest of this section) ---
+
+BlockPtr emptyBlock(SourceSpan span) { return std::make_unique<BlockStmt>(std::vector<StmtPtr>{}, span); }
+
+// Builds an expected-output line's leading indentation without hand-
+// counting spaces (a real risk in these deeply-nested control-flow
+// trees) - computed the same way AstPrinter's own writeIndent() does,
+// so an exact string comparison is still a genuine byte-exact check.
+std::string indent(int depth) {
+    std::string result;
+    for (int i = 0; i < depth; ++i) {
+        result += "  ";
+    }
+    return result;
+}
+
+void testIfStmtSimpleExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "if true {}");
+    const SourceSpan condSpan = spanOf(file, 3, 7); // true
+    const SourceSpan bodySpan = spanOf(file, 8, 10); // {}
+    const SourceSpan branchSpan = spanOf(file, 0, 10);
+
+    std::vector<IfBranch> branches;
+    branches.push_back(
+        IfBranch{std::make_unique<LiteralExpr>(LiteralKind::Bool, condSpan), emptyBlock(bodySpan), branchSpan});
+    StmtPtr stmt = std::make_unique<IfStmt>(std::move(branches), std::nullopt, branchSpan);
+
+    const std::string text = printStatement(sm, file, branchSpan, std::move(stmt));
+
+    // Depth accounting: SourceFile(0) -> FunctionDecl(1) -> BlockStmt(2)
+    // -> IfStmt(3) -> Branch(4) -> Condition/Body(5) -> LiteralExpr /
+    // BlockStmt(6).
+    const std::string expected = indent(3) + "IfStmt\n" +                                //
+                                  indent(4) + "Branch kind=If\n" +                        //
+                                  indent(5) + "Condition\n" +                             //
+                                  indent(6) + "LiteralExpr kind=Bool lexeme=\"true\"\n" + //
+                                  indent(5) + "Body\n" +                                  //
+                                  indent(6) + "BlockStmt\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testIfElseIfElseExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "if a {} else if b {} else {}");
+
+    const SourceSpan cond0 = spanOf(file, 3, 4);    // a
+    const SourceSpan body0 = spanOf(file, 5, 7);    // {}
+    const SourceSpan branch0 = spanOf(file, 0, 7);  // if a {}
+    const SourceSpan cond1 = spanOf(file, 16, 17);  // b
+    const SourceSpan body1 = spanOf(file, 18, 20);  // {}
+    const SourceSpan branch1 = spanOf(file, 8, 20); // else if b {}
+    const SourceSpan elseBody = spanOf(file, 26, 28);
+    const SourceSpan elseSpan = spanOf(file, 21, 28); // else {}
+    const SourceSpan fullSpan = spanOf(file, 0, 28);
+
+    std::vector<IfBranch> branches;
+    branches.push_back(
+        IfBranch{std::make_unique<IdentifierExpr>(Identifier{cond0}, cond0), emptyBlock(body0), branch0});
+    branches.push_back(
+        IfBranch{std::make_unique<IdentifierExpr>(Identifier{cond1}, cond1), emptyBlock(body1), branch1});
+    ElseClause elseClause{emptyBlock(elseBody), elseSpan};
+    StmtPtr stmt = std::make_unique<IfStmt>(std::move(branches), std::move(elseClause), fullSpan);
+
+    const std::string text = printStatement(sm, file, fullSpan, std::move(stmt));
+
+    const std::string expected = indent(3) + "IfStmt\n" +                       //
+                                  indent(4) + "Branch kind=If\n" +              //
+                                  indent(5) + "Condition\n" +                   //
+                                  indent(6) + "IdentifierExpr name=\"a\"\n" +   //
+                                  indent(5) + "Body\n" +                       //
+                                  indent(6) + "BlockStmt\n" +                  //
+                                  indent(4) + "Branch kind=ElseIf\n" +          //
+                                  indent(5) + "Condition\n" +                   //
+                                  indent(6) + "IdentifierExpr name=\"b\"\n" +   //
+                                  indent(5) + "Body\n" +                       //
+                                  indent(6) + "BlockStmt\n" +                  //
+                                  indent(4) + "Else\n" +                       //
+                                  indent(5) + "BlockStmt\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testWhileStmtExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "while a {}");
+    const SourceSpan condSpan = spanOf(file, 6, 7);
+    const SourceSpan bodySpan = spanOf(file, 8, 10);
+    const SourceSpan fullSpan = spanOf(file, 0, 10);
+
+    ExprPtr condition = std::make_unique<IdentifierExpr>(Identifier{condSpan}, condSpan);
+    StmtPtr stmt = std::make_unique<WhileStmt>(std::move(condition), emptyBlock(bodySpan), fullSpan);
+
+    const std::string text = printStatement(sm, file, fullSpan, std::move(stmt));
+
+    const std::string expected = indent(3) + "WhileStmt\n" +                    //
+                                  indent(4) + "Condition\n" +                    //
+                                  indent(5) + "IdentifierExpr name=\"a\"\n" +    //
+                                  indent(4) + "Body\n" +                        //
+                                  indent(5) + "BlockStmt\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testForStmtExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "for i in 0..10 {}");
+    const SourceSpan varSpan = spanOf(file, 4, 5);
+    const SourceSpan leftSpan = spanOf(file, 9, 10);
+    const SourceSpan opSpan = spanOf(file, 10, 12);
+    const SourceSpan rightSpan = spanOf(file, 12, 14);
+    const SourceSpan rangeSpan = spanOf(file, 9, 14);
+    const SourceSpan bodySpan = spanOf(file, 15, 17);
+    const SourceSpan fullSpan = spanOf(file, 0, 17);
+
+    ExprPtr left = std::make_unique<LiteralExpr>(LiteralKind::Integer, leftSpan);
+    ExprPtr right = std::make_unique<LiteralExpr>(LiteralKind::Integer, rightSpan);
+    ExprPtr iterable =
+        std::make_unique<BinaryExpr>(BinaryOperator::Range, opSpan, std::move(left), std::move(right), rangeSpan);
+    StmtPtr stmt = std::make_unique<ForStmt>(Identifier{varSpan}, std::move(iterable), emptyBlock(bodySpan), fullSpan);
+
+    const std::string text = printStatement(sm, file, fullSpan, std::move(stmt));
+
+    const std::string expected = indent(3) + "ForStmt variable=\"i\"\n" +                    //
+                                  indent(4) + "Iterable\n" +                                  //
+                                  indent(5) + "BinaryExpr op=Range\n" +                        //
+                                  indent(6) + "Left\n" +                                      //
+                                  indent(7) + "LiteralExpr kind=Integer lexeme=\"0\"\n" +      //
+                                  indent(6) + "Right\n" +                                      //
+                                  indent(7) + "LiteralExpr kind=Integer lexeme=\"10\"\n" +     //
+                                  indent(4) + "Body\n" +                                       //
+                                  indent(5) + "BlockStmt\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testNestedControlFlowExactRendering() {
+    // if a { while b { for c in d {} } }
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "if a { while b { for c in d {} } }");
+
+    const SourceSpan ifCond = spanOf(file, 3, 4);     // a
+    const SourceSpan whileCond = spanOf(file, 13, 14); // b
+    const SourceSpan forVar = spanOf(file, 21, 22);    // c
+    const SourceSpan forIterable = spanOf(file, 26, 27); // d
+    const SourceSpan forBody = spanOf(file, 28, 30);     // {}
+    const SourceSpan forSpan = spanOf(file, 17, 30);
+    const SourceSpan whileBody = spanOf(file, 15, 32);
+    const SourceSpan whileSpan = spanOf(file, 7, 32);
+    const SourceSpan ifBody = spanOf(file, 5, 34);
+    const SourceSpan ifBranchSpan = spanOf(file, 0, 34);
+
+    ExprPtr forIterableExpr = std::make_unique<IdentifierExpr>(Identifier{forIterable}, forIterable);
+    StmtPtr forStmt =
+        std::make_unique<ForStmt>(Identifier{forVar}, std::move(forIterableExpr), emptyBlock(forBody), forSpan);
+
+    std::vector<StmtPtr> whileStatements;
+    whileStatements.push_back(std::move(forStmt));
+    BlockPtr whileBlock = std::make_unique<BlockStmt>(std::move(whileStatements), whileBody);
+
+    ExprPtr whileCondExpr = std::make_unique<IdentifierExpr>(Identifier{whileCond}, whileCond);
+    StmtPtr whileStmt = std::make_unique<WhileStmt>(std::move(whileCondExpr), std::move(whileBlock), whileSpan);
+
+    std::vector<StmtPtr> ifStatements;
+    ifStatements.push_back(std::move(whileStmt));
+    BlockPtr ifBlock = std::make_unique<BlockStmt>(std::move(ifStatements), ifBody);
+
+    ExprPtr ifCondExpr = std::make_unique<IdentifierExpr>(Identifier{ifCond}, ifCond);
+    std::vector<IfBranch> branches;
+    branches.push_back(IfBranch{std::move(ifCondExpr), std::move(ifBlock), ifBranchSpan});
+    StmtPtr ifStmt = std::make_unique<IfStmt>(std::move(branches), std::nullopt, ifBranchSpan);
+
+    const std::string text = printStatement(sm, file, ifBranchSpan, std::move(ifStmt));
+
+    const std::string expected = indent(3) + "IfStmt\n" +                     //
+                                  indent(4) + "Branch kind=If\n" +            //
+                                  indent(5) + "Condition\n" +                  //
+                                  indent(6) + "IdentifierExpr name=\"a\"\n" + //
+                                  indent(5) + "Body\n" +                      //
+                                  indent(6) + "BlockStmt\n" +                 //
+                                  indent(7) + "WhileStmt\n" +                 //
+                                  indent(8) + "Condition\n" +                 //
+                                  indent(9) + "IdentifierExpr name=\"b\"\n" + //
+                                  indent(8) + "Body\n" +                      //
+                                  indent(9) + "BlockStmt\n" +                 //
+                                  indent(10) + "ForStmt variable=\"c\"\n" +   //
+                                  indent(11) + "Iterable\n" +                 //
+                                  indent(12) + "IdentifierExpr name=\"d\"\n" + //
+                                  indent(11) + "Body\n" +                     //
+                                  indent(12) + "BlockStmt\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
 // --- formatParseError ---
 
 ParseError parseError(SourceManager& sm, const std::string& source) {
@@ -698,6 +899,12 @@ int main() {
     testAssignmentExprRendering();
     testAssignmentExprRightAssociativeChainRendering();
     testVarDeclStmtWithBinaryInitializerExactShape();
+
+    testIfStmtSimpleExactRendering();
+    testIfElseIfElseExactRendering();
+    testWhileStmtExactRendering();
+    testForStmtExactRendering();
+    testNestedControlFlowExactRendering();
 
     testUnexpectedTokenWithoutExpected();
     testUnexpectedTokenWithExpected();

@@ -425,6 +425,29 @@ Example:
         print("other")
     }
 
+A completed `if`/`else if` block's closing `}` may be followed by one
+or more physical newlines before the `else` that continues the same
+if_statement:
+
+    if x > 0 {
+        print("positive")
+    }
+    else {
+        print("other")
+    }
+
+is equivalent to the single-line form above. An explicit semicolon may
+not appear in that position - a semicolon there ends the if_statement
+(with no else) rather than introducing one, consistent with a
+semicolon's role elsewhere in this grammar as an explicit statement
+separator (§6), not as internal if_statement syntax.
+
+This newline tolerance applies only between a branch's closing `}` and
+a following `else`. It is not a general newline allowance: the `if`,
+`while`, and `for` headers themselves (between the keyword and the
+condition, or around `in`) gain no additional newline tolerance from
+this rule.
+
 ---
 
 # 24. While Statement

@@ -8,6 +8,7 @@
 #include "kai/lexer/TokenKind.hpp"
 #include "kai/parser/Parser.hpp"
 
+#include <optional>
 #include <sstream>
 #include <string_view>
 
@@ -283,6 +284,68 @@ void printReturnStmt(std::ostream& out, const SourceManager& sources, const ast:
     }
 }
 
+// `kind=If`/`kind=ElseIf` is debugging output only, derived purely from
+// branch position (index 0 vs. later) - the AST itself has no
+// BranchKind, since vector order already fully disambiguates this the
+// same way CallExpr/BinaryExpr/AssignmentExpr already rely on child
+// position rather than a labeling field.
+void printIfBranch(std::ostream& out, const SourceManager& sources, const ast::IfBranch& branch, bool isInitial,
+                    int depth) {
+    writeIndent(out, depth);
+    out << "Branch kind=" << (isInitial ? "If" : "ElseIf") << '\n';
+
+    writeIndent(out, depth + 1);
+    out << "Condition\n";
+    printExpr(out, sources, *branch.condition, depth + 2);
+
+    writeIndent(out, depth + 1);
+    out << "Body\n";
+    printBlockStmt(out, sources, *branch.body, depth + 2);
+}
+
+void printIfStmt(std::ostream& out, const SourceManager& sources, const ast::IfStmt& stmt, int depth) {
+    writeIndent(out, depth);
+    out << "IfStmt\n";
+
+    bool isInitial = true;
+    for (const ast::IfBranch& branch : stmt.branches()) {
+        printIfBranch(out, sources, branch, isInitial, depth + 1);
+        isInitial = false;
+    }
+
+    if (const std::optional<ast::ElseClause>& elseClause = stmt.elseClause(); elseClause.has_value()) {
+        writeIndent(out, depth + 1);
+        out << "Else\n";
+        printBlockStmt(out, sources, *elseClause->body, depth + 2);
+    }
+}
+
+void printWhileStmt(std::ostream& out, const SourceManager& sources, const ast::WhileStmt& stmt, int depth) {
+    writeIndent(out, depth);
+    out << "WhileStmt\n";
+
+    writeIndent(out, depth + 1);
+    out << "Condition\n";
+    printExpr(out, sources, stmt.condition(), depth + 2);
+
+    writeIndent(out, depth + 1);
+    out << "Body\n";
+    printBlockStmt(out, sources, stmt.body(), depth + 2);
+}
+
+void printForStmt(std::ostream& out, const SourceManager& sources, const ast::ForStmt& stmt, int depth) {
+    writeIndent(out, depth);
+    out << "ForStmt variable=" << wrapInQuotes(sources.text(stmt.variable().span)) << '\n';
+
+    writeIndent(out, depth + 1);
+    out << "Iterable\n";
+    printExpr(out, sources, stmt.iterable(), depth + 2);
+
+    writeIndent(out, depth + 1);
+    out << "Body\n";
+    printBlockStmt(out, sources, stmt.body(), depth + 2);
+}
+
 // No `default:` case: StmtKind is fully implemented today.
 void printStmt(std::ostream& out, const SourceManager& sources, const ast::Stmt& stmt, int depth) {
     switch (stmt.kind()) {
@@ -297,6 +360,15 @@ void printStmt(std::ostream& out, const SourceManager& sources, const ast::Stmt&
             return;
         case ast::StmtKind::Return:
             printReturnStmt(out, sources, static_cast<const ast::ReturnStmt&>(stmt), depth);
+            return;
+        case ast::StmtKind::If:
+            printIfStmt(out, sources, static_cast<const ast::IfStmt&>(stmt), depth);
+            return;
+        case ast::StmtKind::While:
+            printWhileStmt(out, sources, static_cast<const ast::WhileStmt&>(stmt), depth);
+            return;
+        case ast::StmtKind::For:
+            printForStmt(out, sources, static_cast<const ast::ForStmt&>(stmt), depth);
             return;
     }
 }
