@@ -255,6 +255,7 @@ Initial grammar:
         | named_type
         | reference_type
         | array_type
+        | slice_type
         | generic_type
         | unit_type
 
@@ -318,17 +319,20 @@ Example:
 
 # 16. Slice Type
 
-Slices appear through references:
+    slice_type =
+        "[" type "]"
+
+Slices most commonly appear through references:
 
     &[T]
     &mut [T]
 
-Conceptual grammar extension:
-
-    slice_type =
-        "[" type "]"
-
-A bare slice type cannot normally exist as a local owned value.
+`[T]` is real slice type syntax and is part of the `type` production
+(see §11): the parser accepts it wherever a `type` is expected,
+including bare (non-referenced) occurrences. A bare slice type cannot
+normally exist as a local owned value, but that restriction is a
+semantic-analysis concern, not a parsing concern — the parser does not
+reject a bare `[T]` itself.
 
 ---
 
@@ -420,6 +424,29 @@ Example:
     } else {
         print("other")
     }
+
+A completed `if`/`else if` block's closing `}` may be followed by one
+or more physical newlines before the `else` that continues the same
+if_statement:
+
+    if x > 0 {
+        print("positive")
+    }
+    else {
+        print("other")
+    }
+
+is equivalent to the single-line form above. An explicit semicolon may
+not appear in that position - a semicolon there ends the if_statement
+(with no else) rather than introducing one, consistent with a
+semicolon's role elsewhere in this grammar as an explicit statement
+separator (§6), not as internal if_statement syntax.
+
+This newline tolerance applies only between a branch's closing `}` and
+a following `else`. It is not a general newline allowance: the `if`,
+`while`, and `for` headers themselves (between the keyword and the
+condition, or around `in`) gain no additional newline tolerance from
+this rule.
 
 ---
 
@@ -742,6 +769,7 @@ Generic enum declaration grammar will be finalized when user-defined generics ar
 # 46. Imports
 
     import_declaration =
+        [ "pub" ]
         "use"
         module_path
         [ "as" identifier ]
@@ -754,6 +782,9 @@ Examples:
     use std.io
     use net.http.Server
     use database.postgres as pg
+    pub use parser.Parser
+
+A leading `pub` re-exports the imported name from the current module.
 
 ---
 
@@ -764,6 +795,7 @@ Examples:
     fn
     struct
     enum
+    use
 
 and struct fields.
 

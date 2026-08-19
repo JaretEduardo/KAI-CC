@@ -39,6 +39,7 @@ add_library(kai_compiler STATIC
     compiler/src/source/SourceManager.cpp
     compiler/src/lexer/TokenKind.cpp
     compiler/src/lexer/Lexer.cpp
+    compiler/src/parser/Parser.cpp
 )
 
 # Public compiler headers
@@ -56,6 +57,7 @@ kai_enable_warnings(kai_compiler)
 # strictly kaicc -> kaicc_cli -> kai_compiler, never the reverse.
 add_library(kaicc_cli STATIC
     compiler/src/cli/TokenPrinter.cpp
+    compiler/src/cli/AstPrinter.cpp
 )
 
 target_include_directories(kaicc_cli

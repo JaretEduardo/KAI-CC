@@ -154,6 +154,19 @@ Logical:
     ||
     !
 
+Reference:
+
+    &
+    &mut
+
+See GRAMMAR.md §14 (reference types) and §35 (unary expressions).
+
+Range:
+
+    ..
+
+See GRAMMAR.md §32. The upper bound is exclusive.
+
 Assignment:
 
     =
@@ -290,10 +303,12 @@ Construction syntax is still under design.
 Possible direction:
 
     let user = User {
-        id: 1
-        name: "Jaret"
+        id: 1,
+        name: "Jaret",
         active: true
     }
+
+Struct literal fields are comma-separated (see GRAMMAR.md §44).
 
 ---
 
