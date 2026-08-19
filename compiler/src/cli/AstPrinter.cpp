@@ -125,25 +125,86 @@ std::string_view binaryOperatorName(ast::BinaryOperator op) {
 
 void printExpr(std::ostream& out, const SourceManager& sources, const ast::Expr& expr, int depth);
 void printStmt(std::ostream& out, const SourceManager& sources, const ast::Stmt& stmt, int depth);
+void printTypeSyntax(std::ostream& out, const SourceManager& sources, const ast::TypeSyntax& type, int depth);
 
-// TypeSyntaxKind reserves five kinds (Reference, Array, Slice, Unit,
-// Generic) with no concrete node yet - only NamedTypeSyntax exists. The
-// current Parser can only ever construct a NamedTypeSyntax (every other
-// form fails to parse before reaching that point), so this path is an
-// internal-invariant check, not reachable grammar. Deliberately not an
-// exhaustive switch: that would either fabricate output for node kinds
-// that don't exist yet, or need a `default:` that defeats -Wswitch once
-// they do.
-void printTypeSyntax(std::ostream& out, const SourceManager& sources, const ast::TypeSyntax& type, int depth) {
+void printNamedTypeSyntax(std::ostream& out, const SourceManager& sources, const ast::NamedTypeSyntax& type,
+                           int depth) {
     writeIndent(out, depth);
+    out << "NamedTypeSyntax name=" << wrapInQuotes(sources.text(type.name().span)) << '\n';
+}
 
-    if (type.kind() != ast::TypeSyntaxKind::Named) {
-        out << "TypeSyntax <unimplemented-kind>\n";
-        return;
+// No `default:` case, same idiom as the other kind-name helpers.
+std::string_view referenceMutabilityName(ast::ReferenceMutability mutability) {
+    switch (mutability) {
+        case ast::ReferenceMutability::Immutable:
+            return "Immutable";
+        case ast::ReferenceMutability::Mutable:
+            return "Mutable";
     }
 
-    const auto& named = static_cast<const ast::NamedTypeSyntax&>(type);
-    out << "NamedTypeSyntax name=" << wrapInQuotes(sources.text(named.name().span)) << '\n';
+    return "Unknown";
+}
+
+void printReferenceTypeSyntax(std::ostream& out, const SourceManager& sources, const ast::ReferenceTypeSyntax& type,
+                               int depth) {
+    writeIndent(out, depth);
+    out << "ReferenceTypeSyntax mutability=" << referenceMutabilityName(type.mutability()) << '\n';
+
+    writeIndent(out, depth + 1);
+    out << "Referent\n";
+    printTypeSyntax(out, sources, type.referent(), depth + 2);
+}
+
+void printSliceTypeSyntax(std::ostream& out, const SourceManager& sources, const ast::SliceTypeSyntax& type,
+                           int depth) {
+    writeIndent(out, depth);
+    out << "SliceTypeSyntax\n";
+
+    writeIndent(out, depth + 1);
+    out << "Element\n";
+    printTypeSyntax(out, sources, type.element(), depth + 2);
+}
+
+void printArrayTypeSyntax(std::ostream& out, const SourceManager& sources, const ast::ArrayTypeSyntax& type,
+                           int depth) {
+    writeIndent(out, depth);
+    out << "ArrayTypeSyntax\n";
+
+    writeIndent(out, depth + 1);
+    out << "Element\n";
+    printTypeSyntax(out, sources, type.element(), depth + 2);
+
+    writeIndent(out, depth + 1);
+    out << "Length\n";
+    printExpr(out, sources, type.length(), depth + 2);
+}
+
+// TypeSyntaxKind reserves two kinds (Unit, Generic) with no concrete
+// node yet. Exhaustive switch with no `default:`: Unit/Generic are
+// explicit case labels sharing one fallback, not a catch-all, so
+// -Wswitch still fires the moment a 7th TypeSyntaxKind is added without
+// a case here.
+void printTypeSyntax(std::ostream& out, const SourceManager& sources, const ast::TypeSyntax& type, int depth) {
+    switch (type.kind()) {
+        case ast::TypeSyntaxKind::Named:
+            printNamedTypeSyntax(out, sources, static_cast<const ast::NamedTypeSyntax&>(type), depth);
+            return;
+        case ast::TypeSyntaxKind::Reference:
+            printReferenceTypeSyntax(out, sources, static_cast<const ast::ReferenceTypeSyntax&>(type), depth);
+            return;
+        case ast::TypeSyntaxKind::Array:
+            printArrayTypeSyntax(out, sources, static_cast<const ast::ArrayTypeSyntax&>(type), depth);
+            return;
+        case ast::TypeSyntaxKind::Slice:
+            printSliceTypeSyntax(out, sources, static_cast<const ast::SliceTypeSyntax&>(type), depth);
+            return;
+        case ast::TypeSyntaxKind::Unit:
+        case ast::TypeSyntaxKind::Generic:
+            break;
+    }
+
+    writeIndent(out, depth);
+    out << "TypeSyntax <unimplemented-kind>\n";
 }
 
 void printParam(std::ostream& out, const SourceManager& sources, const ast::Param& param, int depth) {
@@ -215,6 +276,40 @@ void printAssignmentExpr(std::ostream& out, const SourceManager& sources, const 
     printExpr(out, sources, expr.value(), depth + 2);
 }
 
+void printArrayLiteralExpr(std::ostream& out, const SourceManager& sources, const ast::ArrayLiteralExpr& expr,
+                            int depth) {
+    writeIndent(out, depth);
+    out << "ArrayLiteralExpr\n";
+
+    for (const auto& element : expr.elements()) {
+        writeIndent(out, depth + 1);
+        out << "Element\n";
+        printExpr(out, sources, *element, depth + 2);
+    }
+}
+
+void printIndexExpr(std::ostream& out, const SourceManager& sources, const ast::IndexExpr& expr, int depth) {
+    writeIndent(out, depth);
+    out << "IndexExpr\n";
+
+    writeIndent(out, depth + 1);
+    out << "Object\n";
+    printExpr(out, sources, expr.object(), depth + 2);
+
+    writeIndent(out, depth + 1);
+    out << "Index\n";
+    printExpr(out, sources, expr.index(), depth + 2);
+}
+
+void printMemberExpr(std::ostream& out, const SourceManager& sources, const ast::MemberExpr& expr, int depth) {
+    writeIndent(out, depth);
+    out << "MemberExpr member=" << wrapInQuotes(sources.text(expr.member().span)) << '\n';
+
+    writeIndent(out, depth + 1);
+    out << "Object\n";
+    printExpr(out, sources, expr.object(), depth + 2);
+}
+
 // No `default:` case: ExprKind is fully implemented today, so -Wswitch
 // should catch a forgotten case the moment a new ExprKind is added.
 void printExpr(std::ostream& out, const SourceManager& sources, const ast::Expr& expr, int depth) {
@@ -239,6 +334,15 @@ void printExpr(std::ostream& out, const SourceManager& sources, const ast::Expr&
             return;
         case ast::ExprKind::Assignment:
             printAssignmentExpr(out, sources, static_cast<const ast::AssignmentExpr&>(expr), depth);
+            return;
+        case ast::ExprKind::ArrayLiteral:
+            printArrayLiteralExpr(out, sources, static_cast<const ast::ArrayLiteralExpr&>(expr), depth);
+            return;
+        case ast::ExprKind::Index:
+            printIndexExpr(out, sources, static_cast<const ast::IndexExpr&>(expr), depth);
+            return;
+        case ast::ExprKind::Member:
+            printMemberExpr(out, sources, static_cast<const ast::MemberExpr&>(expr), depth);
             return;
     }
 }

@@ -147,15 +147,15 @@ ParseResult<std::vector<ast::Param>> Parser::parseParamList() {
 }
 
 ParseResult<ast::TypeSyntaxPtr> Parser::parseTypeSyntax() {
-    switch (current().kind()) {
-        case TokenKind::Amp:
-        case TokenKind::LeftBracket:
-        case TokenKind::LeftParen:
-            // &T / &mut T, [T] / [T; N], and () are valid GRAMMAR.md type
-            // forms with no TypeSyntax node beyond Named yet.
-            return fail(ParseErrorKind::UnsupportedSyntax);
-        default:
-            break;
+    if (check(TokenKind::Amp)) {
+        return parseReferenceTypeSyntax();
+    }
+    if (check(TokenKind::LeftBracket)) {
+        return parseBracketTypeSyntax();
+    }
+    if (check(TokenKind::LeftParen)) {
+        // Unit type () - valid GRAMMAR.md §18 form, no UnitTypeSyntax node yet.
+        return fail(ParseErrorKind::UnsupportedSyntax);
     }
 
     auto nameTok = expect(TokenKind::Identifier);
@@ -170,6 +170,78 @@ ParseResult<ast::TypeSyntaxPtr> Parser::parseTypeSyntax() {
     }
 
     ast::TypeSyntaxPtr type = std::make_unique<ast::NamedTypeSyntax>(ast::Identifier{nameTok->span()}, nameTok->span());
+    return type;
+}
+
+ParseResult<ast::TypeSyntaxPtr> Parser::parseReferenceTypeSyntax() {
+    auto ampTok = expect(TokenKind::Amp);
+    if (!ampTok) {
+        return std::unexpected(ampTok.error());
+    }
+
+    ast::ReferenceMutability mutability = ast::ReferenceMutability::Immutable;
+    SourceSpan operatorSpan = ampTok->span();
+
+    // `&mut T` and `& mut T` both tokenize as Amp then KwMut - whitespace
+    // between them is not significant, exactly like the value-level `&`/
+    // `&mut` unary operator.
+    if (check(TokenKind::KwMut)) {
+        const Token mutTok = advance();
+        mutability = ast::ReferenceMutability::Mutable;
+        operatorSpan = SourceSpan(ampTok->span().begin(), mutTok.span().end());
+    }
+
+    auto referent = parseTypeSyntax(); // recursion: &[T], &mut [T], &&T, ...
+    if (!referent) {
+        return std::unexpected(referent.error());
+    }
+
+    const SourceSpan span(operatorSpan.begin(), (*referent)->span().end());
+    ast::TypeSyntaxPtr type =
+        std::make_unique<ast::ReferenceTypeSyntax>(mutability, operatorSpan, std::move(*referent), span);
+    return type;
+}
+
+ParseResult<ast::TypeSyntaxPtr> Parser::parseBracketTypeSyntax() {
+    auto openBracket = expect(TokenKind::LeftBracket);
+    if (!openBracket) {
+        return std::unexpected(openBracket.error());
+    }
+
+    auto element = parseTypeSyntax(); // recursion: [[i32; 4]], [&str], ...
+    if (!element) {
+        return std::unexpected(element.error());
+    }
+
+    if (check(TokenKind::Semicolon)) {
+        advance();
+
+        // GRAMMAR.md §15 currently requires integer_literal specifically,
+        // not a general expression - constant-expression lengths are not
+        // supported yet.
+        auto lengthTok = expect(TokenKind::IntegerLiteral);
+        if (!lengthTok) {
+            return std::unexpected(lengthTok.error());
+        }
+
+        auto closeBracket = expect(TokenKind::RightBracket);
+        if (!closeBracket) {
+            return std::unexpected(closeBracket.error());
+        }
+
+        ast::ExprPtr length = std::make_unique<ast::LiteralExpr>(ast::LiteralKind::Integer, lengthTok->span());
+        const SourceSpan span(openBracket->span().begin(), closeBracket->span().end());
+        ast::TypeSyntaxPtr type = std::make_unique<ast::ArrayTypeSyntax>(std::move(*element), std::move(length), span);
+        return type;
+    }
+
+    auto closeBracket = expect(TokenKind::RightBracket);
+    if (!closeBracket) {
+        return std::unexpected(closeBracket.error());
+    }
+
+    const SourceSpan span(openBracket->span().begin(), closeBracket->span().end());
+    ast::TypeSyntaxPtr type = std::make_unique<ast::SliceTypeSyntax>(std::move(*element), span);
     return type;
 }
 
@@ -707,9 +779,27 @@ ParseResult<ast::ExprPtr> Parser::parsePostfixExpression() {
             continue;
         }
 
-        if (check(TokenKind::Dot) || check(TokenKind::LeftBracket) || check(TokenKind::Question)) {
-            // Valid GRAMMAR.md postfix forms (member access, indexing,
-            // error propagation) - no corresponding Expr node yet.
+        if (check(TokenKind::LeftBracket)) {
+            auto indexed = parseIndexSuffix(std::move(*expr));
+            if (!indexed) {
+                return indexed;
+            }
+            expr = std::move(indexed);
+            continue;
+        }
+
+        if (check(TokenKind::Dot)) {
+            auto member = parseMemberSuffix(std::move(*expr));
+            if (!member) {
+                return member;
+            }
+            expr = std::move(member);
+            continue;
+        }
+
+        if (check(TokenKind::Question)) {
+            // Valid GRAMMAR.md postfix form (error propagation) - no
+            // TryExpr node yet.
             return fail(ParseErrorKind::UnsupportedSyntax);
         }
 
@@ -756,9 +846,7 @@ ParseResult<ast::ExprPtr> Parser::parsePrimary() {
             return parseParenExpression();
 
         case TokenKind::LeftBracket:
-            // `[1, 2, 3]` array-literal syntax (GRAMMAR.md §41/§42) is
-            // valid grammar with no ArrayLiteralExpr node yet.
-            return fail(ParseErrorKind::UnsupportedSyntax);
+            return parseArrayLiteral();
 
         default:
             return fail(ParseErrorKind::UnexpectedToken);
@@ -786,6 +874,41 @@ ParseResult<ast::ExprPtr> Parser::parseParenExpression() {
     return expr;
 }
 
+ParseResult<ast::ExprPtr> Parser::parseArrayLiteral() {
+    auto openBracket = expect(TokenKind::LeftBracket);
+    if (!openBracket) {
+        return std::unexpected(openBracket.error());
+    }
+
+    std::vector<ast::ExprPtr> elements;
+
+    // Structurally identical to parseArgumentList() (a trailing comma is
+    // rejected there too): GRAMMAR.md §42's array_literal production has
+    // the same "expression { , expression }" shape as §37's argument_list.
+    if (!check(TokenKind::RightBracket)) {
+        while (true) {
+            auto element = parseExpression();
+            if (!element) {
+                return std::unexpected(element.error());
+            }
+            elements.push_back(std::move(*element));
+
+            if (!match(TokenKind::Comma)) {
+                break;
+            }
+        }
+    }
+
+    auto closeBracket = expect(TokenKind::RightBracket);
+    if (!closeBracket) {
+        return std::unexpected(closeBracket.error());
+    }
+
+    const SourceSpan span(openBracket->span().begin(), closeBracket->span().end());
+    ast::ExprPtr expr = std::make_unique<ast::ArrayLiteralExpr>(std::move(elements), span);
+    return expr;
+}
+
 ParseResult<ast::ExprPtr> Parser::parseCallSuffix(ast::ExprPtr callee) {
     auto openParen = expect(TokenKind::LeftParen);
     if (!openParen) {
@@ -804,6 +927,46 @@ ParseResult<ast::ExprPtr> Parser::parseCallSuffix(ast::ExprPtr callee) {
 
     const SourceSpan span(callee->span().begin(), closeParen->span().end());
     ast::ExprPtr expr = std::make_unique<ast::CallExpr>(std::move(callee), std::move(*arguments), span);
+    return expr;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseIndexSuffix(ast::ExprPtr object) {
+    auto openBracket = expect(TokenKind::LeftBracket);
+    if (!openBracket) {
+        return std::unexpected(openBracket.error());
+    }
+
+    // The index is an arbitrary expression syntactically - no
+    // indexability/integer-type/bounds checking belongs here.
+    auto index = parseExpression();
+    if (!index) {
+        return std::unexpected(index.error());
+    }
+
+    auto closeBracket = expect(TokenKind::RightBracket);
+    if (!closeBracket) {
+        return std::unexpected(closeBracket.error());
+    }
+
+    const SourceSpan span(object->span().begin(), closeBracket->span().end());
+    ast::ExprPtr expr = std::make_unique<ast::IndexExpr>(std::move(object), std::move(*index), span);
+    return expr;
+}
+
+ParseResult<ast::ExprPtr> Parser::parseMemberSuffix(ast::ExprPtr object) {
+    auto dot = expect(TokenKind::Dot);
+    if (!dot) {
+        return std::unexpected(dot.error());
+    }
+
+    auto memberTok = expect(TokenKind::Identifier);
+    if (!memberTok) {
+        return std::unexpected(memberTok.error());
+    }
+
+    const SourceSpan span(object->span().begin(), memberTok->span().end());
+    ast::ExprPtr expr =
+        std::make_unique<ast::MemberExpr>(std::move(object), ast::Identifier{memberTok->span()}, span);
     return expr;
 }
 

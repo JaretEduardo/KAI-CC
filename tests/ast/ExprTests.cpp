@@ -10,6 +10,7 @@ using kai::FileId;
 using kai::SourceLocation;
 using kai::SourceManager;
 using kai::SourceSpan;
+using kai::ast::ArrayLiteralExpr;
 using kai::ast::AssignmentExpr;
 using kai::ast::BinaryExpr;
 using kai::ast::BinaryOperator;
@@ -19,8 +20,10 @@ using kai::ast::ExprKind;
 using kai::ast::ExprPtr;
 using kai::ast::Identifier;
 using kai::ast::IdentifierExpr;
+using kai::ast::IndexExpr;
 using kai::ast::LiteralExpr;
 using kai::ast::LiteralKind;
+using kai::ast::MemberExpr;
 using kai::ast::ParenExpr;
 using kai::ast::UnaryExpr;
 using kai::ast::UnaryOperator;
@@ -373,6 +376,158 @@ void testAssignmentExprTargetNotRestrictedToIdentifier() {
     KAI_CHECK(expr.value().kind() == ExprKind::Literal);
 }
 
+// --- ArrayLiteralExpr ---
+
+void testArrayLiteralExprEmpty() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "[]");
+    const SourceSpan span = spanOf(file, 0, 2);
+
+    ArrayLiteralExpr expr(std::vector<ExprPtr>{}, span);
+
+    KAI_CHECK(expr.kind() == ExprKind::ArrayLiteral);
+    KAI_CHECK(expr.elements().empty());
+    KAI_CHECK(expr.span() == span);
+}
+
+void testArrayLiteralExprNonEmptyOrderAndOwnership() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "[1, 2, 3]");
+    const SourceSpan oneSpan = spanOf(file, 1, 2);
+    const SourceSpan twoSpan = spanOf(file, 4, 5);
+    const SourceSpan threeSpan = spanOf(file, 7, 8);
+    const SourceSpan fullSpan = spanOf(file, 0, 9);
+
+    std::vector<ExprPtr> elements;
+    elements.push_back(std::make_unique<LiteralExpr>(LiteralKind::Integer, oneSpan));
+    elements.push_back(std::make_unique<LiteralExpr>(LiteralKind::Integer, twoSpan));
+    elements.push_back(std::make_unique<LiteralExpr>(LiteralKind::Integer, threeSpan));
+
+    ArrayLiteralExpr expr(std::move(elements), fullSpan);
+
+    KAI_CHECK(expr.elements().size() == 3);
+    KAI_CHECK(sm.text(expr.elements()[0]->span()) == "1");
+    KAI_CHECK(sm.text(expr.elements()[1]->span()) == "2");
+    KAI_CHECK(sm.text(expr.elements()[2]->span()) == "3");
+    KAI_CHECK(expr.span() == fullSpan);
+
+    // Ownership actually transferred out of the local vector.
+    KAI_CHECK(elements.empty());
+}
+
+// --- IndexExpr ---
+
+void testIndexExprBasic() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "values[0]");
+    const SourceSpan objectSpan = spanOf(file, 0, 6); // values
+    const SourceSpan indexSpan = spanOf(file, 7, 8);  // 0
+    const SourceSpan fullSpan = spanOf(file, 0, 9);
+
+    ExprPtr object = std::make_unique<IdentifierExpr>(Identifier{objectSpan}, objectSpan);
+    ExprPtr index = std::make_unique<LiteralExpr>(LiteralKind::Integer, indexSpan);
+    IndexExpr expr(std::move(object), std::move(index), fullSpan);
+
+    KAI_CHECK(expr.kind() == ExprKind::Index);
+    KAI_CHECK(expr.object().kind() == ExprKind::Identifier);
+    KAI_CHECK(sm.text(expr.object().span()) == "values");
+    KAI_CHECK(expr.index().kind() == ExprKind::Literal);
+    KAI_CHECK(sm.text(expr.index().span()) == "0");
+    KAI_CHECK(expr.span() == fullSpan);
+    KAI_CHECK(object == nullptr);
+    KAI_CHECK(index == nullptr);
+}
+
+void testIndexExprArbitraryIndexExpression() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "values[i + 1]");
+    const SourceSpan objectSpan = spanOf(file, 0, 6);
+    const SourceSpan iSpan = spanOf(file, 7, 8);
+    const SourceSpan plusSpan = spanOf(file, 9, 10);
+    const SourceSpan oneSpan = spanOf(file, 11, 12);
+    const SourceSpan addSpan = spanOf(file, 7, 12);
+    const SourceSpan fullSpan = spanOf(file, 0, 13);
+
+    ExprPtr object = std::make_unique<IdentifierExpr>(Identifier{objectSpan}, objectSpan);
+    ExprPtr i = std::make_unique<IdentifierExpr>(Identifier{iSpan}, iSpan);
+    ExprPtr one = std::make_unique<LiteralExpr>(LiteralKind::Integer, oneSpan);
+    ExprPtr index = std::make_unique<BinaryExpr>(BinaryOperator::Add, plusSpan, std::move(i), std::move(one), addSpan);
+
+    IndexExpr expr(std::move(object), std::move(index), fullSpan);
+
+    KAI_CHECK(expr.index().kind() == ExprKind::Binary);
+    KAI_CHECK(static_cast<const BinaryExpr&>(expr.index()).op() == BinaryOperator::Add);
+    KAI_CHECK(expr.span() == fullSpan);
+}
+
+void testIndexExprNestedMatrixShape() {
+    // matrix[i][j] -> IndexExpr(IndexExpr(matrix, i), j)
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "matrix[i][j]");
+    const SourceSpan matrixSpan = spanOf(file, 0, 6); // matrix
+    const SourceSpan iSpan = spanOf(file, 7, 8);      // i
+    const SourceSpan innerSpan = spanOf(file, 0, 9);  // matrix[i]
+    const SourceSpan jSpan = spanOf(file, 10, 11);    // j
+    const SourceSpan outerSpan = spanOf(file, 0, 12); // matrix[i][j]
+
+    ExprPtr matrix = std::make_unique<IdentifierExpr>(Identifier{matrixSpan}, matrixSpan);
+    ExprPtr i = std::make_unique<IdentifierExpr>(Identifier{iSpan}, iSpan);
+    ExprPtr inner = std::make_unique<IndexExpr>(std::move(matrix), std::move(i), innerSpan);
+
+    ExprPtr j = std::make_unique<IdentifierExpr>(Identifier{jSpan}, jSpan);
+    IndexExpr outer(std::move(inner), std::move(j), outerSpan);
+
+    KAI_CHECK(outer.object().kind() == ExprKind::Index);
+    const auto& innerIndex = static_cast<const IndexExpr&>(outer.object());
+    KAI_CHECK(innerIndex.object().kind() == ExprKind::Identifier);
+    KAI_CHECK(sm.text(innerIndex.object().span()) == "matrix");
+    KAI_CHECK(sm.text(outer.index().span()) == "j");
+    KAI_CHECK(outer.span() == outerSpan);
+}
+
+// --- MemberExpr ---
+
+void testMemberExprBasic() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "values.len");
+    const SourceSpan objectSpan = spanOf(file, 0, 6); // values
+    const SourceSpan memberSpan = spanOf(file, 7, 10); // len
+    const SourceSpan fullSpan = spanOf(file, 0, 10);
+
+    ExprPtr object = std::make_unique<IdentifierExpr>(Identifier{objectSpan}, objectSpan);
+    MemberExpr expr(std::move(object), Identifier{memberSpan}, fullSpan);
+
+    KAI_CHECK(expr.kind() == ExprKind::Member);
+    KAI_CHECK(expr.object().kind() == ExprKind::Identifier);
+    KAI_CHECK(sm.text(expr.object().span()) == "values");
+    KAI_CHECK(expr.member().span == memberSpan);
+    KAI_CHECK(sm.text(expr.member().span) == "len");
+    KAI_CHECK(expr.span() == fullSpan);
+    KAI_CHECK(object == nullptr);
+}
+
+void testMemberExprChainedShape() {
+    // object.a.b -> MemberExpr(MemberExpr(object, a), b)
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "object.a.b");
+    const SourceSpan objectSpan = spanOf(file, 0, 6); // object
+    const SourceSpan aSpan = spanOf(file, 7, 8);      // a
+    const SourceSpan innerSpan = spanOf(file, 0, 8);  // object.a
+    const SourceSpan bSpan = spanOf(file, 9, 10);     // b
+    const SourceSpan outerSpan = spanOf(file, 0, 10); // object.a.b
+
+    ExprPtr object = std::make_unique<IdentifierExpr>(Identifier{objectSpan}, objectSpan);
+    ExprPtr inner = std::make_unique<MemberExpr>(std::move(object), Identifier{aSpan}, innerSpan);
+    MemberExpr outer(std::move(inner), Identifier{bSpan}, outerSpan);
+
+    KAI_CHECK(outer.object().kind() == ExprKind::Member);
+    const auto& innerMember = static_cast<const MemberExpr&>(outer.object());
+    KAI_CHECK(sm.text(innerMember.member().span) == "a");
+    KAI_CHECK(innerMember.object().kind() == ExprKind::Identifier);
+    KAI_CHECK(sm.text(outer.member().span) == "b");
+    KAI_CHECK(outer.span() == outerSpan);
+}
+
 } // namespace
 
 int main() {
@@ -395,6 +550,16 @@ int main() {
     testAssignmentExprOwnsTargetAndValue();
     testAssignmentExprRightAssociativeChainShape();
     testAssignmentExprTargetNotRestrictedToIdentifier();
+
+    testArrayLiteralExprEmpty();
+    testArrayLiteralExprNonEmptyOrderAndOwnership();
+
+    testIndexExprBasic();
+    testIndexExprArbitraryIndexExpression();
+    testIndexExprNestedMatrixShape();
+
+    testMemberExprBasic();
+    testMemberExprChainedShape();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }

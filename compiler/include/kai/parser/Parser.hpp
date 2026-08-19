@@ -21,26 +21,23 @@ namespace kai::parser {
 /// The initial KAI recursive-descent parser.
 ///
 /// Parses one file's token stream into the existing syntax AST
-/// (kai::ast). Recognizes function declarations with a comma-separated,
-/// named-type-only parameter list and an optional named return type;
-/// `let`/`mut` variable declarations and `return` statements; `if`/
-/// `else if`/`else` and `while`/`for` control flow; and the full
-/// expression precedence ladder (assignment, logical or/and, equality,
-/// comparison, range, additive, multiplicative, unary, and postfix/
-/// primary) built from literals, identifiers, calls, and parenthesized
-/// expressions - enough for:
+/// (kai::ast). Recognizes function declarations with a comma-separated
+/// parameter list and an optional named return type; `let`/`mut`
+/// variable declarations and `return` statements; `if`/`else if`/`else`
+/// and `while`/`for` control flow; the full expression precedence
+/// ladder (assignment, logical or/and, equality, comparison, range,
+/// additive, multiplicative, unary, and postfix/primary) including
+/// array literals, indexing, and member access; and reference (`&T`,
+/// `&mut T`), slice (`[T]`), and fixed-array (`[T; N]`) type syntax,
+/// recursively composable wherever parseTypeSyntax() is used - enough
+/// for:
 ///
-///     fn fibonacci(n: i32) -> i32 {
-///         if n <= 1 {
-///             return n
+///     fn average(values: &[f64]) -> f64 {
+///         mut total = 0.0
+///         for value in values {
+///             total = total + value
 ///         }
-///         return fibonacci(n - 1) + fibonacci(n - 2)
-///     }
-///
-///     fn main() {
-///         for i in 0..10 {
-///             print(fibonacci(i))
-///         }
+///         return total / values.len
 ///     }
 ///
 /// Parser recognizes syntax only: it performs no semantic analysis, no
@@ -98,6 +95,8 @@ private:
     ParseResult<ast::DeclPtr> parseFunctionDecl(bool isPublic, SourceLocation begin);
     ParseResult<std::vector<ast::Param>> parseParamList();
     ParseResult<ast::TypeSyntaxPtr> parseTypeSyntax();
+    ParseResult<ast::TypeSyntaxPtr> parseReferenceTypeSyntax();
+    ParseResult<ast::TypeSyntaxPtr> parseBracketTypeSyntax();
 
     // --- statements ---
     ParseResult<ast::BlockPtr> parseBlock();
@@ -126,7 +125,10 @@ private:
     ParseResult<ast::ExprPtr> parsePostfixExpression();
     ParseResult<ast::ExprPtr> parsePrimary();
     ParseResult<ast::ExprPtr> parseParenExpression();
+    ParseResult<ast::ExprPtr> parseArrayLiteral();
     ParseResult<ast::ExprPtr> parseCallSuffix(ast::ExprPtr callee);
+    ParseResult<ast::ExprPtr> parseIndexSuffix(ast::ExprPtr object);
+    ParseResult<ast::ExprPtr> parseMemberSuffix(ast::ExprPtr object);
     ParseResult<std::vector<ast::ExprPtr>> parseArgumentList();
 
     FileId file_;

@@ -19,9 +19,8 @@ enum class LiteralKind : std::uint8_t {
     Bool,
 };
 
-/// This vocabulary covers only the Expr node kinds implemented so far.
-/// Extend it as later parser milestones add MemberExpr, IndexExpr,
-/// ArrayLiteralExpr, StructLiteralExpr, TryExpr.
+/// This vocabulary covers every Expr node kind implemented so far.
+/// Extend it as later parser milestones add StructLiteralExpr, TryExpr.
 enum class ExprKind : std::uint8_t {
     Literal,
     Identifier,
@@ -30,6 +29,9 @@ enum class ExprKind : std::uint8_t {
     Unary,
     Binary,
     Assignment,
+    ArrayLiteral,
+    Index,
+    Member,
 };
 
 /// Base class for every expression syntax node.
@@ -206,6 +208,62 @@ private:
     SourceSpan operatorSpan_;
     ExprPtr target_;
     ExprPtr value_;
+};
+
+/// `[elem, elem, ...]` - an array literal. No element-type inference or
+/// uniformity checking happens here (semantic analysis's job): `[1,
+/// "two", true]` constructs successfully at the syntax level. `span()`
+/// covers the full `[...]` range, including an empty `[]`. No comma
+/// spans are retained - CallExpr::arguments() doesn't track its own
+/// separator commas either.
+class ArrayLiteralExpr final : public Expr {
+public:
+    ArrayLiteralExpr(std::vector<ExprPtr> elements, SourceSpan span) noexcept
+        : Expr(ExprKind::ArrayLiteral, span), elements_(std::move(elements)) {}
+
+    const std::vector<ExprPtr>& elements() const noexcept { return elements_; }
+
+private:
+    std::vector<ExprPtr> elements_;
+};
+
+/// `object[index]`. `index` is an arbitrary expression syntactically
+/// (`values[i + 1]` parses); whether `object` is indexable or `index`
+/// is integer-typed is semantic analysis's job, not the parser's.
+/// `span()` covers `object` through the closing `]`.
+class IndexExpr final : public Expr {
+public:
+    IndexExpr(ExprPtr object, ExprPtr index, SourceSpan span) noexcept
+        : Expr(ExprKind::Index, span), object_(std::move(object)), index_(std::move(index)) {}
+
+    const Expr& object() const noexcept { return *object_; }
+    const Expr& index() const noexcept { return *index_; }
+
+private:
+    ExprPtr object_;
+    ExprPtr index_;
+};
+
+/// `object.member`. Member resolution (field vs. method vs. builtin, or
+/// whether it exists at all) is semantic analysis's job - the parser
+/// records only that `.identifier` syntax occurred. `member` stays a
+/// span-only Identifier, like every other name in this AST - no string
+/// is stored. `span()` covers `object` through the member identifier.
+/// No separate `.` operator span: unlike BinaryExpr (14 possible
+/// operators worth individually pinpointing), `.` is the only member-
+/// access token, and `member().span` already pinpoints the interesting
+/// part precisely.
+class MemberExpr final : public Expr {
+public:
+    MemberExpr(ExprPtr object, Identifier member, SourceSpan span) noexcept
+        : Expr(ExprKind::Member, span), object_(std::move(object)), member_(member) {}
+
+    const Expr& object() const noexcept { return *object_; }
+    const Identifier& member() const noexcept { return member_; }
+
+private:
+    ExprPtr object_;
+    Identifier member_;
 };
 
 } // namespace kai::ast

@@ -25,12 +25,15 @@ using kai::SourceLocation;
 using kai::SourceManager;
 using kai::SourceSpan;
 using kai::TokenKind;
+using kai::ast::ArrayLiteralExpr;
+using kai::ast::ArrayTypeSyntax;
 using kai::ast::AssignmentExpr;
 using kai::ast::BinaryExpr;
 using kai::ast::BinaryOperator;
 using kai::ast::BindingKind;
 using kai::ast::BlockPtr;
 using kai::ast::BlockStmt;
+using kai::ast::CallExpr;
 using kai::ast::DeclPtr;
 using kai::ast::ElseClause;
 using kai::ast::Expr;
@@ -42,11 +45,16 @@ using kai::ast::Identifier;
 using kai::ast::IdentifierExpr;
 using kai::ast::IfBranch;
 using kai::ast::IfStmt;
+using kai::ast::IndexExpr;
 using kai::ast::LiteralExpr;
 using kai::ast::LiteralKind;
+using kai::ast::MemberExpr;
 using kai::ast::NamedTypeSyntax;
 using kai::ast::Param;
+using kai::ast::ReferenceMutability;
+using kai::ast::ReferenceTypeSyntax;
 using kai::ast::ReturnStmt;
+using kai::ast::SliceTypeSyntax;
 using kai::ast::SourceFile;
 using kai::ast::StmtPtr;
 using kai::ast::TypeSyntaxPtr;
@@ -93,6 +101,21 @@ SourceSpan spanOf(FileId file, std::uint32_t begin, std::uint32_t end) {
 std::string printStatement(SourceManager& sm, FileId file, SourceSpan enclosingSpan, StmtPtr stmt) {
     std::vector<StmtPtr> statements;
     statements.push_back(std::move(stmt));
+    BlockPtr body = std::make_unique<BlockStmt>(std::move(statements), enclosingSpan);
+
+    DeclPtr fn = std::make_unique<FunctionDecl>(false, Identifier{enclosingSpan}, std::vector<Param>{}, nullptr,
+                                                 std::move(body), enclosingSpan);
+
+    std::vector<DeclPtr> decls;
+    decls.push_back(std::move(fn));
+    const SourceFile sourceFile(file, std::move(decls), enclosingSpan);
+
+    std::ostringstream out;
+    printAst(out, sm, sourceFile);
+    return out.str();
+}
+
+std::string printStatements(SourceManager& sm, FileId file, SourceSpan enclosingSpan, std::vector<StmtPtr> statements) {
     BlockPtr body = std::make_unique<BlockStmt>(std::move(statements), enclosingSpan);
 
     DeclPtr fn = std::make_unique<FunctionDecl>(false, Identifier{enclosingSpan}, std::vector<Param>{}, nullptr,
@@ -746,6 +769,366 @@ void testNestedControlFlowExactRendering() {
     KAI_CHECK(text.find(expected) != std::string::npos);
 }
 
+// --- arrays / indexing / member access / slice / reference types ---
+
+void testArrayLiteralExprEmptyRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "[]");
+    const SourceSpan span = spanOf(file, 0, 2);
+
+    ExprPtr expr = std::make_unique<ArrayLiteralExpr>(std::vector<ExprPtr>{}, span);
+    const std::string text = printExprAsStatement(sm, file, span, std::move(expr));
+
+    KAI_CHECK(text.find("ArrayLiteralExpr") != std::string::npos);
+    KAI_CHECK(text.find("Element") == std::string::npos);
+}
+
+void testArrayLiteralExprPopulatedExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "[1, 2, 3]");
+    const SourceSpan oneSpan = spanOf(file, 1, 2);
+    const SourceSpan twoSpan = spanOf(file, 4, 5);
+    const SourceSpan threeSpan = spanOf(file, 7, 8);
+    const SourceSpan fullSpan = spanOf(file, 0, 9);
+
+    std::vector<ExprPtr> elements;
+    elements.push_back(std::make_unique<LiteralExpr>(LiteralKind::Integer, oneSpan));
+    elements.push_back(std::make_unique<LiteralExpr>(LiteralKind::Integer, twoSpan));
+    elements.push_back(std::make_unique<LiteralExpr>(LiteralKind::Integer, threeSpan));
+    ExprPtr expr = std::make_unique<ArrayLiteralExpr>(std::move(elements), fullSpan);
+
+    const std::string text = printExprAsStatement(sm, file, fullSpan, std::move(expr));
+
+    // Depth: SourceFile(0) -> FunctionDecl(1) -> BlockStmt(2) -> ExprStmt(3)
+    // -> ArrayLiteralExpr(4) -> Element(5) -> LiteralExpr(6).
+    const std::string expected = indent(4) + "ArrayLiteralExpr\n" +                       //
+                                  indent(5) + "Element\n" +                                //
+                                  indent(6) + "LiteralExpr kind=Integer lexeme=\"1\"\n" +  //
+                                  indent(5) + "Element\n" +                                //
+                                  indent(6) + "LiteralExpr kind=Integer lexeme=\"2\"\n" +  //
+                                  indent(5) + "Element\n" +                                //
+                                  indent(6) + "LiteralExpr kind=Integer lexeme=\"3\"\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testIndexExprExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "values[0]");
+    const SourceSpan objectSpan = spanOf(file, 0, 6);
+    const SourceSpan indexSpan = spanOf(file, 7, 8);
+    const SourceSpan fullSpan = spanOf(file, 0, 9);
+
+    ExprPtr object = std::make_unique<IdentifierExpr>(Identifier{objectSpan}, objectSpan);
+    ExprPtr index = std::make_unique<LiteralExpr>(LiteralKind::Integer, indexSpan);
+    ExprPtr expr = std::make_unique<IndexExpr>(std::move(object), std::move(index), fullSpan);
+
+    const std::string text = printExprAsStatement(sm, file, fullSpan, std::move(expr));
+
+    const std::string expected = indent(4) + "IndexExpr\n" +                          //
+                                  indent(5) + "Object\n" +                             //
+                                  indent(6) + "IdentifierExpr name=\"values\"\n" +     //
+                                  indent(5) + "Index\n" +                              //
+                                  indent(6) + "LiteralExpr kind=Integer lexeme=\"0\"\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testNestedIndexExprExactRendering() {
+    // matrix[i][j]
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "matrix[i][j]");
+    const SourceSpan matrixSpan = spanOf(file, 0, 6);
+    const SourceSpan iSpan = spanOf(file, 7, 8);
+    const SourceSpan innerSpan = spanOf(file, 0, 9);
+    const SourceSpan jSpan = spanOf(file, 10, 11);
+    const SourceSpan outerSpan = spanOf(file, 0, 12);
+
+    ExprPtr matrix = std::make_unique<IdentifierExpr>(Identifier{matrixSpan}, matrixSpan);
+    ExprPtr i = std::make_unique<IdentifierExpr>(Identifier{iSpan}, iSpan);
+    ExprPtr inner = std::make_unique<IndexExpr>(std::move(matrix), std::move(i), innerSpan);
+    ExprPtr j = std::make_unique<IdentifierExpr>(Identifier{jSpan}, jSpan);
+    ExprPtr outer = std::make_unique<IndexExpr>(std::move(inner), std::move(j), outerSpan);
+
+    const std::string text = printExprAsStatement(sm, file, outerSpan, std::move(outer));
+
+    const std::string expected = indent(4) + "IndexExpr\n" +                        //
+                                  indent(5) + "Object\n" +                           //
+                                  indent(6) + "IndexExpr\n" +                        //
+                                  indent(7) + "Object\n" +                           //
+                                  indent(8) + "IdentifierExpr name=\"matrix\"\n" +   //
+                                  indent(7) + "Index\n" +                            //
+                                  indent(8) + "IdentifierExpr name=\"i\"\n" +        //
+                                  indent(5) + "Index\n" +                            //
+                                  indent(6) + "IdentifierExpr name=\"j\"\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testMemberExprExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "values.len");
+    const SourceSpan objectSpan = spanOf(file, 0, 6);
+    const SourceSpan memberSpan = spanOf(file, 7, 10);
+    const SourceSpan fullSpan = spanOf(file, 0, 10);
+
+    ExprPtr object = std::make_unique<IdentifierExpr>(Identifier{objectSpan}, objectSpan);
+    ExprPtr expr = std::make_unique<MemberExpr>(std::move(object), Identifier{memberSpan}, fullSpan);
+
+    const std::string text = printExprAsStatement(sm, file, fullSpan, std::move(expr));
+
+    const std::string expected = indent(4) + "MemberExpr member=\"len\"\n" + //
+                                  indent(5) + "Object\n" +                   //
+                                  indent(6) + "IdentifierExpr name=\"values\"\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testMemberCallCompositionExactRendering() {
+    // foo.bar()
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "foo.bar()");
+    const SourceSpan fooSpan = spanOf(file, 0, 3);
+    const SourceSpan barSpan = spanOf(file, 4, 7);
+    const SourceSpan memberSpan = spanOf(file, 0, 7);
+    const SourceSpan callSpan = spanOf(file, 0, 9);
+
+    ExprPtr foo = std::make_unique<IdentifierExpr>(Identifier{fooSpan}, fooSpan);
+    ExprPtr member = std::make_unique<MemberExpr>(std::move(foo), Identifier{barSpan}, memberSpan);
+    ExprPtr call = std::make_unique<CallExpr>(std::move(member), std::vector<ExprPtr>{}, callSpan);
+
+    const std::string text = printExprAsStatement(sm, file, callSpan, std::move(call));
+
+    const std::string expected = indent(4) + "CallExpr\n" +                       //
+                                  indent(5) + "MemberExpr member=\"bar\"\n" +      //
+                                  indent(6) + "Object\n" +                        //
+                                  indent(7) + "IdentifierExpr name=\"foo\"\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testReferenceTypeSyntaxImmutableExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "let x: &i32 = 0");
+    const SourceSpan nameSpan = spanOf(file, 4, 5);
+    const SourceSpan operatorSpan = spanOf(file, 7, 8);
+    const SourceSpan referentSpan = spanOf(file, 8, 11);
+    const SourceSpan initSpan = spanOf(file, 14, 15);
+    const SourceSpan fullSpan = spanOf(file, 0, 15);
+
+    TypeSyntaxPtr referent = std::make_unique<NamedTypeSyntax>(Identifier{referentSpan}, referentSpan);
+    TypeSyntaxPtr type =
+        std::make_unique<ReferenceTypeSyntax>(ReferenceMutability::Immutable, operatorSpan, std::move(referent),
+                                               SourceSpan(operatorSpan.begin(), referentSpan.end()));
+    ExprPtr initializer = std::make_unique<LiteralExpr>(LiteralKind::Integer, initSpan);
+    StmtPtr stmt = std::make_unique<VarDeclStmt>(BindingKind::Immutable, Identifier{nameSpan}, std::move(type),
+                                                  std::move(initializer), fullSpan);
+
+    const std::string text = printStatement(sm, file, fullSpan, std::move(stmt));
+
+    const std::string expected = indent(3) + "VarDeclStmt binding=Immutable name=\"x\"\n" + //
+                                  indent(4) + "Type\n" +                                     //
+                                  indent(5) + "ReferenceTypeSyntax mutability=Immutable\n" + //
+                                  indent(6) + "Referent\n" +                                 //
+                                  indent(7) + "NamedTypeSyntax name=\"i32\"\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testReferenceTypeSyntaxMutableExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "let x: &mut i32 = 0");
+    const SourceSpan nameSpan = spanOf(file, 4, 5);
+    const SourceSpan operatorSpan = spanOf(file, 7, 11); // &mut
+    const SourceSpan referentSpan = spanOf(file, 12, 15); // i32
+    const SourceSpan initSpan = spanOf(file, 18, 19);
+    const SourceSpan fullSpan = spanOf(file, 0, 19);
+
+    TypeSyntaxPtr referent = std::make_unique<NamedTypeSyntax>(Identifier{referentSpan}, referentSpan);
+    TypeSyntaxPtr type =
+        std::make_unique<ReferenceTypeSyntax>(ReferenceMutability::Mutable, operatorSpan, std::move(referent),
+                                               SourceSpan(operatorSpan.begin(), referentSpan.end()));
+    ExprPtr initializer = std::make_unique<LiteralExpr>(LiteralKind::Integer, initSpan);
+    StmtPtr stmt = std::make_unique<VarDeclStmt>(BindingKind::Immutable, Identifier{nameSpan}, std::move(type),
+                                                  std::move(initializer), fullSpan);
+
+    const std::string text = printStatement(sm, file, fullSpan, std::move(stmt));
+
+    const std::string expected = indent(3) + "VarDeclStmt binding=Immutable name=\"x\"\n" + //
+                                  indent(4) + "Type\n" +                                     //
+                                  indent(5) + "ReferenceTypeSyntax mutability=Mutable\n" +   //
+                                  indent(6) + "Referent\n" +                                 //
+                                  indent(7) + "NamedTypeSyntax name=\"i32\"\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testSliceTypeSyntaxExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "let x: [i32] = 0");
+    const SourceSpan nameSpan = spanOf(file, 4, 5);
+    const SourceSpan elementSpan = spanOf(file, 8, 11); // i32
+    const SourceSpan sliceSpan = spanOf(file, 7, 12);   // [i32]
+    const SourceSpan initSpan = spanOf(file, 15, 16);
+    const SourceSpan fullSpan = spanOf(file, 0, 16);
+
+    TypeSyntaxPtr element = std::make_unique<NamedTypeSyntax>(Identifier{elementSpan}, elementSpan);
+    TypeSyntaxPtr type = std::make_unique<SliceTypeSyntax>(std::move(element), sliceSpan);
+    ExprPtr initializer = std::make_unique<LiteralExpr>(LiteralKind::Integer, initSpan);
+    StmtPtr stmt = std::make_unique<VarDeclStmt>(BindingKind::Immutable, Identifier{nameSpan}, std::move(type),
+                                                  std::move(initializer), fullSpan);
+
+    const std::string text = printStatement(sm, file, fullSpan, std::move(stmt));
+
+    const std::string expected = indent(3) + "VarDeclStmt binding=Immutable name=\"x\"\n" + //
+                                  indent(4) + "Type\n" +                                     //
+                                  indent(5) + "SliceTypeSyntax\n" +                          //
+                                  indent(6) + "Element\n" +                                  //
+                                  indent(7) + "NamedTypeSyntax name=\"i32\"\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testArrayTypeSyntaxExactRendering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "let x: [i32; 4] = 0");
+    const SourceSpan nameSpan = spanOf(file, 4, 5);
+    const SourceSpan elementSpan = spanOf(file, 8, 11); // i32
+    const SourceSpan lengthSpan = spanOf(file, 13, 14); // 4
+    const SourceSpan arraySpan = spanOf(file, 7, 15);   // [i32; 4]
+    const SourceSpan initSpan = spanOf(file, 18, 19);
+    const SourceSpan fullSpan = spanOf(file, 0, 19);
+
+    TypeSyntaxPtr element = std::make_unique<NamedTypeSyntax>(Identifier{elementSpan}, elementSpan);
+    ExprPtr length = std::make_unique<LiteralExpr>(LiteralKind::Integer, lengthSpan);
+    TypeSyntaxPtr type = std::make_unique<ArrayTypeSyntax>(std::move(element), std::move(length), arraySpan);
+    ExprPtr initializer = std::make_unique<LiteralExpr>(LiteralKind::Integer, initSpan);
+    StmtPtr stmt = std::make_unique<VarDeclStmt>(BindingKind::Immutable, Identifier{nameSpan}, std::move(type),
+                                                  std::move(initializer), fullSpan);
+
+    const std::string text = printStatement(sm, file, fullSpan, std::move(stmt));
+
+    const std::string expected = indent(3) + "VarDeclStmt binding=Immutable name=\"x\"\n" + //
+                                  indent(4) + "Type\n" +                                     //
+                                  indent(5) + "ArrayTypeSyntax\n" +                          //
+                                  indent(6) + "Element\n" +                                  //
+                                  indent(7) + "NamedTypeSyntax name=\"i32\"\n" +             //
+                                  indent(6) + "Length\n" +                                   //
+                                  indent(7) + "LiteralExpr kind=Integer lexeme=\"4\"\n";
+
+    KAI_CHECK(text.find(expected) != std::string::npos);
+}
+
+void testComposedArraySliceReferenceProgramExactRendering() {
+    // let values: &[i32] = [1, 2, 3]
+    // print(values[0])
+    // print(values.len)
+    SourceManager sm;
+    const std::string source = "let values: &[i32] = [1, 2, 3]\nprint(values[0])\nprint(values.len)";
+    const FileId file = sm.addVirtualFile("a.kai", source);
+
+    // --- statement 1: let values: &[i32] = [1, 2, 3] ---
+    const SourceSpan nameSpan = spanOf(file, 4, 10);      // values
+    const SourceSpan ampSpan = spanOf(file, 12, 13);      // &
+    const SourceSpan elementSpan = spanOf(file, 14, 17);  // i32
+    const SourceSpan sliceSpan = spanOf(file, 13, 18);    // [i32]
+    const SourceSpan refSpan = spanOf(file, 12, 18);      // &[i32]
+    const SourceSpan elem1Span = spanOf(file, 22, 23);    // 1
+    const SourceSpan elem2Span = spanOf(file, 25, 26);    // 2
+    const SourceSpan elem3Span = spanOf(file, 28, 29);    // 3
+    const SourceSpan arrayLitSpan = spanOf(file, 21, 30); // [1, 2, 3]
+    const SourceSpan varDeclSpan = spanOf(file, 0, 30);
+
+    TypeSyntaxPtr element = std::make_unique<NamedTypeSyntax>(Identifier{elementSpan}, elementSpan);
+    TypeSyntaxPtr slice = std::make_unique<SliceTypeSyntax>(std::move(element), sliceSpan);
+    TypeSyntaxPtr reference =
+        std::make_unique<ReferenceTypeSyntax>(ReferenceMutability::Immutable, ampSpan, std::move(slice), refSpan);
+
+    std::vector<ExprPtr> elements;
+    elements.push_back(std::make_unique<LiteralExpr>(LiteralKind::Integer, elem1Span));
+    elements.push_back(std::make_unique<LiteralExpr>(LiteralKind::Integer, elem2Span));
+    elements.push_back(std::make_unique<LiteralExpr>(LiteralKind::Integer, elem3Span));
+    ExprPtr arrayLiteral = std::make_unique<ArrayLiteralExpr>(std::move(elements), arrayLitSpan);
+
+    StmtPtr varDecl = std::make_unique<VarDeclStmt>(BindingKind::Immutable, Identifier{nameSpan},
+                                                     std::move(reference), std::move(arrayLiteral), varDeclSpan);
+
+    // --- statement 2: print(values[0]) ---
+    const SourceSpan print1Span = spanOf(file, 31, 36);
+    const SourceSpan valuesRef1Span = spanOf(file, 37, 43);
+    const SourceSpan zeroSpan = spanOf(file, 44, 45);
+    const SourceSpan indexExprSpan = spanOf(file, 37, 46);
+    const SourceSpan call1Span = spanOf(file, 31, 47);
+
+    ExprPtr print1 = std::make_unique<IdentifierExpr>(Identifier{print1Span}, print1Span);
+    ExprPtr valuesRef1 = std::make_unique<IdentifierExpr>(Identifier{valuesRef1Span}, valuesRef1Span);
+    ExprPtr zero = std::make_unique<LiteralExpr>(LiteralKind::Integer, zeroSpan);
+    ExprPtr indexExpr = std::make_unique<IndexExpr>(std::move(valuesRef1), std::move(zero), indexExprSpan);
+    std::vector<ExprPtr> call1Args;
+    call1Args.push_back(std::move(indexExpr));
+    ExprPtr call1 = std::make_unique<CallExpr>(std::move(print1), std::move(call1Args), call1Span);
+    StmtPtr printIndexStmt = std::make_unique<ExprStmt>(std::move(call1), call1Span);
+
+    // --- statement 3: print(values.len) ---
+    const SourceSpan print2Span = spanOf(file, 48, 53);
+    const SourceSpan valuesRef2Span = spanOf(file, 54, 60);
+    const SourceSpan lenSpan = spanOf(file, 61, 64);
+    const SourceSpan memberExprSpan = spanOf(file, 54, 64);
+    const SourceSpan call2Span = spanOf(file, 48, 65);
+
+    ExprPtr print2 = std::make_unique<IdentifierExpr>(Identifier{print2Span}, print2Span);
+    ExprPtr valuesRef2 = std::make_unique<IdentifierExpr>(Identifier{valuesRef2Span}, valuesRef2Span);
+    ExprPtr memberExpr = std::make_unique<MemberExpr>(std::move(valuesRef2), Identifier{lenSpan}, memberExprSpan);
+    std::vector<ExprPtr> call2Args;
+    call2Args.push_back(std::move(memberExpr));
+    ExprPtr call2 = std::make_unique<CallExpr>(std::move(print2), std::move(call2Args), call2Span);
+    StmtPtr printMemberStmt = std::make_unique<ExprStmt>(std::move(call2), call2Span);
+
+    std::vector<StmtPtr> statements;
+    statements.push_back(std::move(varDecl));
+    statements.push_back(std::move(printIndexStmt));
+    statements.push_back(std::move(printMemberStmt));
+
+    const SourceSpan wholeSpan = spanOf(file, 0, 65);
+    const std::string text = printStatements(sm, file, wholeSpan, std::move(statements));
+
+    const std::string expectedDecl = indent(3) + "VarDeclStmt binding=Immutable name=\"values\"\n" + //
+                                      indent(4) + "Type\n" +                                          //
+                                      indent(5) + "ReferenceTypeSyntax mutability=Immutable\n" +      //
+                                      indent(6) + "Referent\n" +                                      //
+                                      indent(7) + "SliceTypeSyntax\n" +                               //
+                                      indent(8) + "Element\n" +                                       //
+                                      indent(9) + "NamedTypeSyntax name=\"i32\"\n" +                  //
+                                      indent(4) + "Initializer\n" +                                   //
+                                      indent(5) + "ArrayLiteralExpr\n" +                              //
+                                      indent(6) + "Element\n" +                                       //
+                                      indent(7) + "LiteralExpr kind=Integer lexeme=\"1\"\n" +         //
+                                      indent(6) + "Element\n" +                                       //
+                                      indent(7) + "LiteralExpr kind=Integer lexeme=\"2\"\n" +         //
+                                      indent(6) + "Element\n" +                                       //
+                                      indent(7) + "LiteralExpr kind=Integer lexeme=\"3\"\n";
+
+    const std::string expectedIndexCall = indent(3) + "ExprStmt\n" +                            //
+                                           indent(4) + "CallExpr\n" +                            //
+                                           indent(5) + "IdentifierExpr name=\"print\"\n" +       //
+                                           indent(5) + "IndexExpr\n" +                           //
+                                           indent(6) + "Object\n" +                              //
+                                           indent(7) + "IdentifierExpr name=\"values\"\n" +      //
+                                           indent(6) + "Index\n" +                               //
+                                           indent(7) + "LiteralExpr kind=Integer lexeme=\"0\"\n";
+
+    const std::string expectedMemberCall = indent(3) + "ExprStmt\n" +                       //
+                                            indent(4) + "CallExpr\n" +                       //
+                                            indent(5) + "IdentifierExpr name=\"print\"\n" +  //
+                                            indent(5) + "MemberExpr member=\"len\"\n" +      //
+                                            indent(6) + "Object\n" +                         //
+                                            indent(7) + "IdentifierExpr name=\"values\"\n";
+
+    KAI_CHECK(text.find(expectedDecl) != std::string::npos);
+    KAI_CHECK(text.find(expectedIndexCall) != std::string::npos);
+    KAI_CHECK(text.find(expectedMemberCall) != std::string::npos);
+}
+
 // --- formatParseError ---
 
 ParseError parseError(SourceManager& sm, const std::string& source) {
@@ -905,6 +1288,18 @@ int main() {
     testWhileStmtExactRendering();
     testForStmtExactRendering();
     testNestedControlFlowExactRendering();
+
+    testArrayLiteralExprEmptyRendering();
+    testArrayLiteralExprPopulatedExactRendering();
+    testIndexExprExactRendering();
+    testNestedIndexExprExactRendering();
+    testMemberExprExactRendering();
+    testMemberCallCompositionExactRendering();
+    testReferenceTypeSyntaxImmutableExactRendering();
+    testReferenceTypeSyntaxMutableExactRendering();
+    testSliceTypeSyntaxExactRendering();
+    testArrayTypeSyntaxExactRendering();
+    testComposedArraySliceReferenceProgramExactRendering();
 
     testUnexpectedTokenWithoutExpected();
     testUnexpectedTokenWithExpected();
