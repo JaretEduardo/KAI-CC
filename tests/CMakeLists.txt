@@ -37,6 +37,9 @@ kai_add_test(ast_source_file_tests ast/SourceFileTests.cpp)
 
 kai_add_test(parser_tests parser/ParserTests.cpp)
 
+kai_add_test(semantic_type_tests semantic/TypeTests.cpp)
+kai_add_test(semantic_model_tests semantic/SemanticModelTests.cpp)
+
 # kaicc_cli-specific tests: linked against kaicc_cli (not kai_compiler
 # directly) since kai_add_test() always links kai_compiler and
 # kaicc_cli's TokenPrinter helpers live one layer above that.
