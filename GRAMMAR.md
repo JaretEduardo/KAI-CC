@@ -350,6 +350,21 @@ Examples:
     Option<User>
     Result<User, IOError>
 
+Physical newlines are permitted after `<`, around comma-separated
+argument boundaries, and before the closing `>` of an already-recognized
+generic_type argument list:
+
+    Result<
+        Config,
+        IOError
+    >
+
+This tolerance applies only inside an already-recognized `<...>`
+argument list - it does not extend to `type` generally (§11). It does
+not change the `type_list` production above: `type_list` still requires
+at least one argument (`Foo<>` remains invalid) and still permits no
+trailing comma (`Foo<T,>` remains invalid).
+
 ---
 
 # 18. Unit Type
@@ -665,7 +680,20 @@ Example:
         | identifier
         | array_literal
         | struct_literal
+        | unit_expression
         | "(" expression ")"
+
+    unit_expression =
+        "(" ")"
+
+Example:
+
+    Ok(())
+
+`unit_expression` is the unit value: an empty pair of parentheses used
+as an expression, evaluating to the same unit type documented as
+`unit_type` (§18). It is syntactically distinct from `"(" expression
+")"` above, which always wraps a non-empty inner expression.
 
 ---
 

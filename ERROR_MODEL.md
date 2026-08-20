@@ -669,7 +669,8 @@ fn save(config: &Config) -> Result<(), IOError> {
 
 `()` represents a value containing no application data.
 
-The exact unit syntax should be finalized in `TYPE_SYSTEM.md`.
+Unit syntax is committed: `()` as a type (GRAMMAR.md §18, `unit_type`)
+and `()` as a value (GRAMMAR.md §41, `unit_expression`).
 
 ---
 
@@ -1449,7 +1450,6 @@ The following decisions remain intentionally unresolved:
 * exact enum syntax
 * exact `match` syntax
 * whether `Result` is compiler-known or purely standard library
-* exact unit type syntax
 * error conversion mechanism
 * whether ignored Results are warnings or hard errors
 * whether `unwrap()` is always available

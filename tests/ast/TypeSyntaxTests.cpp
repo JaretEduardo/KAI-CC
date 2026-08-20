@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 using kai::FileId;
 using kai::SourceLocation;
@@ -14,6 +15,7 @@ using kai::ast::ArrayTypeSyntax;
 using kai::ast::Expr;
 using kai::ast::ExprKind;
 using kai::ast::ExprPtr;
+using kai::ast::GenericTypeSyntax;
 using kai::ast::Identifier;
 using kai::ast::LiteralExpr;
 using kai::ast::LiteralKind;
@@ -23,6 +25,7 @@ using kai::ast::ReferenceTypeSyntax;
 using kai::ast::SliceTypeSyntax;
 using kai::ast::TypeSyntaxKind;
 using kai::ast::TypeSyntaxPtr;
+using kai::ast::UnitTypeSyntax;
 
 namespace {
 
@@ -54,6 +57,20 @@ void testNamedTypeSyntaxDoesNotDistinguishPrimitiveFromUserNames() {
     const NamedTypeSyntax type(Identifier{span}, span);
 
     KAI_CHECK(type.kind() == TypeSyntaxKind::Named);
+}
+
+// --- UnitTypeSyntax ---
+
+void testUnitTypeSyntaxConstruction() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "()");
+    const SourceSpan span = spanOf(file, 0, 2);
+
+    const UnitTypeSyntax type(span);
+
+    KAI_CHECK(type.kind() == TypeSyntaxKind::Unit);
+    KAI_CHECK(type.span() == span);
+    KAI_CHECK(sm.text(type.span()) == "()");
 }
 
 // --- SliceTypeSyntax ---
@@ -283,11 +300,117 @@ void testNestedSliceOfFixedArray() {
     KAI_CHECK(outer.span() == outerSpan);
 }
 
+// --- GenericTypeSyntax ---
+
+void testGenericTypeSyntaxSingleArgument() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "Option<i32>");
+    const SourceSpan nameSpan = spanOf(file, 0, 6);  // Option
+    const SourceSpan argSpan = spanOf(file, 7, 10);  // i32
+    const SourceSpan fullSpan = spanOf(file, 0, 11); // Option<i32>
+
+    std::vector<TypeSyntaxPtr> arguments;
+    arguments.push_back(std::make_unique<NamedTypeSyntax>(Identifier{argSpan}, argSpan));
+    GenericTypeSyntax type(Identifier{nameSpan}, std::move(arguments), fullSpan);
+
+    KAI_CHECK(type.kind() == TypeSyntaxKind::Generic);
+    KAI_CHECK(sm.text(type.name().span) == "Option");
+    KAI_CHECK(type.arguments().size() == 1);
+    KAI_CHECK(sm.text(type.arguments()[0]->span()) == "i32");
+    KAI_CHECK(type.span() == fullSpan);
+
+    // Ownership actually transferred out of the local vector.
+    KAI_CHECK(arguments.empty());
+}
+
+void testGenericTypeSyntaxMultipleArgumentsOrdering() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "Result<i32, E>");
+    const SourceSpan nameSpan = spanOf(file, 0, 6);  // Result
+    const SourceSpan arg1Span = spanOf(file, 7, 10); // i32
+    const SourceSpan arg2Span = spanOf(file, 12, 13); // E
+    const SourceSpan fullSpan = spanOf(file, 0, 14); // Result<i32, E>
+
+    std::vector<TypeSyntaxPtr> arguments;
+    arguments.push_back(std::make_unique<NamedTypeSyntax>(Identifier{arg1Span}, arg1Span));
+    arguments.push_back(std::make_unique<NamedTypeSyntax>(Identifier{arg2Span}, arg2Span));
+    GenericTypeSyntax type(Identifier{nameSpan}, std::move(arguments), fullSpan);
+
+    KAI_CHECK(type.arguments().size() == 2);
+    KAI_CHECK(sm.text(type.arguments()[0]->span()) == "i32");
+    KAI_CHECK(sm.text(type.arguments()[1]->span()) == "E");
+    KAI_CHECK(type.span() == fullSpan);
+}
+
+void testGenericTypeSyntaxNestedGenericArgument() {
+    // Result<Option<i32>, E>
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "Result<Option<i32>, E>");
+    const SourceSpan outerNameSpan = spanOf(file, 0, 6);   // Result
+    const SourceSpan innerNameSpan = spanOf(file, 7, 13);  // Option
+    const SourceSpan innerArgSpan = spanOf(file, 14, 17);  // i32
+    const SourceSpan innerFullSpan = spanOf(file, 7, 18);  // Option<i32>
+    const SourceSpan outerArg2Span = spanOf(file, 20, 21); // E
+    const SourceSpan outerFullSpan = spanOf(file, 0, 22);  // Result<Option<i32>, E>
+
+    std::vector<TypeSyntaxPtr> innerArguments;
+    innerArguments.push_back(std::make_unique<NamedTypeSyntax>(Identifier{innerArgSpan}, innerArgSpan));
+    TypeSyntaxPtr inner =
+        std::make_unique<GenericTypeSyntax>(Identifier{innerNameSpan}, std::move(innerArguments), innerFullSpan);
+
+    std::vector<TypeSyntaxPtr> outerArguments;
+    outerArguments.push_back(std::move(inner));
+    outerArguments.push_back(std::make_unique<NamedTypeSyntax>(Identifier{outerArg2Span}, outerArg2Span));
+    GenericTypeSyntax outer(Identifier{outerNameSpan}, std::move(outerArguments), outerFullSpan);
+
+    KAI_CHECK(outer.arguments().size() == 2);
+    KAI_CHECK(outer.arguments()[0]->kind() == TypeSyntaxKind::Generic);
+
+    const auto& innerType = static_cast<const GenericTypeSyntax&>(*outer.arguments()[0]);
+    KAI_CHECK(sm.text(innerType.name().span) == "Option");
+    KAI_CHECK(innerType.arguments().size() == 1);
+    KAI_CHECK(sm.text(innerType.arguments()[0]->span()) == "i32");
+
+    KAI_CHECK(sm.text(outer.arguments()[1]->span()) == "E");
+    KAI_CHECK(outer.span() == outerFullSpan);
+}
+
+void testGenericTypeSyntaxArgumentContainingReferenceToSlice() {
+    // Buffer<&mut [f32]>
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "Buffer<&mut [f32]>");
+    const SourceSpan nameSpan = spanOf(file, 0, 6);        // Buffer
+    const SourceSpan operatorSpan = spanOf(file, 7, 11);   // &mut
+    const SourceSpan elementSpan = spanOf(file, 13, 16);   // f32
+    const SourceSpan sliceSpan = spanOf(file, 12, 17);     // [f32]
+    const SourceSpan referenceSpan = spanOf(file, 7, 17);  // &mut [f32]
+    const SourceSpan fullSpan = spanOf(file, 0, 18);       // Buffer<&mut [f32]>
+
+    TypeSyntaxPtr element = std::make_unique<NamedTypeSyntax>(Identifier{elementSpan}, elementSpan);
+    TypeSyntaxPtr slice = std::make_unique<SliceTypeSyntax>(std::move(element), sliceSpan);
+    TypeSyntaxPtr reference =
+        std::make_unique<ReferenceTypeSyntax>(ReferenceMutability::Mutable, operatorSpan, std::move(slice), referenceSpan);
+
+    std::vector<TypeSyntaxPtr> arguments;
+    arguments.push_back(std::move(reference));
+    GenericTypeSyntax type(Identifier{nameSpan}, std::move(arguments), fullSpan);
+
+    KAI_CHECK(type.arguments().size() == 1);
+    KAI_CHECK(type.arguments()[0]->kind() == TypeSyntaxKind::Reference);
+
+    const auto& referenceType = static_cast<const ReferenceTypeSyntax&>(*type.arguments()[0]);
+    KAI_CHECK(referenceType.mutability() == ReferenceMutability::Mutable);
+    KAI_CHECK(referenceType.referent().kind() == TypeSyntaxKind::Slice);
+    KAI_CHECK(type.span() == fullSpan);
+}
+
 } // namespace
 
 int main() {
     testNamedTypeSyntaxConstruction();
     testNamedTypeSyntaxDoesNotDistinguishPrimitiveFromUserNames();
+
+    testUnitTypeSyntaxConstruction();
 
     testSliceTypeSyntax();
 
@@ -304,6 +427,11 @@ int main() {
     testMutableReferenceToSlice();
     testReferenceToFixedArray();
     testNestedSliceOfFixedArray();
+
+    testGenericTypeSyntaxSingleArgument();
+    testGenericTypeSyntaxMultipleArgumentsOrdering();
+    testGenericTypeSyntaxNestedGenericArgument();
+    testGenericTypeSyntaxArgumentContainingReferenceToSlice();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }

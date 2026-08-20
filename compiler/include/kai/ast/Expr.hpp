@@ -20,7 +20,7 @@ enum class LiteralKind : std::uint8_t {
 };
 
 /// This vocabulary covers every Expr node kind implemented so far.
-/// Extend it as later parser milestones add StructLiteralExpr, TryExpr.
+/// Extend it as later parser milestones add StructLiteralExpr.
 enum class ExprKind : std::uint8_t {
     Literal,
     Identifier,
@@ -32,6 +32,8 @@ enum class ExprKind : std::uint8_t {
     ArrayLiteral,
     Index,
     Member,
+    Unit,
+    ErrorPropagation,
 };
 
 /// Base class for every expression syntax node.
@@ -113,6 +115,19 @@ public:
 
 private:
     ExprPtr inner_;
+};
+
+/// `()` as an expression - the unit value (GRAMMAR.md's primary
+/// expression grammar). Distinct from LiteralExpr on purpose: every
+/// LiteralKind mirrors exactly one lexed literal token (Integer, Float,
+/// String, Char, Bool), but `()` is a two-token syntactic form
+/// (LeftParen + RightParen) recognized structurally by the parser - the
+/// same shape as ArrayLiteralExpr or ParenExpr, neither of which is a
+/// LiteralExpr variant either. No fields. `span()` covers `(` through
+/// `)`.
+class UnitExpr final : public Expr {
+public:
+    explicit UnitExpr(SourceSpan span) noexcept : Expr(ExprKind::Unit, span) {}
 };
 
 /// A prefix unary operator: `-expr`, `!expr`, `&expr`, `&mut expr`.
@@ -264,6 +279,30 @@ public:
 private:
     ExprPtr object_;
     Identifier member_;
+};
+
+/// `operand?` - error propagation (GRAMMAR.md §40). Named after the
+/// grammar's own "error_propagation" production, not `TryExpr`: KAI
+/// explicitly does not use try/catch/throw as a language construct
+/// (ERROR_MODEL.md §3), so naming this node after `try` would suggest a
+/// relationship to a deliberately-unsupported construct it has nothing
+/// to do with. `operatorSpan` covers only the `?` token: unlike
+/// `&`/`&mut`, `?` has no alternate spelling to disambiguate, but its
+/// exact position is still stored (never derived from span() later) so
+/// future diagnostics can point at the operator itself, e.g. "cannot
+/// propagate an error from this context". `span()` covers `operand`
+/// through `?`.
+class ErrorPropagationExpr final : public Expr {
+public:
+    ErrorPropagationExpr(ExprPtr operand, SourceSpan operatorSpan, SourceSpan span) noexcept
+        : Expr(ExprKind::ErrorPropagation, span), operand_(std::move(operand)), operatorSpan_(operatorSpan) {}
+
+    const Expr& operand() const noexcept { return *operand_; }
+    SourceSpan operatorSpan() const noexcept { return operatorSpan_; }
+
+private:
+    ExprPtr operand_;
+    SourceSpan operatorSpan_;
 };
 
 } // namespace kai::ast
