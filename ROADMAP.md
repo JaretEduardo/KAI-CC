@@ -59,12 +59,12 @@ should produce a valid AST.
 
 Goal: understand and validate KAI programs.
 
-- [ ] Symbol table
-- [ ] Lexical scopes
-- [ ] Primitive types
+- [x] Symbol table
+- [x] Lexical scopes
+- [x] Primitive types
 - [ ] Type inference
 - [ ] Type checking
-- [ ] Function signatures
+- [x] Function signatures
 - [ ] Function calls
 - [ ] Return validation
 - [ ] Mutability checking

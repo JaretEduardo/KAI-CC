@@ -52,13 +52,23 @@ The standard library defines abstractions such as:
 
 ## 3. Prelude
 
-A very small set of commonly used symbols may be automatically available.
+A very small set of commonly used symbols is automatically available without an explicit `use`.
 
-Initial candidates:
+Committed initial prelude:
 
     print
     panic
     assert
+
+These are ordinary names, not keywords or reserved identifiers. Name resolution checks enclosing lexical scopes and the current file's own top-level declarations first; a prelude name is used only when nothing closer already claims that spelling. An ordinary user declaration - a local, a parameter, or a top-level function - may therefore shadow a prelude name:
+
+    fn print() {}
+
+    fn main() {
+        print()
+    }
+
+resolves `print()` to the user's own function, not the prelude one. Their exact call signatures (argument/return types) are not yet committed.
 
 Core language types such as:
 
