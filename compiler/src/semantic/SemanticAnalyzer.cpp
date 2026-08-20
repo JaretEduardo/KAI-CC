@@ -44,12 +44,21 @@ SemanticModel SemanticAnalyzer::analyze(const ast::SourceFile& file) {
         collectTopLevelDeclaration(*decl, model, topLevelNames);
     }
 
+    // `topLevelNames` doubles as the file scope for Pass 2's lookup
+    // chain - it is already exactly a Scope (same map type), already
+    // reflects Pass 1's "first declaration wins" policy for duplicate
+    // top-level functions, and already contains every top-level function
+    // regardless of source order, which is exactly what makes forward
+    // references and self/mutual recursion resolve correctly below with
+    // no extra bookkeeping.
+    const Scope preludeScope = buildPreludeScope(model);
+
     // Pass 2 only starts once every top-level FunctionDecl already has a
     // Symbol + resolved FunctionSignature (Pass 1, above) - a function's
     // own parameter types are read back from that signature here, never
     // re-resolved.
     for (const auto& decl : file.declarations()) {
-        analyzeTopLevelDeclarationBody(*decl, model);
+        analyzeTopLevelDeclarationBody(*decl, model, preludeScope, topLevelNames);
     }
 
     return model;
@@ -165,22 +174,39 @@ Type SemanticAnalyzer::resolveNamedTypeSyntax(const ast::NamedTypeSyntax& type, 
     return Type::error();
 }
 
-// --- Pass 2: function-body declaration/scope analysis (Phase 3A) ---
+// --- Pass 2: function-body declaration/scope/name analysis ---
+
+SemanticAnalyzer::Scope SemanticAnalyzer::buildPreludeScope(SemanticModel& model) const {
+    Scope prelude;
+    for (const std::string_view name : {"print", "panic", "assert"}) {
+        // No signature (nullopt, not a fabricated "() -> ()"), no
+        // declaredAt (nullopt - there is no source declaration), no
+        // declarationSymbol() mapping (there is no ast::Identifier to
+        // map from). Only the Symbol itself and this Scope's own
+        // name -> SymbolId entry exist.
+        Symbol symbol{SymbolKind::Builtin, std::string(name), std::nullopt, false, Type::unresolved(), std::nullopt};
+        const SymbolId id = model.addSymbol(std::move(symbol));
+        prelude.emplace(std::string(name), id);
+    }
+    return prelude;
+}
 
 // No `default:` case: DeclKind is fully implemented today, mirroring
 // collectTopLevelDeclaration()'s own exhaustive switch above.
-void SemanticAnalyzer::analyzeTopLevelDeclarationBody(const ast::Decl& decl, SemanticModel& model) const {
+void SemanticAnalyzer::analyzeTopLevelDeclarationBody(const ast::Decl& decl, SemanticModel& model,
+                                                       const Scope& preludeScope, const Scope& fileScope) const {
     switch (decl.kind()) {
         case ast::DeclKind::Function:
-            analyzeFunctionBody(static_cast<const ast::FunctionDecl&>(decl), model);
+            analyzeFunctionBody(static_cast<const ast::FunctionDecl&>(decl), model, preludeScope, fileScope);
             return;
     }
 }
 
-void SemanticAnalyzer::analyzeFunctionBody(const ast::FunctionDecl& fn, SemanticModel& model) const {
+void SemanticAnalyzer::analyzeFunctionBody(const ast::FunctionDecl& fn, SemanticModel& model,
+                                            const Scope& preludeScope, const Scope& fileScope) const {
     // Pass 1 unconditionally creates a Symbol + FunctionSignature for
     // every FunctionDecl (collectFunctionDecl(), above), including
-    // duplicates - so this always has a value by the time Pass 2 runs.
+    // duplicates - so this always has a value here.
     const auto fnId = model.declarationSymbol(fn.name());
     assert(fnId.has_value());
 
@@ -188,7 +214,8 @@ void SemanticAnalyzer::analyzeFunctionBody(const ast::FunctionDecl& fn, Semantic
     // calls model.addSymbol() once per parameter, which can reallocate
     // SemanticModel's internal Symbol storage - a reference taken from
     // that storage beforehand would be invalidated by the very first
-    // such call.
+    // such call. This is the exact bug class Phase 3A's own development
+    // hit once already; do not reintroduce it anywhere in this file.
     const std::vector<Type> parameterTypes = model.symbol(*fnId).signature->parameterTypes;
 
     // Parameters and the function's outermost body block share ONE
@@ -196,7 +223,9 @@ void SemanticAnalyzer::analyzeFunctionBody(const ast::FunctionDecl& fn, Semantic
     // comment): `fn f(x: i32) { let x = 1 }` is a same-scope
     // DuplicateSymbol, not shadowing. This is why the body below is
     // walked with analyzeBlockContents() directly into `functionScope`,
-    // not analyzeNestedBlock().
+    // not analyzeNestedBlock(). Parameters are declared before any
+    // expression in the body is analyzed, so they are visible to every
+    // use inside it.
     Scope functionScope;
 
     const std::vector<ast::Param>& params = fn.params();
@@ -208,7 +237,13 @@ void SemanticAnalyzer::analyzeFunctionBody(const ast::FunctionDecl& fn, Semantic
         declareInScope(functionScope, SymbolKind::Parameter, params[i].name, false, parameterTypes[i], model);
     }
 
-    analyzeBlockContents(fn.body(), functionScope, model);
+    // Lookup chain seeded innermost-known-so-far to outermost:
+    // [prelude, file]. A nested scope entered while walking the body
+    // pushes one more entry after `fileScope`, closer to the back -
+    // lookupIdentifier() always checks the back of this stack first.
+    ScopeStack scopeStack{&preludeScope, &fileScope};
+
+    analyzeBlockContents(fn.body(), functionScope, scopeStack, model);
 }
 
 SymbolId SemanticAnalyzer::declareInScope(Scope& scope, SymbolKind kind, const ast::Identifier& identifier,
@@ -230,7 +265,9 @@ SymbolId SemanticAnalyzer::declareInScope(Scope& scope, SymbolKind kind, const a
     // meaningful for tooling inspecting the invalid declaration itself,
     // even though a duplicate's name never enters `scope` below
     // ("first declaration wins" - same policy Pass 1 already applies to
-    // top-level functions).
+    // top-level functions, and the reason later lookups of a duplicated
+    // name keep resolving to the first declaration - see #18/#19 of this
+    // phase's design).
     Symbol symbol{kind, name, identifier.span, isMutable, type, std::nullopt};
     const SymbolId id = model.addSymbol(std::move(symbol));
     model.recordDeclaration(identifier, id);
@@ -242,93 +279,226 @@ SymbolId SemanticAnalyzer::declareInScope(Scope& scope, SymbolKind kind, const a
     return id;
 }
 
-void SemanticAnalyzer::analyzeBlockContents(const ast::BlockStmt& block, Scope& scope, SemanticModel& model) const {
+void SemanticAnalyzer::analyzeBlockContents(const ast::BlockStmt& block, Scope& scope, ScopeStack& scopeStack,
+                                             SemanticModel& model) const {
     for (const auto& stmt : block.statements()) {
-        analyzeStatement(*stmt, scope, model);
+        analyzeStatement(*stmt, scope, scopeStack, model);
     }
 }
 
-void SemanticAnalyzer::analyzeNestedBlock(const ast::BlockStmt& block, SemanticModel& model) const {
+void SemanticAnalyzer::analyzeNestedBlock(const ast::BlockStmt& block, const Scope& enclosingScope,
+                                           ScopeStack& scopeStack, SemanticModel& model) const {
+    scopeStack.push_back(&enclosingScope);
     Scope childScope;
-    analyzeBlockContents(block, childScope, model);
+    analyzeBlockContents(block, childScope, scopeStack, model);
+    scopeStack.pop_back();
 }
 
 // No `default:` case: StmtKind is fully implemented today, so -Wswitch
 // fires the moment a new StmtKind is added without a case here.
-void SemanticAnalyzer::analyzeStatement(const ast::Stmt& stmt, Scope& scope, SemanticModel& model) const {
+void SemanticAnalyzer::analyzeStatement(const ast::Stmt& stmt, Scope& scope, ScopeStack& scopeStack,
+                                         SemanticModel& model) const {
     switch (stmt.kind()) {
         case ast::StmtKind::VarDecl:
-            declareLocal(static_cast<const ast::VarDeclStmt&>(stmt), scope, model);
+            declareLocal(static_cast<const ast::VarDeclStmt&>(stmt), scope, scopeStack, model);
             return;
         case ast::StmtKind::If:
-            analyzeIfStmt(static_cast<const ast::IfStmt&>(stmt), model);
+            analyzeIfStmt(static_cast<const ast::IfStmt&>(stmt), scope, scopeStack, model);
             return;
         case ast::StmtKind::While:
-            analyzeWhileStmt(static_cast<const ast::WhileStmt&>(stmt), model);
+            analyzeWhileStmt(static_cast<const ast::WhileStmt&>(stmt), scope, scopeStack, model);
             return;
         case ast::StmtKind::For:
-            analyzeForStmt(static_cast<const ast::ForStmt&>(stmt), model);
+            analyzeForStmt(static_cast<const ast::ForStmt&>(stmt), scope, scopeStack, model);
             return;
         case ast::StmtKind::Block:
             // A bare `{ ... }` block statement is genuinely nested: it
             // is neither a function's own outermost body nor a
             // for-loop's own outermost body, so it gets its own fresh
             // child scope like any other nested block.
-            analyzeNestedBlock(static_cast<const ast::BlockStmt&>(stmt), model);
+            analyzeNestedBlock(static_cast<const ast::BlockStmt&>(stmt), scope, scopeStack, model);
             return;
         case ast::StmtKind::Expr:
-        case ast::StmtKind::Return:
-            // No expression traversal in this phase: an ExprStmt's
-            // expression and a ReturnStmt's value are never inspected -
-            // that is Phase 3B (identifier-use resolution).
+            analyzeExpr(static_cast<const ast::ExprStmt&>(stmt).expr(), scope, scopeStack, model);
             return;
+        case ast::StmtKind::Return: {
+            const auto& returnStmt = static_cast<const ast::ReturnStmt&>(stmt);
+            if (const ast::Expr* value = returnStmt.value(); value != nullptr) {
+                analyzeExpr(*value, scope, scopeStack, model);
+            }
+            return;
+        }
     }
 }
 
-void SemanticAnalyzer::declareLocal(const ast::VarDeclStmt& varDecl, Scope& scope, SemanticModel& model) const {
+void SemanticAnalyzer::declareLocal(const ast::VarDeclStmt& varDecl, Scope& scope, ScopeStack& scopeStack,
+                                     SemanticModel& model) const {
     // Resolve the annotation (if any) using the same resolver Pass 1
     // uses for signatures - same primitive/Unit/UnknownType/Unresolved
     // rules apply identically here. No annotation means Unresolved, not
-    // an inferred type: literal/expression-based inference is Phase 3B.
+    // an inferred type: literal/expression-based inference is out of
+    // scope for this phase entirely.
     const Type type = varDecl.type() == nullptr ? Type::unresolved() : resolveTypeSyntax(*varDecl.type(), model);
 
-    // Phase 3B will analyze the initializer here, against `scope` as it
-    // exists right now - i.e. before the local below is declared into
-    // it, so a binding can never be visible inside its own initializer
-    // (`let x = x` must resolve `x` on the right against any *outer*
-    // x, never the new one). Phase 3A does not resolve identifier uses
-    // at all yet, so there is nothing to call here.
+    // Analyzed against `scope`/`scopeStack` exactly as they exist right
+    // now - i.e. before the local below is declared into `scope` - so a
+    // binding can never be visible inside its own initializer: `let x =
+    // x` resolves the RHS `x` against any *outer* x (or
+    // UnknownIdentifier if there is none), never the new x being
+    // declared on this same line.
+    analyzeExpr(varDecl.initializer(), scope, scopeStack, model);
 
     const bool isMutable = varDecl.binding() == ast::BindingKind::Mutable;
     declareInScope(scope, SymbolKind::Local, varDecl.name(), isMutable, type, model);
 }
 
-void SemanticAnalyzer::analyzeIfStmt(const ast::IfStmt& ifStmt, SemanticModel& model) const {
-    // Conditions are not analyzed in this phase. Every branch body -
-    // including `else` - gets its own fresh, sibling scope: none of them
-    // share a scope with each other or with the enclosing one.
+void SemanticAnalyzer::analyzeIfStmt(const ast::IfStmt& ifStmt, const Scope& scope, ScopeStack& scopeStack,
+                                      SemanticModel& model) const {
+    // Every branch body - including `else` - gets its own fresh, sibling
+    // scope: none of them share a scope with each other or with the
+    // enclosing one. Each branch's own condition is analyzed against the
+    // ENCLOSING scope/stack, not that branch's own (not-yet-created)
+    // body scope.
     for (const ast::IfBranch& branch : ifStmt.branches()) {
-        analyzeNestedBlock(*branch.body, model);
+        analyzeExpr(*branch.condition, scope, scopeStack, model);
+        analyzeNestedBlock(*branch.body, scope, scopeStack, model);
     }
     if (const std::optional<ast::ElseClause>& elseClause = ifStmt.elseClause(); elseClause.has_value()) {
-        analyzeNestedBlock(*elseClause->body, model);
+        analyzeNestedBlock(*elseClause->body, scope, scopeStack, model);
     }
 }
 
-void SemanticAnalyzer::analyzeWhileStmt(const ast::WhileStmt& whileStmt, SemanticModel& model) const {
-    // Condition is not analyzed in this phase.
-    analyzeNestedBlock(whileStmt.body(), model);
+void SemanticAnalyzer::analyzeWhileStmt(const ast::WhileStmt& whileStmt, const Scope& scope, ScopeStack& scopeStack,
+                                         SemanticModel& model) const {
+    analyzeExpr(whileStmt.condition(), scope, scopeStack, model);
+    analyzeNestedBlock(whileStmt.body(), scope, scopeStack, model);
 }
 
-void SemanticAnalyzer::analyzeForStmt(const ast::ForStmt& forStmt, SemanticModel& model) const {
-    // Iterable is not analyzed in this phase. The loop variable and the
-    // body's outermost declarations share ONE scope (analyzeBlockContents
-    // directly, not analyzeNestedBlock) - but that one scope is itself
-    // freshly nested relative to the surrounding scope, so a same-named
+void SemanticAnalyzer::analyzeForStmt(const ast::ForStmt& forStmt, const Scope& scope, ScopeStack& scopeStack,
+                                       SemanticModel& model) const {
+    // Required order: the iterable is analyzed against the ENCLOSING
+    // scope/stack BEFORE the for-scope (and therefore the loop variable)
+    // exists at all - `for x in x` resolves the iterable `x` outward,
+    // never to the variable this very statement is about to declare.
+    analyzeExpr(forStmt.iterable(), scope, scopeStack, model);
+
+    // The loop variable and the body's outermost declarations share ONE
+    // scope (analyzeBlockContents directly, not analyzeNestedBlock) -
+    // but that one scope is itself freshly nested relative to the
+    // surrounding scope (pushed onto scopeStack below), so a same-named
     // outer declaration is shadowed, not duplicated.
+    scopeStack.push_back(&scope);
     Scope forScope;
     declareInScope(forScope, SymbolKind::Local, forStmt.variable(), false, Type::unresolved(), model);
-    analyzeBlockContents(forStmt.body(), forScope, model);
+    analyzeBlockContents(forStmt.body(), forScope, scopeStack, model);
+    scopeStack.pop_back();
+}
+
+std::optional<SymbolId> SemanticAnalyzer::lookupIdentifier(const std::string& name, const Scope& scope,
+                                                             const ScopeStack& scopeStack) const {
+    if (const auto it = scope.find(name); it != scope.end()) {
+        return it->second;
+    }
+    // Innermost-enclosing-first: scopeStack is ordered outermost-first
+    // (prelude, file, ...), so walking from the back finds the closest
+    // enclosing scope before falling all the way back to file/prelude.
+    for (auto it = scopeStack.rbegin(); it != scopeStack.rend(); ++it) {
+        const Scope& enclosing = **it;
+        if (const auto found = enclosing.find(name); found != enclosing.end()) {
+            return found->second;
+        }
+    }
+    return std::nullopt;
+}
+
+void SemanticAnalyzer::analyzeIdentifierExpr(const ast::IdentifierExpr& expr, const Scope& scope,
+                                              const ScopeStack& scopeStack, SemanticModel& model) const {
+    const std::string name(sources_.text(expr.name().span));
+
+    if (const std::optional<SymbolId> id = lookupIdentifier(name, scope, scopeStack)) {
+        model.recordResolution(expr, *id);
+        return;
+    }
+
+    // No fabricated Symbol, no resolution entry - just the error.
+    // Traversal continues normally: an unresolved identifier is a
+    // recoverable semantic issue, not a reason to stop analyzing the
+    // rest of the file (SemanticModel collects a vector<SemanticError>
+    // for exactly this reason).
+    model.addError(SemanticError{SemanticErrorKind::UnknownIdentifier, expr.name().span, std::nullopt});
+}
+
+// No `default:` case: ExprKind is fully implemented today, so -Wswitch
+// fires the moment a new ExprKind is added without a case here.
+void SemanticAnalyzer::analyzeExpr(const ast::Expr& expr, const Scope& scope, const ScopeStack& scopeStack,
+                                    SemanticModel& model) const {
+    switch (expr.kind()) {
+        case ast::ExprKind::Literal:
+        case ast::ExprKind::Unit:
+            // No identifier use, and no literal typing here either -
+            // see this class's own "no expression typing" note.
+            return;
+
+        case ast::ExprKind::Identifier:
+            analyzeIdentifierExpr(static_cast<const ast::IdentifierExpr&>(expr), scope, scopeStack, model);
+            return;
+
+        case ast::ExprKind::Call: {
+            const auto& call = static_cast<const ast::CallExpr&>(expr);
+            analyzeExpr(call.callee(), scope, scopeStack, model);
+            for (const auto& argument : call.arguments()) {
+                analyzeExpr(*argument, scope, scopeStack, model);
+            }
+            return;
+        }
+
+        case ast::ExprKind::Paren:
+            analyzeExpr(static_cast<const ast::ParenExpr&>(expr).inner(), scope, scopeStack, model);
+            return;
+
+        case ast::ExprKind::Unary:
+            analyzeExpr(static_cast<const ast::UnaryExpr&>(expr).operand(), scope, scopeStack, model);
+            return;
+
+        case ast::ExprKind::Binary: {
+            const auto& binary = static_cast<const ast::BinaryExpr&>(expr);
+            analyzeExpr(binary.left(), scope, scopeStack, model);
+            analyzeExpr(binary.right(), scope, scopeStack, model);
+            return;
+        }
+
+        case ast::ExprKind::Assignment: {
+            const auto& assignment = static_cast<const ast::AssignmentExpr&>(expr);
+            analyzeExpr(assignment.target(), scope, scopeStack, model);
+            analyzeExpr(assignment.value(), scope, scopeStack, model);
+            return;
+        }
+
+        case ast::ExprKind::ArrayLiteral:
+            for (const auto& element : static_cast<const ast::ArrayLiteralExpr&>(expr).elements()) {
+                analyzeExpr(*element, scope, scopeStack, model);
+            }
+            return;
+
+        case ast::ExprKind::Index: {
+            const auto& index = static_cast<const ast::IndexExpr&>(expr);
+            analyzeExpr(index.object(), scope, scopeStack, model);
+            analyzeExpr(index.index(), scope, scopeStack, model);
+            return;
+        }
+
+        case ast::ExprKind::Member:
+            // Only the object is a lexical name use. `member` is
+            // syntactic metadata whose meaning depends on the object's
+            // (not-yet-modeled) type, never resolved through lexical
+            // scopes - it must never produce UnknownIdentifier here.
+            analyzeExpr(static_cast<const ast::MemberExpr&>(expr).object(), scope, scopeStack, model);
+            return;
+
+        case ast::ExprKind::ErrorPropagation:
+            analyzeExpr(static_cast<const ast::ErrorPropagationExpr&>(expr).operand(), scope, scopeStack, model);
+            return;
+    }
 }
 
 } // namespace kai::semantic
