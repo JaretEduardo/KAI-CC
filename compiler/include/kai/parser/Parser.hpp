@@ -28,9 +28,10 @@ namespace kai::parser {
 /// ladder (assignment, logical or/and, equality, comparison, range,
 /// additive, multiplicative, unary, and postfix/primary) including
 /// array literals, indexing, and member access; and reference (`&T`,
-/// `&mut T`), slice (`[T]`), and fixed-array (`[T; N]`) type syntax,
-/// recursively composable wherever parseTypeSyntax() is used - enough
-/// for:
+/// `&mut T`), slice (`[T]`), fixed-array (`[T; N]`), unit (`()`), and
+/// generic use-site (`Result<T, E>`) type syntax, recursively composable
+/// wherever parseTypeSyntax() is used; the unit expression (`()`) and
+/// postfix error propagation (`expr?`) - enough for:
 ///
 ///     fn average(values: &[f64]) -> f64 {
 ///         mut total = 0.0
@@ -38,6 +39,11 @@ namespace kai::parser {
 ///             total = total + value
 ///         }
 ///         return total / values.len
+///     }
+///
+///     fn save() -> Result<(), IOError> {
+///         write_file()?
+///         return Ok(())
 ///     }
 ///
 /// Parser recognizes syntax only: it performs no semantic analysis, no
@@ -79,6 +85,14 @@ private:
     /// separators, never legal inside an expression.
     void skipSeparators();
 
+    /// Consumes zero or more Newline tokens only - never Semicolon.
+    /// Used exclusively inside an already-recognized generic type
+    /// argument list (GRAMMAR.md §17), where physical newlines are
+    /// tolerated but Semicolon must remain a real unexpected token, so
+    /// skipSeparators() (which conflates the two) is not appropriate
+    /// here.
+    void skipNewlines();
+
     /// Builds a ParseError anchored at the current token and returns it
     /// wrapped as std::unexpected, ready to convert into any
     /// ParseResult<T>. This is the single place that enforces the
@@ -97,6 +111,7 @@ private:
     ParseResult<ast::TypeSyntaxPtr> parseTypeSyntax();
     ParseResult<ast::TypeSyntaxPtr> parseReferenceTypeSyntax();
     ParseResult<ast::TypeSyntaxPtr> parseBracketTypeSyntax();
+    ParseResult<ast::TypeSyntaxPtr> parseGenericTypeSyntax(Token nameToken);
 
     // --- statements ---
     ParseResult<ast::BlockPtr> parseBlock();

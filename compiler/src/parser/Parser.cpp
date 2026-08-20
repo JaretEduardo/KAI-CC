@@ -40,6 +40,12 @@ void Parser::skipSeparators() {
     }
 }
 
+void Parser::skipNewlines() {
+    while (check(TokenKind::Newline)) {
+        advance();
+    }
+}
+
 std::unexpected<ParseError> Parser::fail(ParseErrorKind kind, std::optional<TokenKind> expectedKind) const {
     if (current_.kind() == TokenKind::Invalid) {
         kind = ParseErrorKind::InvalidToken;
@@ -154,8 +160,17 @@ ParseResult<ast::TypeSyntaxPtr> Parser::parseTypeSyntax() {
         return parseBracketTypeSyntax();
     }
     if (check(TokenKind::LeftParen)) {
-        // Unit type () - valid GRAMMAR.md §18 form, no UnitTypeSyntax node yet.
-        return fail(ParseErrorKind::UnsupportedSyntax);
+        // Unit type () (GRAMMAR.md §18) - exactly "(" ")", never a
+        // parenthesized type: (i32) is not valid type syntax, so no
+        // inner parseTypeSyntax() call happens here.
+        const Token openParen = advance();
+        auto closeParen = expect(TokenKind::RightParen);
+        if (!closeParen) {
+            return std::unexpected(closeParen.error());
+        }
+        const SourceSpan span(openParen.span().begin(), closeParen->span().end());
+        ast::TypeSyntaxPtr type = std::make_unique<ast::UnitTypeSyntax>(span);
+        return type;
     }
 
     auto nameTok = expect(TokenKind::Identifier);
@@ -164,12 +179,53 @@ ParseResult<ast::TypeSyntaxPtr> Parser::parseTypeSyntax() {
     }
 
     if (check(TokenKind::Less)) {
-        // Result<T, E>-shaped generic use-site syntax - valid grammar,
-        // no GenericTypeSyntax node yet.
-        return fail(ParseErrorKind::UnsupportedSyntax);
+        return parseGenericTypeSyntax(*nameTok);
     }
 
     ast::TypeSyntaxPtr type = std::make_unique<ast::NamedTypeSyntax>(ast::Identifier{nameTok->span()}, nameTok->span());
+    return type;
+}
+
+ParseResult<ast::TypeSyntaxPtr> Parser::parseGenericTypeSyntax(Token nameToken) {
+    auto lessTok = expect(TokenKind::Less);
+    if (!lessTok) {
+        return std::unexpected(lessTok.error());
+    }
+
+    // Newlines are tolerated inside an already-recognized generic
+    // argument list (GRAMMAR.md §17), never Semicolon - skipNewlines()
+    // is used here instead of skipSeparators() specifically for that
+    // reason.
+    skipNewlines();
+
+    std::vector<ast::TypeSyntaxPtr> arguments; // type_list requires >= 1 - the loop below always runs once.
+
+    while (true) {
+        auto argument = parseTypeSyntax(); // recursion: Result<&str, E>, Option<[i32]>, Result<Option<i32>, E>, ...
+        if (!argument) {
+            return std::unexpected(argument.error());
+        }
+        arguments.push_back(std::move(*argument));
+
+        // Tolerate a newline before deciding comma vs. closing `>` -
+        // this is also "before the final `>`" whenever no comma follows.
+        skipNewlines();
+
+        if (!match(TokenKind::Comma)) {
+            break;
+        }
+
+        skipNewlines(); // tolerate a newline right after a comma
+    }
+
+    auto greaterTok = expect(TokenKind::Greater);
+    if (!greaterTok) {
+        return std::unexpected(greaterTok.error());
+    }
+
+    const SourceSpan span(nameToken.span().begin(), greaterTok->span().end());
+    ast::TypeSyntaxPtr type =
+        std::make_unique<ast::GenericTypeSyntax>(ast::Identifier{nameToken.span()}, std::move(arguments), span);
     return type;
 }
 
@@ -798,9 +854,12 @@ ParseResult<ast::ExprPtr> Parser::parsePostfixExpression() {
         }
 
         if (check(TokenKind::Question)) {
-            // Valid GRAMMAR.md postfix form (error propagation) - no
-            // TryExpr node yet.
-            return fail(ParseErrorKind::UnsupportedSyntax);
+            const Token questionTok = advance();
+            const SourceSpan span((*expr)->span().begin(), questionTok.span().end());
+            ast::ExprPtr propagated =
+                std::make_unique<ast::ErrorPropagationExpr>(std::move(*expr), questionTok.span(), span);
+            expr = std::move(propagated);
+            continue;
         }
 
         break;
@@ -857,6 +916,17 @@ ParseResult<ast::ExprPtr> Parser::parseParenExpression() {
     auto openParen = expect(TokenKind::LeftParen);
     if (!openParen) {
         return std::unexpected(openParen.error());
+    }
+
+    // () as an expression is the unit value (GRAMMAR.md §41,
+    // unit_expression), checked before attempting parseExpression() -
+    // the same "check for the empty-form closer first" idiom already
+    // used by parseArrayLiteral()/parseArgumentList() for []/f().
+    if (check(TokenKind::RightParen)) {
+        const Token closeParen = advance();
+        const SourceSpan span(openParen->span().begin(), closeParen.span().end());
+        ast::ExprPtr expr = std::make_unique<ast::UnitExpr>(span);
+        return expr;
     }
 
     auto inner = parseExpression();

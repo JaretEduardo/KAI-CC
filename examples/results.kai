@@ -1,0 +1,4 @@
+fn save() -> Result<(), IOError> {
+    write_file()?
+    return Ok(())
+}

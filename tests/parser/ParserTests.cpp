@@ -24,11 +24,13 @@ using kai::ast::BindingKind;
 using kai::ast::CallExpr;
 using kai::ast::DeclKind;
 using kai::ast::ElseClause;
+using kai::ast::ErrorPropagationExpr;
 using kai::ast::Expr;
 using kai::ast::ExprKind;
 using kai::ast::ExprStmt;
 using kai::ast::ForStmt;
 using kai::ast::FunctionDecl;
+using kai::ast::GenericTypeSyntax;
 using kai::ast::Identifier;
 using kai::ast::IdentifierExpr;
 using kai::ast::IfBranch;
@@ -48,6 +50,8 @@ using kai::ast::StmtKind;
 using kai::ast::TypeSyntaxKind;
 using kai::ast::UnaryExpr;
 using kai::ast::UnaryOperator;
+using kai::ast::UnitExpr;
+using kai::ast::UnitTypeSyntax;
 using kai::ast::VarDeclStmt;
 using kai::ast::WhileStmt;
 using kai::parser::ParseError;
@@ -1394,19 +1398,23 @@ void testIndexingAtPostfixPositionParses() {
     KAI_CHECK(sm.text(index.index().span()) == "0");
 }
 
-void testTryOperatorRemainsUnsupportedSyntax() {
+void testTryOperatorParsesErrorPropagation() {
     SourceManager sm;
     const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    result?\n}");
     Parser parser(sm, file);
     auto result = parser.parseSourceFile();
 
-    KAI_CHECK(!result.has_value());
-    if (result) {
+    KAI_CHECK(result.has_value());
+    if (!result) {
         return;
     }
-    const ParseError& error = result.error();
-    KAI_CHECK(error.kind == ParseErrorKind::UnsupportedSyntax);
-    KAI_CHECK(error.actual == TokenKind::Question);
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::ErrorPropagation);
+    const auto& propagation = static_cast<const ErrorPropagationExpr&>(exprStmt.expr());
+    KAI_CHECK(propagation.operand().kind() == ExprKind::Identifier);
+    KAI_CHECK(sm.text(propagation.operand().span()) == "result");
+    KAI_CHECK(sm.text(propagation.operatorSpan()) == "?");
 }
 
 void testEOFAfterBinaryOperator() {
@@ -2376,20 +2384,22 @@ void testIndexInvalidTokenFails() {
     KAI_CHECK(error.kind == ParseErrorKind::InvalidToken);
 }
 
-void testIndexThenQuestionRemainsUnsupportedSyntax() {
-    // Adding indexing/member postfix forms must not regress `?`.
+void testIndexThenQuestionParsesErrorPropagation() {
+    // values[0]? -> ErrorPropagationExpr(IndexExpr(values, 0))
     SourceManager sm;
     const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    values[0]?\n}");
     Parser parser(sm, file);
     auto result = parser.parseSourceFile();
 
-    KAI_CHECK(!result.has_value());
-    if (result) {
+    KAI_CHECK(result.has_value());
+    if (!result) {
         return;
     }
-    const ParseError& error = result.error();
-    KAI_CHECK(error.kind == ParseErrorKind::UnsupportedSyntax);
-    KAI_CHECK(error.actual == TokenKind::Question);
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::ErrorPropagation);
+    const auto& propagation = static_cast<const ErrorPropagationExpr&>(exprStmt.expr());
+    KAI_CHECK(propagation.operand().kind() == ExprKind::Index);
 }
 
 // --- Member access ---
@@ -2971,26 +2981,802 @@ void testArrayTypeInVariableAnnotation() {
     KAI_CHECK(decl.initializer().kind() == ExprKind::ArrayLiteral);
 }
 
-// --- Unsupported regressions ---
+// --- Unit type ---
 
-void testGenericTypeRemainsUnsupportedSyntax() {
+void testUnitTypeAsReturnType() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn f() -> () {}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    KAI_CHECK(fn.returnType() != nullptr);
+    KAI_CHECK(fn.returnType()->kind() == TypeSyntaxKind::Unit);
+    KAI_CHECK(sm.text(fn.returnType()->span()) == "()");
+}
+
+void testFunctionWithoutArrowStillHasNullReturnType() {
+    // The absence of `-> type` must never be conflated with an explicit
+    // `-> ()`: only the latter constructs a UnitTypeSyntax.
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn f() {}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    KAI_CHECK(fn.returnType() == nullptr);
+}
+
+void testUnitTypeAsParameterType() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn f(x: ()) {}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    KAI_CHECK(fn.params()[0].type->kind() == TypeSyntaxKind::Unit);
+}
+
+void testUnitTypeInVariableAnnotation() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: () = ()\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(decl.type() != nullptr);
+    KAI_CHECK(decl.type()->kind() == TypeSyntaxKind::Unit);
+    KAI_CHECK(decl.initializer().kind() == ExprKind::Unit);
+}
+
+void testUnitTypeInsideGenericArgument() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Result<(), E> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& generic = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(generic.arguments().size() == 2);
+    KAI_CHECK(generic.arguments()[0]->kind() == TypeSyntaxKind::Unit);
+    KAI_CHECK(generic.arguments()[1]->kind() == TypeSyntaxKind::Named);
+}
+
+void testParenthesizedTypeFails() {
+    // (i32) is not valid type syntax: UnitTypeSyntax requires an
+    // immediate RightParen, so a type-position "(i32)" fails there
+    // rather than being reinterpreted as a parenthesized type.
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: (i32) = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::RightParen);
+    KAI_CHECK(error.actual == TokenKind::Identifier);
+}
+
+// --- Unit expression ---
+
+void testUnitExpressionAtPrimaryPosition() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    ()\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::Unit);
+    KAI_CHECK(sm.text(exprStmt.expr().span()) == "()");
+}
+
+void testUnitExpressionAsCallArgument() {
+    // Ok(())
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    Ok(())\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::Call);
+    const auto& call = static_cast<const CallExpr&>(exprStmt.expr());
+    KAI_CHECK(call.arguments().size() == 1);
+    KAI_CHECK(call.arguments()[0]->kind() == ExprKind::Unit);
+}
+
+void testUnitExpressionMultipleCallArguments() {
+    // f((), ())
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    f((), ())\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    const auto& call = static_cast<const CallExpr&>(exprStmt.expr());
+    KAI_CHECK(call.arguments().size() == 2);
+    KAI_CHECK(call.arguments()[0]->kind() == ExprKind::Unit);
+    KAI_CHECK(call.arguments()[1]->kind() == ExprKind::Unit);
+}
+
+void testUnitExpressionAsReturnValue() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    return ()\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& returnStmt = static_cast<const ReturnStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(returnStmt.value() != nullptr);
+    KAI_CHECK(returnStmt.value()->kind() == ExprKind::Unit);
+}
+
+void testUnitExpressionAsVarDeclInitializer() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x = ()\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(decl.initializer().kind() == ExprKind::Unit);
+}
+
+void testUnitExpressionTypeMismatchStillParsesSyntactically() {
+    // let x: i32 = () is syntactically valid; type mismatch is semantic
+    // analysis's job, not the parser's.
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: i32 = ()\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(decl.type()->kind() == TypeSyntaxKind::Named);
+    KAI_CHECK(decl.initializer().kind() == ExprKind::Unit);
+}
+
+void testDoubleParenWrapsUnitExpression() {
+    // (()) -> ParenExpr(UnitExpr)
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    (())\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::Paren);
+    const auto& paren = static_cast<const ParenExpr&>(exprStmt.expr());
+    KAI_CHECK(paren.inner().kind() == ExprKind::Unit);
+    KAI_CHECK(sm.text(paren.inner().span()) == "()");
+    KAI_CHECK(sm.text(paren.span()) == "(())");
+}
+
+void testTripleParenNestsParenAroundUnitExpression() {
+    // ((())) -> ParenExpr(ParenExpr(UnitExpr))
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    ((()))\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::Paren);
+    const auto& outer = static_cast<const ParenExpr&>(exprStmt.expr());
+    KAI_CHECK(outer.inner().kind() == ExprKind::Paren);
+    const auto& inner = static_cast<const ParenExpr&>(outer.inner());
+    KAI_CHECK(inner.inner().kind() == ExprKind::Unit);
+}
+
+// --- Generic types ---
+
+void testGenericTypeSingleArgument() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Option<i32> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(decl.type()->kind() == TypeSyntaxKind::Generic);
+    const auto& generic = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(sm.text(generic.name().span) == "Option");
+    KAI_CHECK(generic.arguments().size() == 1);
+    KAI_CHECK(sm.text(generic.arguments()[0]->span()) == "i32");
+    KAI_CHECK(sm.text(generic.span()) == "Option<i32>");
+}
+
+void testGenericTypeTwoArguments() {
     SourceManager sm;
     const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Result<i32, E> = y\n}");
     Parser parser(sm, file);
     auto result = parser.parseSourceFile();
 
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& generic = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(sm.text(generic.name().span) == "Result");
+    KAI_CHECK(generic.arguments().size() == 2);
+    KAI_CHECK(sm.text(generic.arguments()[0]->span()) == "i32");
+    KAI_CHECK(sm.text(generic.arguments()[1]->span()) == "E");
+}
+
+void testGenericTypeNestedGenericArgument() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Result<Option<i32>, E> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& outer = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(outer.arguments()[0]->kind() == TypeSyntaxKind::Generic);
+    const auto& inner = static_cast<const GenericTypeSyntax&>(*outer.arguments()[0]);
+    KAI_CHECK(sm.text(inner.name().span) == "Option");
+    KAI_CHECK(inner.arguments().size() == 1);
+    KAI_CHECK(sm.text(inner.arguments()[0]->span()) == "i32");
+}
+
+void testGenericTypeArgumentIsReference() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Result<&str, IOError> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& generic = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(generic.arguments()[0]->kind() == TypeSyntaxKind::Reference);
+}
+
+void testGenericTypeArgumentIsMutableSliceReference() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Buffer<&mut [f32]> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& generic = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(sm.text(generic.name().span) == "Buffer");
+    KAI_CHECK(generic.arguments().size() == 1);
+    KAI_CHECK(generic.arguments()[0]->kind() == TypeSyntaxKind::Reference);
+    const auto& reference = static_cast<const ReferenceTypeSyntax&>(*generic.arguments()[0]);
+    KAI_CHECK(reference.mutability() == ReferenceMutability::Mutable);
+    KAI_CHECK(reference.referent().kind() == TypeSyntaxKind::Slice);
+}
+
+void testGenericTypeArgumentIsUnitType() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Result<(), IOError> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& generic = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(generic.arguments()[0]->kind() == TypeSyntaxKind::Unit);
+    KAI_CHECK(generic.arguments()[1]->kind() == TypeSyntaxKind::Named);
+}
+
+void testNestedGenericClosingGreaterGreater() {
+    // Foo<Bar<Baz>>: the Lexer emits two consecutive Greater tokens (no
+    // combined shift token) - the inner GenericTypeSyntax consumes the
+    // first, the outer consumes the second.
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Foo<Bar<Baz>> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& outer = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(sm.text(outer.name().span) == "Foo");
+    KAI_CHECK(outer.arguments().size() == 1);
+    KAI_CHECK(outer.arguments()[0]->kind() == TypeSyntaxKind::Generic);
+    const auto& inner = static_cast<const GenericTypeSyntax&>(*outer.arguments()[0]);
+    KAI_CHECK(sm.text(inner.name().span) == "Bar");
+    KAI_CHECK(inner.arguments().size() == 1);
+    KAI_CHECK(sm.text(inner.arguments()[0]->span()) == "Baz");
+    KAI_CHECK(sm.text(outer.span()) == "Foo<Bar<Baz>>");
+}
+
+void testGenericTypeInFunctionParameter() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn f(x: Option<i32>) {}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    KAI_CHECK(fn.params()[0].type->kind() == TypeSyntaxKind::Generic);
+}
+
+void testGenericTypeInFunctionReturnType() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn f() -> Result<i32, E> {\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    KAI_CHECK(fn.returnType() != nullptr);
+    KAI_CHECK(fn.returnType()->kind() == TypeSyntaxKind::Generic);
+}
+
+void testGenericTypeInVariableAnnotation() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Option<i32> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(decl.type()->kind() == TypeSyntaxKind::Generic);
+}
+
+void testEmptyGenericArgumentListFails() {
+    // Foo<> - type_list requires at least one argument.
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Foo<> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
     KAI_CHECK(!result.has_value());
     if (result) {
         return;
     }
     const ParseError& error = result.error();
-    KAI_CHECK(error.kind == ParseErrorKind::UnsupportedSyntax);
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.actual == TokenKind::Greater);
+}
+
+void testTrailingCommaInGenericArgumentListFails() {
+    // Foo<T,> - no trailing comma.
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Foo<T,> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.actual == TokenKind::Greater);
+}
+
+void testMissingClosingGreaterFails() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Foo<T = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::Greater);
+}
+
+// --- Multiline generic type arguments ---
+
+void testMultilineGenericTwoArguments() {
+    SourceManager sm;
+    const std::string source = "fn main() {\n    let x: Result<\n        Config,\n        IOError\n    > = y\n}";
+    const FileId file = sm.addVirtualFile("a.kai", source);
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& generic = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(sm.text(generic.name().span) == "Result");
+    KAI_CHECK(generic.arguments().size() == 2);
+    KAI_CHECK(sm.text(generic.arguments()[0]->span()) == "Config");
+    KAI_CHECK(sm.text(generic.arguments()[1]->span()) == "IOError");
+}
+
+void testMultilineNestedGeneric() {
+    SourceManager sm;
+    const std::string source = "fn main() {\n    let x: Result<\n        Option<\n            Config\n        >,\n        "
+                                "IOError\n    > = y\n}";
+    const FileId file = sm.addVirtualFile("a.kai", source);
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& outer = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(outer.arguments().size() == 2);
+    KAI_CHECK(outer.arguments()[0]->kind() == TypeSyntaxKind::Generic);
+    const auto& inner = static_cast<const GenericTypeSyntax&>(*outer.arguments()[0]);
+    KAI_CHECK(sm.text(inner.name().span) == "Option");
+    KAI_CHECK(sm.text(inner.arguments()[0]->span()) == "Config");
+    KAI_CHECK(sm.text(outer.arguments()[1]->span()) == "IOError");
+}
+
+void testMultilineGenericSingleArgument() {
+    // Foo<\n    T\n>
+    SourceManager sm;
+    const std::string source = "fn main() {\n    let x: Foo<\n        T\n    > = y\n}";
+    const FileId file = sm.addVirtualFile("a.kai", source);
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& generic = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(generic.arguments().size() == 1);
+    KAI_CHECK(sm.text(generic.arguments()[0]->span()) == "T");
+}
+
+void testMultilineGenericNewlineBeforeAndAfterComma() {
+    // Foo<\n    T\n    ,\n    E\n>
+    SourceManager sm;
+    const std::string source = "fn main() {\n    let x: Foo<\n        T\n        ,\n        E\n    > = y\n}";
+    const FileId file = sm.addVirtualFile("a.kai", source);
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& decl = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
+    const auto& generic = static_cast<const GenericTypeSyntax&>(*decl.type());
+    KAI_CHECK(generic.arguments().size() == 2);
+    KAI_CHECK(sm.text(generic.arguments()[0]->span()) == "T");
+    KAI_CHECK(sm.text(generic.arguments()[1]->span()) == "E");
+}
+
+void testMultilineGenericSemicolonFails() {
+    // Foo<\n    T;\n    E\n> - Semicolon must remain a real unexpected
+    // token, never silently skipped as if it were whitespace.
+    SourceManager sm;
+    const std::string source = "fn main() {\n    let x: Foo<\n        T;\n        E\n    > = y\n}";
+    const FileId file = sm.addVirtualFile("a.kai", source);
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::Greater);
+    KAI_CHECK(error.actual == TokenKind::Semicolon);
+}
+
+void testNewlineBeforeGenericLessDoesNotFormGeneric() {
+    // Result\n<T> - the newline immediately after "Result" is not
+    // suppressed (only () and [] suppress newlines), so parseTypeSyntax
+    // completes as a plain NamedTypeSyntax("Result") without ever
+    // looking at `<`; the enclosing variable declaration then rejects
+    // the leftover Newline where it expects `=`.
+    SourceManager sm;
+    const std::string source = "fn main() {\n    let x: Result\n    <T> = y\n}";
+    const FileId file = sm.addVirtualFile("a.kai", source);
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::Equal);
+    KAI_CHECK(error.actual == TokenKind::Newline);
+}
+
+void testNewlineAfterAmpDoesNotGainToleranceInTypePosition() {
+    SourceManager sm;
+    const std::string source = "fn main() {\n    let x: &\n    T = y\n}";
+    const FileId file = sm.addVirtualFile("a.kai", source);
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::Identifier);
+    KAI_CHECK(error.actual == TokenKind::Newline);
+}
+
+void testNewlineAfterAmpMutDoesNotGainToleranceInTypePosition() {
+    SourceManager sm;
+    const std::string source = "fn main() {\n    let x: &mut\n    T = y\n}";
+    const FileId file = sm.addVirtualFile("a.kai", source);
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::Identifier);
+    KAI_CHECK(error.actual == TokenKind::Newline);
+}
+
+// --- Error propagation ---
+
+void testErrorPropagationAfterCall() {
+    // load()? -> ErrorPropagationExpr(CallExpr)
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    load()?\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::ErrorPropagation);
+    const auto& propagation = static_cast<const ErrorPropagationExpr&>(exprStmt.expr());
+    KAI_CHECK(propagation.operand().kind() == ExprKind::Call);
+    KAI_CHECK(sm.text(propagation.operatorSpan()) == "?");
+    KAI_CHECK(sm.text(propagation.span()) == "load()?");
+}
+
+void testErrorPropagationAfterMember() {
+    // object.member? -> ErrorPropagationExpr(MemberExpr)
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    object.member?\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::ErrorPropagation);
+    const auto& propagation = static_cast<const ErrorPropagationExpr&>(exprStmt.expr());
+    KAI_CHECK(propagation.operand().kind() == ExprKind::Member);
+}
+
+void testErrorPropagationThenMemberComposes() {
+    // load()?.field -> MemberExpr(ErrorPropagationExpr(CallExpr))
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    load()?.field\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::Member);
+    const auto& member = static_cast<const MemberExpr&>(exprStmt.expr());
+    KAI_CHECK(sm.text(member.member().span) == "field");
+    KAI_CHECK(member.object().kind() == ExprKind::ErrorPropagation);
+    const auto& propagation = static_cast<const ErrorPropagationExpr&>(member.object());
+    KAI_CHECK(propagation.operand().kind() == ExprKind::Call);
+}
+
+void testMemberThenErrorPropagationThenCallComposes() {
+    // foo.bar?() -> CallExpr(ErrorPropagationExpr(MemberExpr))
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    foo.bar?()\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::Call);
+    const auto& call = static_cast<const CallExpr&>(exprStmt.expr());
+    KAI_CHECK(call.callee().kind() == ExprKind::ErrorPropagation);
+    const auto& propagation = static_cast<const ErrorPropagationExpr&>(call.callee());
+    KAI_CHECK(propagation.operand().kind() == ExprKind::Member);
+    const auto& member = static_cast<const MemberExpr&>(propagation.operand());
+    KAI_CHECK(sm.text(member.member().span) == "bar");
+}
+
+void testDoubleErrorPropagationComposes() {
+    // value?? -> ErrorPropagationExpr(ErrorPropagationExpr(IdentifierExpr))
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    value??\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::ErrorPropagation);
+    const auto& outer = static_cast<const ErrorPropagationExpr&>(exprStmt.expr());
+    KAI_CHECK(outer.operand().kind() == ExprKind::ErrorPropagation);
+    const auto& inner = static_cast<const ErrorPropagationExpr&>(outer.operand());
+    KAI_CHECK(inner.operand().kind() == ExprKind::Identifier);
+    KAI_CHECK(sm.text(inner.operand().span()) == "value");
+
+    // Each `?` has its own distinct operatorSpan.
+    KAI_CHECK(sm.text(inner.operatorSpan()) == "?");
+    KAI_CHECK(sm.text(outer.operatorSpan()) == "?");
+    KAI_CHECK(inner.operatorSpan() != outer.operatorSpan());
+
+    KAI_CHECK(sm.text(inner.span()) == "value?");
+    KAI_CHECK(sm.text(outer.span()) == "value??");
+}
+
+void testStandaloneQuestionRemainsMalformed() {
+    // A bare `?` with no operand is not postfix error propagation - it
+    // fails naturally in primary-expression parsing, the same as any
+    // other token primary() does not recognize.
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    ?\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.actual == TokenKind::Question);
+}
+
+// --- Unsupported regressions ---
+
+void testGenericFunctionDeclarationRemainsUnsupported() {
+    // fn identity<T>(value: T) -> T {} - generic *declarations* remain
+    // out of scope; only generic use-site syntax (Result<T, E>) parses.
+    // Unchanged, preexisting classification: parseFunctionDecl expects
+    // LeftParen immediately after the function name and has no generic-
+    // parameter-list grammar at all.
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn identity<T>(value: T) -> T {\n    return value\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::UnexpectedToken);
+    KAI_CHECK(error.expected == TokenKind::LeftParen);
     KAI_CHECK(error.actual == TokenKind::Less);
 }
 
-void testUnitTypeRemainsUnsupportedSyntax() {
+void testGenericStructDeclarationRemainsUnsupported() {
+    // struct Box<T> {} - struct declarations remain unsupported
+    // entirely, unaffected by generic use-site parsing.
     SourceManager sm;
-    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: () = y\n}");
+    const FileId file = sm.addVirtualFile("a.kai", "struct Box<T> {}");
     Parser parser(sm, file);
     auto result = parser.parseSourceFile();
 
@@ -3000,7 +3786,61 @@ void testUnitTypeRemainsUnsupportedSyntax() {
     }
     const ParseError& error = result.error();
     KAI_CHECK(error.kind == ParseErrorKind::UnsupportedSyntax);
-    KAI_CHECK(error.actual == TokenKind::LeftParen);
+    KAI_CHECK(error.actual == TokenKind::KwStruct);
+}
+
+void testComparisonLessThanUnaffectedByGenerics() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    a < b\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::Binary);
+    KAI_CHECK(static_cast<const BinaryExpr&>(exprStmt.expr()).op() == BinaryOperator::Less);
+}
+
+void testComparisonGreaterThanUnaffectedByGenerics() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    a > b\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::Binary);
+    KAI_CHECK(static_cast<const BinaryExpr&>(exprStmt.expr()).op() == BinaryOperator::Greater);
+}
+
+void testChainedComparisonsWithLogicalAndUnaffectedByGenerics() {
+    // a < b && c > d
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    a < b && c > d\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(result.has_value());
+    if (!result) {
+        return;
+    }
+    const auto& fn = static_cast<const FunctionDecl&>(*result->declarations()[0]);
+    const auto& exprStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
+    KAI_CHECK(exprStmt.expr().kind() == ExprKind::Binary);
+    const auto& andExpr = static_cast<const BinaryExpr&>(exprStmt.expr());
+    KAI_CHECK(andExpr.op() == BinaryOperator::And);
+    KAI_CHECK(andExpr.left().kind() == ExprKind::Binary);
+    KAI_CHECK(static_cast<const BinaryExpr&>(andExpr.left()).op() == BinaryOperator::Less);
+    KAI_CHECK(andExpr.right().kind() == ExprKind::Binary);
+    KAI_CHECK(static_cast<const BinaryExpr&>(andExpr.right()).op() == BinaryOperator::Greater);
 }
 
 // --- InvalidToken ---
@@ -3036,6 +3876,36 @@ void testInvalidTokenInReferenceReferent() {
 void testInvalidTokenInBracketTypeElement() {
     SourceManager sm;
     const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: &[$] = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::InvalidToken);
+}
+
+void testInvalidTokenAsFirstGenericArgument() {
+    // Foo<$>
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Foo<$> = y\n}");
+    Parser parser(sm, file);
+    auto result = parser.parseSourceFile();
+
+    KAI_CHECK(!result.has_value());
+    if (result) {
+        return;
+    }
+    const ParseError& error = result.error();
+    KAI_CHECK(error.kind == ParseErrorKind::InvalidToken);
+}
+
+void testInvalidTokenAfterGenericComma() {
+    // Foo<T, $>
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "fn main() {\n    let x: Foo<T, $> = y\n}");
     Parser parser(sm, file);
     auto result = parser.parseSourceFile();
 
@@ -3132,7 +4002,7 @@ int main() {
     testInvalidTokenInsideVarInitializer();
     testMemberAccessAfterCallParses();
     testIndexingAtPostfixPositionParses();
-    testTryOperatorRemainsUnsupportedSyntax();
+    testTryOperatorParsesErrorPropagation();
     testEOFAfterBinaryOperator();
     testEOFAfterUnaryOperator();
 
@@ -3198,7 +4068,7 @@ int main() {
     testIndexExtraTokenFails();
     testIndexCommaFails();
     testIndexInvalidTokenFails();
-    testIndexThenQuestionRemainsUnsupportedSyntax();
+    testIndexThenQuestionParsesErrorPropagation();
 
     testMemberThenCall();
     testMemberOnIntegerLiteral();
@@ -3237,12 +4107,63 @@ int main() {
     testReferenceTypeInFunctionReturnType();
     testArrayTypeInVariableAnnotation();
 
-    testGenericTypeRemainsUnsupportedSyntax();
-    testUnitTypeRemainsUnsupportedSyntax();
+    testUnitTypeAsReturnType();
+    testFunctionWithoutArrowStillHasNullReturnType();
+    testUnitTypeAsParameterType();
+    testUnitTypeInVariableAnnotation();
+    testUnitTypeInsideGenericArgument();
+    testParenthesizedTypeFails();
+
+    testUnitExpressionAtPrimaryPosition();
+    testUnitExpressionAsCallArgument();
+    testUnitExpressionMultipleCallArguments();
+    testUnitExpressionAsReturnValue();
+    testUnitExpressionAsVarDeclInitializer();
+    testUnitExpressionTypeMismatchStillParsesSyntactically();
+    testDoubleParenWrapsUnitExpression();
+    testTripleParenNestsParenAroundUnitExpression();
+
+    testGenericTypeSingleArgument();
+    testGenericTypeTwoArguments();
+    testGenericTypeNestedGenericArgument();
+    testGenericTypeArgumentIsReference();
+    testGenericTypeArgumentIsMutableSliceReference();
+    testGenericTypeArgumentIsUnitType();
+    testNestedGenericClosingGreaterGreater();
+    testGenericTypeInFunctionParameter();
+    testGenericTypeInFunctionReturnType();
+    testGenericTypeInVariableAnnotation();
+    testEmptyGenericArgumentListFails();
+    testTrailingCommaInGenericArgumentListFails();
+    testMissingClosingGreaterFails();
+
+    testMultilineGenericTwoArguments();
+    testMultilineNestedGeneric();
+    testMultilineGenericSingleArgument();
+    testMultilineGenericNewlineBeforeAndAfterComma();
+    testMultilineGenericSemicolonFails();
+    testNewlineBeforeGenericLessDoesNotFormGeneric();
+    testNewlineAfterAmpDoesNotGainToleranceInTypePosition();
+    testNewlineAfterAmpMutDoesNotGainToleranceInTypePosition();
+
+    testErrorPropagationAfterCall();
+    testErrorPropagationAfterMember();
+    testErrorPropagationThenMemberComposes();
+    testMemberThenErrorPropagationThenCallComposes();
+    testDoubleErrorPropagationComposes();
+    testStandaloneQuestionRemainsMalformed();
+
+    testGenericFunctionDeclarationRemainsUnsupported();
+    testGenericStructDeclarationRemainsUnsupported();
+    testComparisonLessThanUnaffectedByGenerics();
+    testComparisonGreaterThanUnaffectedByGenerics();
+    testChainedComparisonsWithLogicalAndUnaffectedByGenerics();
 
     testInvalidTokenInArrayLength();
     testInvalidTokenInReferenceReferent();
     testInvalidTokenInBracketTypeElement();
+    testInvalidTokenAsFirstGenericArgument();
+    testInvalidTokenAfterGenericComma();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }
