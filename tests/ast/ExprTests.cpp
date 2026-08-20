@@ -15,6 +15,7 @@ using kai::ast::AssignmentExpr;
 using kai::ast::BinaryExpr;
 using kai::ast::BinaryOperator;
 using kai::ast::CallExpr;
+using kai::ast::ErrorPropagationExpr;
 using kai::ast::Expr;
 using kai::ast::ExprKind;
 using kai::ast::ExprPtr;
@@ -27,6 +28,7 @@ using kai::ast::MemberExpr;
 using kai::ast::ParenExpr;
 using kai::ast::UnaryExpr;
 using kai::ast::UnaryOperator;
+using kai::ast::UnitExpr;
 
 namespace {
 
@@ -125,6 +127,20 @@ void testParenExprOwnsInnerAndPreservesDistinctOuterSpan() {
     KAI_CHECK(paren.span() != paren.inner().span());
 
     KAI_CHECK(inner == nullptr);
+}
+
+// --- UnitExpr ---
+
+void testUnitExprConstruction() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "()");
+    const SourceSpan span = spanOf(file, 0, 2);
+
+    const UnitExpr expr(span);
+
+    KAI_CHECK(expr.kind() == ExprKind::Unit);
+    KAI_CHECK(expr.span() == span);
+    KAI_CHECK(sm.text(expr.span()) == "()");
 }
 
 // --- UnaryExpr ---
@@ -528,6 +544,71 @@ void testMemberExprChainedShape() {
     KAI_CHECK(outer.span() == outerSpan);
 }
 
+// --- ErrorPropagationExpr ---
+
+void testErrorPropagationExprBasic() {
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "value?");
+    const SourceSpan operandSpan = spanOf(file, 0, 5);  // value
+    const SourceSpan questionSpan = spanOf(file, 5, 6); // ?
+    const SourceSpan fullSpan = spanOf(file, 0, 6);
+
+    ExprPtr operand = std::make_unique<IdentifierExpr>(Identifier{operandSpan}, operandSpan);
+    ErrorPropagationExpr expr(std::move(operand), questionSpan, fullSpan);
+
+    KAI_CHECK(expr.kind() == ExprKind::ErrorPropagation);
+    KAI_CHECK(expr.operand().kind() == ExprKind::Identifier);
+    KAI_CHECK(sm.text(expr.operand().span()) == "value");
+    KAI_CHECK(expr.operatorSpan() == questionSpan);
+    KAI_CHECK(sm.text(expr.operatorSpan()) == "?");
+    KAI_CHECK(expr.span() == fullSpan);
+    KAI_CHECK(operand == nullptr);
+}
+
+void testErrorPropagationExprWrapsCall() {
+    // load()? -> ErrorPropagationExpr(CallExpr(load))
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "load()?");
+    const SourceSpan calleeSpan = spanOf(file, 0, 4);   // load
+    const SourceSpan callSpan = spanOf(file, 0, 6);     // load()
+    const SourceSpan questionSpan = spanOf(file, 6, 7); // ?
+    const SourceSpan fullSpan = spanOf(file, 0, 7);
+
+    ExprPtr callee = std::make_unique<IdentifierExpr>(Identifier{calleeSpan}, calleeSpan);
+    ExprPtr call = std::make_unique<CallExpr>(std::move(callee), std::vector<ExprPtr>{}, callSpan);
+    ErrorPropagationExpr expr(std::move(call), questionSpan, fullSpan);
+
+    KAI_CHECK(expr.operand().kind() == ExprKind::Call);
+    KAI_CHECK(expr.span() == fullSpan);
+}
+
+void testErrorPropagationExprNestedEachOwnsDistinctOperatorSpan() {
+    // value?? -> ErrorPropagationExpr(ErrorPropagationExpr(value))
+    SourceManager sm;
+    const FileId file = sm.addVirtualFile("a.kai", "value??");
+    const SourceSpan operandSpan = spanOf(file, 0, 5);   // value
+    const SourceSpan innerQuestion = spanOf(file, 5, 6); // first ?
+    const SourceSpan innerSpan = spanOf(file, 0, 6);     // value?
+    const SourceSpan outerQuestion = spanOf(file, 6, 7); // second ?
+    const SourceSpan outerSpan = spanOf(file, 0, 7);     // value??
+
+    ExprPtr operand = std::make_unique<IdentifierExpr>(Identifier{operandSpan}, operandSpan);
+    ExprPtr inner = std::make_unique<ErrorPropagationExpr>(std::move(operand), innerQuestion, innerSpan);
+    ErrorPropagationExpr outer(std::move(inner), outerQuestion, outerSpan);
+
+    KAI_CHECK(outer.kind() == ExprKind::ErrorPropagation);
+    KAI_CHECK(outer.operatorSpan() == outerQuestion);
+    KAI_CHECK(outer.operand().kind() == ExprKind::ErrorPropagation);
+
+    const auto& innerExpr = static_cast<const ErrorPropagationExpr&>(outer.operand());
+    KAI_CHECK(innerExpr.operatorSpan() == innerQuestion);
+    KAI_CHECK(innerExpr.operand().kind() == ExprKind::Identifier);
+
+    // The two operatorSpans are distinct, each pinpointing its own `?`.
+    KAI_CHECK(outer.operatorSpan() != innerExpr.operatorSpan());
+    KAI_CHECK(outer.span() == outerSpan);
+}
+
 } // namespace
 
 int main() {
@@ -536,6 +617,8 @@ int main() {
     testCallExprOwnsAndMovesCalleeAndArguments();
     testCallExprSupportsEmptyArgumentList();
     testParenExprOwnsInnerAndPreservesDistinctOuterSpan();
+
+    testUnitExprConstruction();
 
     testUnaryExprNegate();
     testUnaryExprNot();
@@ -560,6 +643,10 @@ int main() {
 
     testMemberExprBasic();
     testMemberExprChainedShape();
+
+    testErrorPropagationExprBasic();
+    testErrorPropagationExprWrapsCall();
+    testErrorPropagationExprNestedEachOwnsDistinctOperatorSpan();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }

@@ -179,11 +179,26 @@ void printArrayTypeSyntax(std::ostream& out, const SourceManager& sources, const
     printExpr(out, sources, type.length(), depth + 2);
 }
 
-// TypeSyntaxKind reserves two kinds (Unit, Generic) with no concrete
-// node yet. Exhaustive switch with no `default:`: Unit/Generic are
-// explicit case labels sharing one fallback, not a catch-all, so
-// -Wswitch still fires the moment a 7th TypeSyntaxKind is added without
-// a case here.
+void printUnitTypeSyntax(std::ostream& out, const SourceManager&, const ast::UnitTypeSyntax&, int depth) {
+    writeIndent(out, depth);
+    out << "UnitTypeSyntax\n";
+}
+
+void printGenericTypeSyntax(std::ostream& out, const SourceManager& sources, const ast::GenericTypeSyntax& type,
+                             int depth) {
+    writeIndent(out, depth);
+    out << "GenericTypeSyntax name=" << wrapInQuotes(sources.text(type.name().span)) << '\n';
+
+    for (const auto& argument : type.arguments()) {
+        writeIndent(out, depth + 1);
+        out << "Argument\n";
+        printTypeSyntax(out, sources, *argument, depth + 2);
+    }
+}
+
+// TypeSyntaxKind is fully implemented today: no `default:` case, so
+// -Wswitch fires the moment a 7th TypeSyntaxKind is added without a case
+// here.
 void printTypeSyntax(std::ostream& out, const SourceManager& sources, const ast::TypeSyntax& type, int depth) {
     switch (type.kind()) {
         case ast::TypeSyntaxKind::Named:
@@ -199,12 +214,12 @@ void printTypeSyntax(std::ostream& out, const SourceManager& sources, const ast:
             printSliceTypeSyntax(out, sources, static_cast<const ast::SliceTypeSyntax&>(type), depth);
             return;
         case ast::TypeSyntaxKind::Unit:
+            printUnitTypeSyntax(out, sources, static_cast<const ast::UnitTypeSyntax&>(type), depth);
+            return;
         case ast::TypeSyntaxKind::Generic:
-            break;
+            printGenericTypeSyntax(out, sources, static_cast<const ast::GenericTypeSyntax&>(type), depth);
+            return;
     }
-
-    writeIndent(out, depth);
-    out << "TypeSyntax <unimplemented-kind>\n";
 }
 
 void printParam(std::ostream& out, const SourceManager& sources, const ast::Param& param, int depth) {
@@ -310,6 +325,23 @@ void printMemberExpr(std::ostream& out, const SourceManager& sources, const ast:
     printExpr(out, sources, expr.object(), depth + 2);
 }
 
+void printUnitExpr(std::ostream& out, const SourceManager&, const ast::UnitExpr&, int depth) {
+    writeIndent(out, depth);
+    out << "UnitExpr\n";
+}
+
+// operatorSpan is never printed - AstPrinter shows syntactic shape, not
+// source offsets, matching AssignmentExpr's operatorSpan omission.
+void printErrorPropagationExpr(std::ostream& out, const SourceManager& sources, const ast::ErrorPropagationExpr& expr,
+                                int depth) {
+    writeIndent(out, depth);
+    out << "ErrorPropagationExpr\n";
+
+    writeIndent(out, depth + 1);
+    out << "Operand\n";
+    printExpr(out, sources, expr.operand(), depth + 2);
+}
+
 // No `default:` case: ExprKind is fully implemented today, so -Wswitch
 // should catch a forgotten case the moment a new ExprKind is added.
 void printExpr(std::ostream& out, const SourceManager& sources, const ast::Expr& expr, int depth) {
@@ -343,6 +375,12 @@ void printExpr(std::ostream& out, const SourceManager& sources, const ast::Expr&
             return;
         case ast::ExprKind::Member:
             printMemberExpr(out, sources, static_cast<const ast::MemberExpr&>(expr), depth);
+            return;
+        case ast::ExprKind::Unit:
+            printUnitExpr(out, sources, static_cast<const ast::UnitExpr&>(expr), depth);
+            return;
+        case ast::ExprKind::ErrorPropagation:
+            printErrorPropagationExpr(out, sources, static_cast<const ast::ErrorPropagationExpr&>(expr), depth);
             return;
     }
 }

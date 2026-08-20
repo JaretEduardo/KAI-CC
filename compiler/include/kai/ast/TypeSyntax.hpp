@@ -5,13 +5,12 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace kai::ast {
 
-/// The full future vocabulary of syntactic type forms (GRAMMAR.md §11).
-/// Named, Reference, Array, and Slice are implemented as concrete nodes;
-/// Unit (`()`) and Generic (`Result<T, E>` use-site syntax) remain
-/// reserved for later milestones.
+/// The complete vocabulary of syntactic type forms (GRAMMAR.md §11). All
+/// six values have concrete node classes.
 enum class TypeSyntaxKind : std::uint8_t {
     Named,
     Reference,
@@ -48,6 +47,13 @@ public:
 
 private:
     Identifier name_;
+};
+
+/// `()` as a type - the unit type (GRAMMAR.md §18). No fields. `span()`
+/// covers `(` through `)`.
+class UnitTypeSyntax final : public TypeSyntax {
+public:
+    explicit UnitTypeSyntax(SourceSpan span) noexcept : TypeSyntax(TypeSyntaxKind::Unit, span) {}
 };
 
 /// Whether a ReferenceTypeSyntax is `&T` (Immutable) or `&mut T`
@@ -128,6 +134,29 @@ public:
 private:
     TypeSyntaxPtr element_;
     ExprPtr length_;
+};
+
+/// `identifier "<" type_list ">"` - generic use-site syntax (GRAMMAR.md
+/// §17), e.g. `Result<T, E>`, `Option<i32>`, `Buffer<&mut [f32]>`. No
+/// generic *declaration* syntax exists yet (`fn identity<T>`, `struct
+/// Box<T>` remain unsupported) - this node only represents a generic
+/// type appearing in a type position. `name` is a bare Identifier, not a
+/// nested TypeSyntaxPtr: GRAMMAR.md §17 requires the base to be exactly
+/// `identifier`, not a recursive `type`. `arguments` holds at least one
+/// element once the parser builds this node (§17's `type_list` has no
+/// zero-argument form), but enforcing that is the parser's job, not this
+/// node's. `span()` covers the base identifier through the closing `>`.
+class GenericTypeSyntax final : public TypeSyntax {
+public:
+    GenericTypeSyntax(Identifier name, std::vector<TypeSyntaxPtr> arguments, SourceSpan span) noexcept
+        : TypeSyntax(TypeSyntaxKind::Generic, span), name_(name), arguments_(std::move(arguments)) {}
+
+    const Identifier& name() const noexcept { return name_; }
+    const std::vector<TypeSyntaxPtr>& arguments() const noexcept { return arguments_; }
+
+private:
+    Identifier name_;
+    std::vector<TypeSyntaxPtr> arguments_;
 };
 
 } // namespace kai::ast
