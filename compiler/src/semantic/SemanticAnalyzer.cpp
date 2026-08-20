@@ -86,7 +86,7 @@ void SemanticAnalyzer::collectFunctionDecl(const ast::FunctionDecl& fn, Semantic
     // (approved "first declaration wins" policy - see #13 of this
     // phase's design).
     Symbol symbol{
-        SymbolKind::Function, fn.name(), fn.name().span, false, Type::unresolved(), std::move(signature),
+        SymbolKind::Function, name, fn.name().span, false, Type::unresolved(), std::move(signature),
     };
     const SymbolId id = model.addSymbol(std::move(symbol));
     model.recordDeclaration(fn.name(), id);

@@ -141,6 +141,32 @@ void testMissingAndExplicitUnitReturnBothResolveToUnit() {
     KAI_CHECK(result.model.symbol(*gId).signature->returnType == Type::unit());
 }
 
+// --- Symbol::name / declaredAt for a real source declaration ---
+
+void testSourceFunctionSymbolHasSourceNameAndDeclaredAtSpan() {
+    SourceManager sm;
+    Analyzed result = analyze(sm, "fn add() {}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+
+    const auto& fn = static_cast<const FunctionDecl&>(*result.parsed->declarations()[0]);
+    const auto id = result.model.declarationSymbol(fn.name());
+    KAI_CHECK(id.has_value());
+    if (!id) {
+        return;
+    }
+
+    const Symbol& symbol = result.model.symbol(*id);
+    KAI_CHECK(symbol.name == "add");
+    KAI_CHECK(symbol.declaredAt.has_value());
+    if (symbol.declaredAt) {
+        KAI_CHECK(*symbol.declaredAt == fn.name().span);
+    }
+}
+
 // --- Unknown type ---
 
 void testUnknownParameterTypeProducesOneError() {
@@ -338,14 +364,14 @@ void testSymbolIdsRemainStableAfterVectorGrowth() {
     // backing vector at least once. firstId must still resolve to the
     // correct Symbol regardless.
     if (firstId) {
-        KAI_CHECK(sm.text(result.model.symbol(*firstId).name.span) == "f0");
+        KAI_CHECK(result.model.symbol(*firstId).name == "f0");
     }
 
     const auto& last = static_cast<const FunctionDecl&>(*result.parsed->declarations()[19]);
     const auto lastId = result.model.declarationSymbol(last.name());
     KAI_CHECK(lastId.has_value());
     if (lastId) {
-        KAI_CHECK(sm.text(result.model.symbol(*lastId).name.span) == "f19");
+        KAI_CHECK(result.model.symbol(*lastId).name == "f19");
     }
 }
 
@@ -395,6 +421,7 @@ void testAnalyzerInstanceDoesNotLeakStateBetweenFiles() {
 int main() {
     testPrimitiveParameterAndReturnSignature();
     testMissingAndExplicitUnitReturnBothResolveToUnit();
+    testSourceFunctionSymbolHasSourceNameAndDeclaredAtSpan();
     testUnknownParameterTypeProducesOneError();
     testDeferredTypeShapesResolveToUnresolvedWithNoErrors();
     testDuplicateTopLevelFunctionProducesExactlyOneError();

@@ -1,12 +1,12 @@
 #pragma once
 
-#include "kai/ast/Node.hpp"
 #include "kai/semantic/Type.hpp"
 #include "kai/source/SourceLocation.hpp"
 
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace kai::semantic {
@@ -70,8 +70,26 @@ struct FunctionSignature {
 /// would describe (borrow-checking, HIR) actually exist.
 struct Symbol {
     SymbolKind kind;
-    ast::Identifier name;
-    SourceSpan declaredAt;
+
+    /// Owned semantic name text, not an ast::Identifier: Symbol must be
+    /// able to represent compiler-defined prelude entries (print, panic,
+    /// assert, ...) that have no AST node and no source spelling to
+    /// point a span-only Identifier at. For a source declaration,
+    /// SemanticAnalyzer copies this from
+    /// SourceManager::text(identifier.span()) at collection time. This
+    /// is a separate concern from SemanticModel's
+    /// `const ast::Identifier* -> SymbolId` declaration map: `name`
+    /// answers "what is this symbol called", the declaration map
+    /// answers "which symbol does this concrete source declaration
+    /// correspond to" - the AST remains span-only either way.
+    std::string name;
+
+    /// The source location this symbol was declared at, or std::nullopt
+    /// for a symbol with no source declaration at all (a builtin/prelude
+    /// entry). Never a fabricated/sentinel SourceSpan standing in for
+    /// "no real declaration" - std::optional expresses that state
+    /// directly.
+    std::optional<SourceSpan> declaredAt;
 
     /// Only meaningful for Local. Always false for Parameter - KAI 0.1's
     /// parameter grammar has no `mut` keyword (GRAMMAR.md §10), so a
