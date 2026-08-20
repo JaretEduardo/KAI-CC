@@ -305,7 +305,100 @@ Self-hosting is a long-term milestone and must not influence KAI 0.1 development
 
 ---
 
-## 10. Core Rule
+## 10. Declarations, Scoping, and Name Resolution
+
+KAI resolves names lexically, using ordinary block-structured scoping.
+
+### Same-Scope Duplicates
+
+A declaration conflicts only with another declaration in the same lexical scope.
+
+    fn f() {
+        let x = 1
+        let x = 2
+    }
+
+is a compile-time error: `x` is declared twice in the same scope.
+
+A function's parameters and the declarations in its outermost body block share one lexical scope:
+
+    fn f(x: i32) {
+        let x = 1
+    }
+
+is also a same-scope duplicate, not shadowing.
+
+A `for` loop's variable and the declarations in its body's outermost block similarly share one lexical scope:
+
+    for item in values {
+        let item = 1
+    }
+
+is a same-scope duplicate.
+
+### Nested Shadowing
+
+A binding in a genuinely nested lexical scope - an `if`/`else if`/`else` body or a `while` body - may shadow an outer user binding:
+
+    fn f() {
+        let x = 1
+
+        if true {
+            let x = 2
+        }
+    }
+
+is valid. Inside the `if` body, `x` refers to the inner declaration; outside it, `x` refers to the outer one. Name lookup always uses the innermost visible declaration.
+
+    let item = 1
+
+    for item in values {
+    }
+
+is valid for the same reason: the entire `for` construct - loop variable and body together - is one scope nested inside the scope that surrounds the loop.
+
+### Initializer Visibility
+
+A local binding does not become visible inside its own initializer. A declaration's initializer is resolved against the environment that exists before the new binding is introduced:
+
+    let x = x
+
+does not resolve the right-hand `x` to the binding being declared. If no outer `x` exists, this is an unresolved-name error. If an outer `x` exists in an enclosing scope, the right-hand `x` resolves to it, and the new `x` begins shadowing only after its own initializer has been resolved.
+
+### Source-Order Visibility for Locals
+
+Local declarations are not hoisted. A local is visible only to code that follows it within its own scope:
+
+    let y = x
+    let x = 1
+
+leaves the first line's `x` unresolved, even though `x` is declared later in the same function. Reversing the order resolves it.
+
+### Forward and Recursive Function References
+
+Top-level function declarations in a source file are all collected before any function body is resolved. As a result, a function may refer to another top-level function declared later in the same file, and a function may refer to itself:
+
+    fn main() {
+        helper()
+    }
+
+    fn helper() {}
+
+and
+
+    fn fib(n: i32) -> i32 {
+        return fib(n)
+    }
+
+are both valid regardless of declaration order.
+
+### Member Names
+
+For `object.member`, `object` participates in ordinary lexical name resolution. `member` does not: its meaning depends on the semantic type of `object` and is resolved separately, once member/type resolution exists.
+
+---
+
+## 11. Core Rule
 
 KAI should not try to make AI agents better programmers through prompting.
 

@@ -40,6 +40,7 @@ add_library(kai_compiler STATIC
     compiler/src/lexer/TokenKind.cpp
     compiler/src/lexer/Lexer.cpp
     compiler/src/parser/Parser.cpp
+    compiler/src/semantic/SemanticAnalyzer.cpp
 )
 
 # Public compiler headers

@@ -161,7 +161,7 @@ AST nodes should preserve source spans for diagnostics.
 
 ## 7. Semantic Analysis
 
-Semantic analysis will be responsible for:
+Semantic analysis is responsible for:
 
 - symbol resolution
 - scope validation
@@ -169,6 +169,10 @@ Semantic analysis will be responsible for:
 - function signature validation
 - return type validation
 - mutability validation
+
+Implemented so far: top-level function collection, primitive/unit type resolution for function signatures and local annotations, lexical scoping with same-scope duplicate detection and nested shadowing, prelude name seeding, and lexical resolution of identifier uses (undefined-name and duplicate-symbol detection).
+
+Not yet implemented: expression typing/inference, call validation, operator type checking, mutability/assignment validation, condition and return-type validation, compound/reference semantic types, and ownership/borrow checking.
 
 Example errors:
 
