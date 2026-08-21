@@ -170,9 +170,9 @@ Semantic analysis is responsible for:
 - return type validation
 - mutability validation
 
-Implemented so far: top-level function collection, primitive/unit type resolution for function signatures and local annotations, lexical scoping with same-scope duplicate detection and nested shadowing, prelude name seeding, lexical resolution of identifier uses (undefined-name and duplicate-symbol detection), primitive literal typing (including contextual literal typing and integer literal range checking), local type inference for currently-typed expressions, annotated local compatibility checking, and primitive operator type checking (unary negation/not, arithmetic, modulo, comparison, equality, logical).
+Implemented so far: top-level function collection, primitive/unit type resolution for function signatures and local annotations, lexical scoping with same-scope duplicate detection and nested shadowing, prelude name seeding, lexical resolution of identifier uses (undefined-name and duplicate-symbol detection), primitive literal typing (including contextual literal typing and integer literal range checking), local type inference for currently-typed expressions, annotated local compatibility checking, primitive operator type checking (unary negation/not, arithmetic, modulo, comparison, equality, logical), and ordinary user-function call validation (argument-count validation, contextual argument checking against the declared signature, call result typing, and known non-callable-expression detection).
 
-Not yet implemented: function-call validation, assignment/mutability validation, condition and return-type validation, compound/reference semantic types, and ownership/borrow checking. The type checker as a whole is not yet complete.
+Not yet implemented: builtin call signature validation, assignment/mutability validation, condition and return-type validation, compound/reference semantic types, ownership/borrow checking, and first-class function/method call semantics. The type checker as a whole is not yet complete.
 
 Example errors:
 

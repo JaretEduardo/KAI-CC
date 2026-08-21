@@ -2255,3 +2255,150 @@ let either = a || b   // bool
 As with unary logical-not, KAI does not provide implicit truthiness: a
 non-`bool` operand on either side is rejected, even if the other operand is
 `bool`.
+
+---
+
+# 66. Function Call Argument Checking
+
+Calling an ordinary user-defined function checks each argument against its
+corresponding declared parameter type, positionally:
+
+```kai
+fn take(value: i64) {}
+```
+
+There is no implicit conversion:
+
+```kai
+let x = 10   // x is i32
+take(x)      // error: i64 expected, i32 found
+```
+
+This is ordinary type checking at a call site - not overload resolution, and
+not a claim that function names carry a first-class value type (see
+"Function Values Are Not First-Class" below).
+
+Literal and expression contextual typing (see "Integer Literals",
+"Floating-Point Literals", and "Arithmetic Operators" above) applies in
+argument positions exactly as it does in an explicitly typed declaration:
+
+```kai
+take(10)       // the integer literal is typed directly as i64
+take(1 + 2)    // the pure arithmetic expression may be typed as i64
+```
+
+Neither is an implicit conversion - the literal/expression is typed as
+`i64` directly, the same way `let x: i64 = 10` types its initializer.
+
+The already-committed cross-family restriction is preserved: an integer
+literal never adopts a floating-point parameter type, and a
+floating-point literal never adopts an integer parameter type.
+
+```kai
+fn take(value: f64) {}
+
+take(1)     // error: value stays an integer literal, not f64
+take(1.0)   // valid
+```
+
+A call must provide the number of arguments the function declares - too
+few or too many are both errors. Every argument that is actually present
+in the call is still checked independently, so a call can report more than
+one distinct problem at once (e.g. two differently-typed arguments, or an
+argument count error alongside an unrelated error inside one of the
+arguments).
+
+---
+
+# 67. Function Call Result Type
+
+A successfully checked call to a user function has the function's declared
+return type:
+
+```kai
+fn get() -> i64 {}
+
+let x = get()   // x is i64
+```
+
+A function with no explicit return annotation returns the unit type:
+
+```kai
+fn do_work() {}
+
+let x = do_work()   // x is ()
+```
+
+A call's result type participates normally in later expression typing,
+exactly like any other value:
+
+```kai
+fn get() -> i64 {}
+
+let x = get() + 1   // x is i64
+```
+
+No first-class `Function` type is introduced by any of this - a call
+expression has the function's *return* type, never a type describing the
+function itself.
+
+---
+
+# 68. Function Values Are Not First-Class
+
+KAI 0.1 does not commit first-class function values. A function name being
+usable as the direct target of a call:
+
+```kai
+f()
+```
+
+does not mean `f` itself has a semantic function-value type - only the
+call expression `f()` has a type (see "Function Call Result Type" above).
+
+Parenthesized grouping around a direct function call target is supported,
+since parentheses are ordinary grouping syntax everywhere else in KAI:
+
+```kai
+(f)()
+(((f)))()
+```
+
+This is not a step toward first-class functions: it is the same grouping
+behavior parentheses already have around any other expression, applied to
+a name that happens to be a function. An arbitrary expression is not
+assumed to produce a callable value merely because it appears in a call
+position.
+
+---
+
+# 69. Non-Callable Expressions
+
+KAI rejects a call whose target expression is known to have a concrete,
+non-callable type:
+
+```kai
+let x = 1
+x()   // error: i32 is not callable
+
+1()   // error: i32 is not callable
+```
+
+This is a narrow check against a *known* concrete type - it is not the
+introduction of first-class functions, methods, callable structs,
+closures, or function pointers. None of those are implemented or
+committed in KAI 0.1.
+
+Correspondingly, calling an expression whose own callability is not yet
+modeled at all is not treated as an error:
+
+```kai
+obj.method()
+values[index]()
+result?()
+```
+
+Member access, indexing, and error propagation do not yet have committed
+semantics of their own (see the relevant sections above), so a call
+targeting one of them is neither accepted nor rejected - it is simply not
+yet checked. Method-call and function-value semantics remain future work.

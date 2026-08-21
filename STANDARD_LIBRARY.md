@@ -68,7 +68,9 @@ These are ordinary names, not keywords or reserved identifiers. Name resolution 
         print()
     }
 
-resolves `print()` to the user's own function, not the prelude one. Their exact call signatures (argument/return types) are not yet committed.
+resolves `print()` to the user's own function, not the prelude one - and, being an ordinary user-declared function, this `print` is fully checked against its own declared signature (argument count, argument types, and result type) exactly like any other user function. Their exact call signatures (argument/return types) are not yet committed for the prelude names themselves.
+
+This reflects a current compiler limitation, not the intended final semantics of `print`/`panic`/`assert`: a call to one of the prelude names (when not shadowed by a user declaration) does not yet perform argument-count validation, argument-type validation, or contextual parameter typing, because those builtins have no committed signature to check against. Each argument expression is still independently analyzed - so an error inside an argument (e.g. an unresolved name) is still reported - but the call itself is not yet validated as a whole. This limitation is expected to be lifted once builtin signatures are committed.
 
 Core language types such as:
 
