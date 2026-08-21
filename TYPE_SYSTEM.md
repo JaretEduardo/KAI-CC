@@ -2534,3 +2534,184 @@ mut x: i64 = 0
 
 (x = 1) + 2   // error: () is not a numeric type
 ```
+
+---
+
+# 73. Condition Typing
+
+The condition of `if` (and every `else if`) and `while` must have type
+`bool`. KAI has no truthiness - no other type is accepted, regardless of
+whether it could plausibly be treated as "truthy" in another language:
+
+```kai
+if true { ... }        // valid
+if 1 < 2 { ... }        // valid: comparison produces bool
+
+if 1 { ... }             // error: i32 is not bool
+if 1 + 2 { ... }         // error: arithmetic stays i32, not bool
+```
+
+A final `else` has no condition of its own and is unaffected by this rule.
+
+This composes with the rest of the type system without a dedicated
+"condition" rule of its own - a condition is simply an ordinary expression
+checked for `bool`:
+
+```kai
+fn predicate() -> bool { ... }
+
+if predicate() { ... }   // valid: the call has type bool
+```
+
+```kai
+mut flag: bool = false
+
+if flag = true { ... }   // error: assignment has type (), not bool
+```
+
+The second example is rejected for the same reason `(x = 1) + 2` is
+rejected above - an assignment's type is `()`, never the assigned value's
+type - not because of any special "assignment used as a condition" rule.
+
+This section covers `if` and `while` only. A `for` loop's iterable is not
+type-checked by this rule or by any other rule yet - iteration semantics
+remain a separate, still-deferred concern.
+
+---
+
+# 74. Return Type Compatibility
+
+Every `return` statement that appears in a function body is checked
+against that function's declared return type, the same way a `let`
+initializer is checked against an explicit annotation. There is no
+implicit conversion:
+
+```kai
+fn f() -> i64 {
+    return 1
+}
+```
+
+Contextual literal and expression typing apply in return position exactly
+as they do anywhere else:
+
+```kai
+fn f() -> i64 {
+    return 1 + 2   // the arithmetic expression may be typed as i64
+}
+```
+
+A bare `return` (with no expression) is checked as though it returned the
+unit type, `()`:
+
+```kai
+fn f() {
+    return       // valid: () matches f's declared (implicit) () return
+}
+
+fn f() -> i64 {
+    return       // error: expected i64, found ()
+}
+```
+
+The unit type is an ordinary return type, not a special case - a return
+expression is valid whenever its type matches the function's declared
+return type, *including* when that type is `()`:
+
+```kai
+fn a() {
+    return
+}
+
+fn b() {
+    return ()          // valid: () matches b's declared () return
+}
+
+fn do_work() {}
+
+fn c() {
+    return do_work()   // valid: do_work() also has type ()
+}
+
+fn d() -> () {
+    return ()          // valid, for the same reason, with an explicit annotation
+}
+```
+
+Conversely, a unit-returning function may not return a non-unit value,
+whether its unit return is implicit or written explicitly as `-> ()`:
+
+```kai
+fn f() {
+    return 1   // error: expected (), found i32
+}
+
+fn f() -> () {
+    return 1   // error: expected (), found i32
+}
+```
+
+A `return` statement never changes a function's declared return type -
+the declaration remains the function's semantic contract regardless of
+what its body returns; a mismatching `return` is a body error, exactly
+like a mismatching call argument is a call-site error rather than a
+change to the callee's signature.
+
+Every `return` in a function is checked independently:
+
+```kai
+fn f(x: bool) -> i64 {
+    if x {
+        return 1
+    }
+
+    return 2
+}
+```
+
+both returns above are checked against `i64` on their own merits.
+
+---
+
+# 75. Return-Statement Checking Is Not Return-Completeness Checking
+
+The rule in "Return Type Compatibility" above checks every `return`
+statement that actually appears in a function body against that
+function's declared return type - including a mismatched value and a
+mismatched bare `return`. It does **not** check whether a value-returning
+function returns at all, or on every possible path through its body.
+These are two different checks, and only the first is committed and
+implemented:
+
+```kai
+fn f() -> i64 {
+}
+```
+
+```kai
+fn f(cond: bool) -> i64 {
+    if cond {
+        return 1
+    }
+}
+```
+
+Neither example above is diagnosed today: KAI does not yet perform
+all-paths-return analysis (also called return-completeness analysis, or
+missing-return control-flow analysis) - checking that every path through
+a function's body reaches a `return` with a compatible value. That
+capability requires control-flow analysis that has not been built yet and
+is separate, staged work. Referring to this gap by the bare phrase
+"return validation" alone is ambiguous, since return-statement type
+checking is already implemented; the missing capability should be named
+specifically as all-paths-return (or return-completeness) analysis.
+
+Relatedly, code that follows a `return` statement is still fully checked
+today - KAI does not yet diagnose it as unreachable:
+
+```kai
+fn f() -> i64 {
+    return 1
+    let x = undefined_name   // still checked; still an error
+}
+```
