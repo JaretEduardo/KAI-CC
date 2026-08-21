@@ -15,8 +15,8 @@
 
 namespace kai::semantic {
 
-/// TYPE-CHECK MILESTONE 1+2+3: Literal & Annotation Foundation, Primitive
-/// Operators, and Function Calls.
+/// TYPE-CHECK MILESTONE 1+2+3+4: Literal & Annotation Foundation, Primitive
+/// Operators, Function Calls, and Assignment & Binding Mutability.
 ///
 /// TypeChecker is a SEPARATE pass/class run strictly after
 /// SemanticAnalyzer::analyze() has already populated a SemanticModel's
@@ -45,12 +45,23 @@ namespace kai::semantic {
 /// Parameter, a literal, a deferred Member/Index/ErrorPropagation/Call
 /// expression, ...) is classified generically from its own checked Type.
 ///
-/// This milestone still does NOT implement assignment semantics,
-/// condition/return validation, or reference/range semantics - every
-/// such outer expression kind is still fully traversed (its children are
-/// checked) but recorded as Type::unresolved() (see
-/// checkAssignmentExpr()/etc. in TypeChecker.cpp for the full per-
-/// ExprKind rules).
+/// Milestone 4 adds assignment typing for a target that resolves (through
+/// transparent ParenExpr wrappers only) to a SymbolKind::Local or
+/// SymbolKind::Parameter - mutability checking, RHS contextual typing
+/// against the target's Type, RHS-vs-target TypeMismatch, and
+/// AssignmentExpr's own result (Type::unit() on success) - see
+/// checkAssignmentExpr()/checkVariableAssignmentTarget() in
+/// TypeChecker.cpp. A MemberExpr/IndexExpr target remains intentionally
+/// deferred (Type::unresolved(), no diagnostic - mutation through those
+/// forms is not yet modeled); every other target shape (a literal, a
+/// call, a Function/Builtin identifier, ...) is a categorically invalid
+/// target.
+///
+/// This milestone still does NOT implement condition/return validation
+/// or reference/range/borrow-mutation semantics - every such outer
+/// expression kind is still fully traversed (its children are checked)
+/// but recorded as Type::unresolved() (see checkIndexExpr()/etc. in
+/// TypeChecker.cpp for the full per-ExprKind rules).
 ///
 /// typeOf() three-state contract (see SemanticModel::typeOf()):
 /// std::nullopt means an ast::Expr was never visited by this pass;
@@ -210,7 +221,49 @@ private:
     /// fabricated.
     Type checkUserFunctionCall(const ast::CallExpr& call, const Symbol& functionSymbol, SemanticModel& model) const;
 
+    /// Milestone 4 classification entry point. Classifies
+    /// `assignment.target()` (through transparent ParenExpr wrappers
+    /// only, via unwrapAssignmentTargetIdentifier() in TypeChecker.cpp)
+    /// into: a direct identifier resolving to Local/Parameter
+    /// (checkVariableAssignmentTarget()); a direct identifier resolving
+    /// to Function/Builtin, or any other categorically invalid target
+    /// shape (checkInvalidAssignmentTarget()); a MemberExpr/IndexExpr
+    /// target (checkDeferredAssignmentTarget()); or an unresolved
+    /// identifier target (handled inline - no new diagnostic, spec #8).
+    /// Classification never inspects identifier source text - only
+    /// SemanticModel::resolution()/SymbolKind decide it.
     Type checkAssignmentExpr(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
+
+    /// A target resolving to SymbolKind::Local or SymbolKind::Parameter
+    /// (spec #4-#5, #11-#17): checks mutability first (an immutable
+    /// binding short-circuits straight to AssignmentToImmutableBinding,
+    /// with the RHS still checked but with no target-type context), then
+    /// - for a mutable binding - dispatches on the target's own recorded
+    /// Type: Error unconditionally becomes Error (spec #16's correction -
+    /// deliberately NOT treated like Unresolved, to stop a downstream
+    /// cascade); Unresolved becomes Unit unless the RHS itself is Error;
+    /// a concrete target Type contextualizes the RHS exactly like
+    /// checkVarDecl() does, comparing via the existing TypeMismatch
+    /// shape.
+    Type checkVariableAssignmentTarget(const ast::AssignmentExpr& assignment, const Symbol& symbol,
+                                        SemanticModel& model) const;
+
+    /// Shared by two spec cases: a target identifier resolving to
+    /// Function/Builtin (spec #7), and any categorically invalid target
+    /// shape (spec #9) - both check the target and RHS (each exactly
+    /// once, no context), then emit InvalidAssignmentTarget and return
+    /// Type::error().
+    Type checkInvalidAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
+
+    /// A MemberExpr/IndexExpr target (spec #10): checks the target
+    /// through its own existing, unmodified checkMemberExpr()/
+    /// checkIndexExpr() traversal and the RHS with no context, and
+    /// always returns Type::unresolved() with no diagnostic - even when a
+    /// child or the RHS is itself Error - because this assignment FORM
+    /// remains intentionally deferred, mirroring the Range/Ref/RefMut/
+    /// Builtin-call "deferred construct" rule rather than the "Error
+    /// child propagates" rule implemented constructs use.
+    Type checkDeferredAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
     Type checkArrayLiteralExpr(const ast::ArrayLiteralExpr& array, SemanticModel& model) const;
     Type checkIndexExpr(const ast::IndexExpr& index, SemanticModel& model) const;
     Type checkMemberExpr(const ast::MemberExpr& member, SemanticModel& model) const;

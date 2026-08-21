@@ -216,6 +216,22 @@ const ast::IdentifierExpr* unwrapDirectCalleeIdentifier(const ast::Expr& expr) {
     return nullptr;
 }
 
+// Milestone 4 spec #3: structural only, mirrors unwrapDirectCalleeIdentifier's
+// own shape - unwraps ONLY transparent ParenExpr wrappers on the way to a
+// bare IdentifierExpr. Returns nullptr for anything else (a Binary/Call/
+// Member/Index/...), so a non-identifier assignment target is never
+// structurally rewritten - it is classified on its own shape in
+// checkAssignmentExpr().
+const ast::IdentifierExpr* unwrapAssignmentTargetIdentifier(const ast::Expr& expr) {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return unwrapAssignmentTargetIdentifier(static_cast<const ast::ParenExpr&>(expr).inner());
+    }
+    if (expr.kind() == ast::ExprKind::Identifier) {
+        return &static_cast<const ast::IdentifierExpr&>(expr);
+    }
+    return nullptr;
+}
+
 } // namespace
 
 TypeChecker::TypeChecker(const SourceManager& sources) noexcept : sources_(sources) {}
@@ -927,9 +943,135 @@ Type TypeChecker::checkUserFunctionCall(const ast::CallExpr& call, const Symbol&
 }
 
 Type TypeChecker::checkAssignmentExpr(const ast::AssignmentExpr& assignment, SemanticModel& model) const {
-    // Type::unresolved() FOR THIS MILESTONE only (Milestone 1 spec #8):
-    // the committed future rule is assignment expression type = Unit,
-    // but assignment semantics are not implemented yet.
+    // Milestone 4 spec #3: classification is driven ONLY by
+    // SemanticModel::resolution()/SymbolKind - never by identifier source
+    // text, and never by typeOf(target) (a Function/Builtin identifier
+    // intentionally stays Unresolved, mirroring Milestone 3's callee rule).
+    if (const ast::IdentifierExpr* directTarget = unwrapAssignmentTargetIdentifier(assignment.target())) {
+        if (const std::optional<SymbolId> id = model.resolution(*directTarget)) {
+            const Symbol& symbol = model.symbol(*id);
+            switch (symbol.kind) {
+                case SymbolKind::Local:
+                case SymbolKind::Parameter:
+                    return checkVariableAssignmentTarget(assignment, symbol, model);
+                case SymbolKind::Function:
+                case SymbolKind::Builtin:
+                    return checkInvalidAssignmentTarget(assignment, model);
+            }
+        }
+
+        // Unresolved identifier target (Milestone 4 spec #8):
+        // UnknownIdentifier was already emitted by SemanticAnalyzer - no
+        // new diagnostic, no context for the RHS.
+        inferExpr(assignment.target(), model);
+        inferExpr(assignment.value(), model);
+        const Type result = Type::error();
+        model.setExpressionType(assignment, result);
+        return result;
+    }
+
+    if (assignment.target().kind() == ast::ExprKind::Member || assignment.target().kind() == ast::ExprKind::Index) {
+        return checkDeferredAssignmentTarget(assignment, model);
+    }
+
+    // Categorically invalid target shape (Milestone 4 spec #9): a
+    // literal, Unit, a general unary/binary expression, a call, an array
+    // literal, error propagation, a nested assignment, or anything else
+    // that isn't a direct identifier and isn't Member/Index.
+    return checkInvalidAssignmentTarget(assignment, model);
+}
+
+Type TypeChecker::checkVariableAssignmentTarget(const ast::AssignmentExpr& assignment, const Symbol& symbol,
+                                                 SemanticModel& model) const {
+    const ast::Expr& target = assignment.target();
+    const ast::Expr& value = assignment.value();
+
+    // Records typeOf entries through the identifier and every transparent
+    // ParenExpr wrapper via the existing, unmodified checkIdentifierExpr()/
+    // checkParenExpr() logic (Milestone 4 spec #18).
+    const Type targetType = inferExpr(target, model);
+
+    if (!symbol.isMutable) {
+        // Milestone 4 spec #5: the RHS is still checked (independent
+        // errors surface), but with NO target-type context, and NO
+        // TypeMismatch is attempted - mutability alone already
+        // disqualifies this assignment.
+        inferExpr(value, model);
+        model.addError(SemanticError{
+            SemanticErrorKind::AssignmentToImmutableBinding,
+            target.span(),
+            symbol.declaredAt,
+            std::nullopt,
+            std::nullopt,
+        });
+        const Type result = Type::error();
+        model.setExpressionType(assignment, result);
+        return result;
+    }
+
+    if (targetType.isError()) {
+        // Milestone 4 spec #16 (the correction): Error is deliberately
+        // NOT treated like Unresolved - the target's declared type is
+        // already known to be genuinely broken (e.g. an UnknownType
+        // annotation), so this assignment is unconditionally Error
+        // regardless of what the RHS turns out to be, stopping any
+        // downstream cascade exactly like an already-Error operand would.
+        inferExpr(value, model);
+        const Type result = Type::error();
+        model.setExpressionType(assignment, result);
+        return result;
+    }
+
+    if (targetType.isUnresolved()) {
+        // Milestone 4 spec #15: compatibility is deferred, but
+        // AssignmentExpr's own result (Unit) is independently known
+        // regardless - unless the RHS itself is a genuine Error.
+        const Type valueType = inferExpr(value, model);
+        const Type result = valueType.isError() ? Type::error() : Type::unit();
+        model.setExpressionType(assignment, result);
+        return result;
+    }
+
+    // Concrete target type (Milestone 4 spec #11-#14): the RHS is checked
+    // contextually against it, reusing checkExpr() exactly as
+    // checkVarDecl() already does - no assignment-specific literal/
+    // expression-context algorithm.
+    const Type valueType = checkExpr(value, targetType, model);
+
+    Type result = Type::unit();
+    if (valueType.isError()) {
+        result = Type::error();
+    } else if (!valueType.isUnresolved() && !(valueType == targetType)) {
+        model.addError(SemanticError{
+            SemanticErrorKind::TypeMismatch,
+            value.span(),
+            std::nullopt,
+            targetType,
+            valueType,
+        });
+        result = Type::error();
+    }
+
+    model.setExpressionType(assignment, result);
+    return result;
+}
+
+Type TypeChecker::checkInvalidAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const {
+    inferExpr(assignment.target(), model);
+    inferExpr(assignment.value(), model);
+    model.addError(SemanticError{
+        SemanticErrorKind::InvalidAssignmentTarget,
+        assignment.target().span(),
+        std::nullopt,
+        std::nullopt,
+        std::nullopt,
+    });
+    const Type result = Type::error();
+    model.setExpressionType(assignment, result);
+    return result;
+}
+
+Type TypeChecker::checkDeferredAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const {
     inferExpr(assignment.target(), model);
     inferExpr(assignment.value(), model);
     const Type result = Type::unresolved();

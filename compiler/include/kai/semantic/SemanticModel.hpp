@@ -26,6 +26,8 @@ enum class SemanticErrorKind : std::uint8_t {
     InvalidBinaryOperands,
     InvalidArgumentCount,
     NotCallable,
+    InvalidAssignmentTarget,
+    AssignmentToImmutableBinding,
 };
 
 /// A minimal, message-free description of a semantic failure - the
