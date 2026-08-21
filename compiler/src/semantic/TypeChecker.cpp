@@ -113,6 +113,89 @@ bool integerLiteralFits(Type target, bool negative, std::uint64_t magnitude) {
     return magnitude <= range->maxPositiveMagnitude;
 }
 
+// Milestone 2 spec #9: a pure, structural, AST-shape-only predicate - no
+// SemanticModel lookup, no checkExpr call. Answers "could this
+// subexpression's OWN final Type still be freely chosen by an enclosing
+// concrete numeric context" - true only for a numeric literal, transitively
+// through ParenExpr, through UnaryExpr::Negate, and through an arithmetic
+// BinaryExpr whose own operands are BOTH themselves flexible in this sense.
+// Exhaustive over both ast::ExprKind and (nested) ast::BinaryOperator, no
+// `default:`, mirroring every other dispatch switch in this file.
+bool canAcceptNumericContext(const ast::Expr& expr) {
+    switch (expr.kind()) {
+        case ast::ExprKind::Literal: {
+            const auto& literal = static_cast<const ast::LiteralExpr&>(expr);
+            return literal.literalKind() == ast::LiteralKind::Integer ||
+                   literal.literalKind() == ast::LiteralKind::Float;
+        }
+
+        case ast::ExprKind::Paren:
+            return canAcceptNumericContext(static_cast<const ast::ParenExpr&>(expr).inner());
+
+        case ast::ExprKind::Unary: {
+            const auto& unary = static_cast<const ast::UnaryExpr&>(expr);
+            return unary.op() == ast::UnaryOperator::Negate && canAcceptNumericContext(unary.operand());
+        }
+
+        case ast::ExprKind::Binary: {
+            const auto& binary = static_cast<const ast::BinaryExpr&>(expr);
+            switch (binary.op()) {
+                case ast::BinaryOperator::Add:
+                case ast::BinaryOperator::Subtract:
+                case ast::BinaryOperator::Multiply:
+                case ast::BinaryOperator::Divide:
+                case ast::BinaryOperator::Modulo:
+                    return canAcceptNumericContext(binary.left()) && canAcceptNumericContext(binary.right());
+                case ast::BinaryOperator::Or:
+                case ast::BinaryOperator::And:
+                case ast::BinaryOperator::Equal:
+                case ast::BinaryOperator::NotEqual:
+                case ast::BinaryOperator::Less:
+                case ast::BinaryOperator::LessEqual:
+                case ast::BinaryOperator::Greater:
+                case ast::BinaryOperator::GreaterEqual:
+                case ast::BinaryOperator::Range:
+                    // A comparison/equality/logical/Range result is never
+                    // itself a flexible numeric value (Bool, or deferred
+                    // Unresolved) - it can never be "the" numeric context an
+                    // enclosing expression discovers through it.
+                    return false;
+            }
+            return false; // unreachable, -Wreturn-type guard only
+        }
+
+        case ast::ExprKind::Identifier:
+        case ast::ExprKind::Call:
+        case ast::ExprKind::Assignment:
+        case ast::ExprKind::ArrayLiteral:
+        case ast::ExprKind::Index:
+        case ast::ExprKind::Member:
+        case ast::ExprKind::Unit:
+        case ast::ExprKind::ErrorPropagation:
+            return false;
+    }
+    return false; // unreachable, -Wreturn-type guard only
+}
+
+// Milestone 2 spec #10/#12: only arithmetic/modulo ever let the
+// whole-expression `expected` flow into their operands (their successful
+// result type IS the shared operand type) - and only when `expected` is
+// itself usable (concrete) AND numeric. `expectedAnnotationSpan` travels
+// alongside `expected` only in that same case, preserving provenance
+// (spec #14) without needing a general context-provenance object.
+std::pair<std::optional<Type>, std::optional<SourceSpan>> arithmeticOperandContext(
+    std::optional<Type> expected, std::optional<SourceSpan> expectedAnnotationSpan) {
+    const std::optional<Type> context = usableContext(expected);
+    if (context.has_value() && context->isNumeric()) {
+        return {context, expectedAnnotationSpan};
+    }
+    return {std::nullopt, std::nullopt};
+}
+
+bool isNumericDomain(Type type) { return type.isNumeric(); }
+bool isIntegerDomain(Type type) { return type.isInteger(); }
+bool isEqualityDomain(Type type) { return type.isNumeric() || type.isBool() || type.isChar(); }
+
 } // namespace
 
 TypeChecker::TypeChecker(const SourceManager& sources) noexcept : sources_(sources) {}
@@ -261,7 +344,8 @@ Type TypeChecker::checkExpr(const ast::Expr& expr, std::optional<Type> expected,
             return checkUnaryExpr(static_cast<const ast::UnaryExpr&>(expr), expected, expectedAnnotationSpan, model);
 
         case ast::ExprKind::Binary:
-            return checkBinaryExpr(static_cast<const ast::BinaryExpr&>(expr), model);
+            return checkBinaryExpr(static_cast<const ast::BinaryExpr&>(expr), expected, expectedAnnotationSpan,
+                                    model);
 
         case ast::ExprKind::Call:
             return checkCallExpr(static_cast<const ast::CallExpr&>(expr), model);
@@ -400,30 +484,259 @@ Type TypeChecker::checkUnaryExpr(const ast::UnaryExpr& unary, std::optional<Type
             model.setExpressionType(unary, result);
             return result;
         }
+
+        // General Negate (Milestone 2 spec #7): the operand is NOT a bare
+        // literal reducible through transparent ParenExpr wrappers (an
+        // identifier, a call, compound arithmetic, ...). `expected` (and
+        // its annotation span) is forwarded into the operand ONLY when it
+        // names a concrete type Negate's domain could actually produce
+        // (signed integer or float) - forwarding an incompatible type
+        // (unsigned/Bool/Char/Unit) would let a nested literal wrongly
+        // adapt to a type Negate can never return, trading a more useful
+        // TypeMismatch for a confusing InvalidUnaryOperand (see the
+        // `let y: u8 = -(1 + 2)` example in the Milestone-2 design).
+        // Everything else - fixed IdentifierExpr/CallExpr/etc. - ignores
+        // whatever is forwarded anyway (unchanged Milestone-1 behavior),
+        // so this forwarding is always safe.
+        const std::optional<Type> context = usableContext(expected);
+        const bool domainCompatible = context.has_value() && (context->isSignedInteger() || context->isFloat());
+        const std::optional<Type> forwardedExpected = domainCompatible ? context : std::nullopt;
+        const std::optional<SourceSpan> forwardedSpan = domainCompatible ? expectedAnnotationSpan : std::nullopt;
+
+        const Type operandType = checkExpr(unary.operand(), forwardedExpected, model, forwardedSpan);
+
+        Type result = Type::error();
+        if (operandType.isError()) {
+            result = Type::error();
+        } else if (operandType.isUnresolved()) {
+            result = Type::unresolved();
+        } else if (operandType.isSignedInteger() || operandType.isFloat()) {
+            result = operandType; // Negate is closed over its domain: type in = type out.
+        } else {
+            model.addError(SemanticError{
+                SemanticErrorKind::InvalidUnaryOperand,
+                unary.operatorSpan(),
+                std::nullopt,
+                std::nullopt,
+                operandType,
+            });
+            result = Type::error();
+        }
+
+        model.setExpressionType(unary, result);
+        return result;
     }
 
-    // General case (Milestone 1 spec #8): -identifier, !expr, &expr,
-    // &mut expr, and Negate over anything that is not an
-    // (optionally-parenthesized) adaptable numeric literal all remain
-    // Type::unresolved() this milestone - but the operand is still fully
-    // checked with no expected context.
+    if (unary.op() == ast::UnaryOperator::Not) {
+        // Milestone 2 spec #8: the operand never receives contextual
+        // forwarding - Bool is already context-immune (Milestone 1), and
+        // no other type could ever become Bool through context. No
+        // truthiness: a concrete non-Bool operand is always rejected.
+        const Type operandType = inferExpr(unary.operand(), model);
+
+        Type result = Type::error();
+        if (operandType.isError()) {
+            result = Type::error();
+        } else if (operandType.isUnresolved()) {
+            result = Type::unresolved();
+        } else if (operandType.isBool()) {
+            result = Type::boolean();
+        } else {
+            model.addError(SemanticError{
+                SemanticErrorKind::InvalidUnaryOperand,
+                unary.operatorSpan(),
+                std::nullopt,
+                std::nullopt,
+                operandType,
+            });
+            result = Type::error();
+        }
+
+        model.setExpressionType(unary, result);
+        return result;
+    }
+
+    // Ref/RefMut remain fully deferred (Milestone 2 spec #19/#23): the
+    // operand is still fully checked (no expected context - reference
+    // semantics are undefined), but the outer UnaryExpr stays
+    // Type::unresolved() unconditionally, with no operator diagnostic.
     inferExpr(unary.operand(), model);
     const Type result = Type::unresolved();
     model.setExpressionType(unary, result);
     return result;
 }
 
-Type TypeChecker::checkBinaryExpr(const ast::BinaryExpr& binary, SemanticModel& model) const {
-    // Deferred (Milestone 1 spec #8/#21): both children are checked with
-    // no expected context; the outer BinaryExpr stays Type::unresolved()
-    // even if a child came back Type::error() - a child's error is
-    // deliberately NOT propagated to this deferred outer node yet
-    // (general binary typing, where it WILL propagate, is Milestone 2).
-    inferExpr(binary.left(), model);
-    inferExpr(binary.right(), model);
-    const Type result = Type::unresolved();
+Type TypeChecker::checkBinaryExpr(const ast::BinaryExpr& binary, std::optional<Type> expected,
+                                   std::optional<SourceSpan> expectedAnnotationSpan, SemanticModel& model) const {
+    switch (binary.op()) {
+        case ast::BinaryOperator::Range: {
+            // Still fully deferred (Milestone 2 spec #18/#23, unchanged
+            // Milestone-1 rule): both endpoints are checked, but the outer
+            // Range BinaryExpr stays Type::unresolved() unconditionally -
+            // even when the endpoints' types plainly differ - and never
+            // produces InvalidBinaryOperands.
+            inferExpr(binary.left(), model);
+            inferExpr(binary.right(), model);
+            const Type result = Type::unresolved();
+            model.setExpressionType(binary, result);
+            return result;
+        }
+
+        case ast::BinaryOperator::Add:
+        case ast::BinaryOperator::Subtract:
+        case ast::BinaryOperator::Multiply:
+        case ast::BinaryOperator::Divide: {
+            const auto [operandExpected, operandSpan] = arithmeticOperandContext(expected, expectedAnnotationSpan);
+            const auto [leftType, rightType] =
+                checkMatchedOperands(binary.left(), binary.right(), operandExpected, operandSpan, model);
+            const Type result = resolveMatchedOperatorResult(binary, leftType, rightType, isNumericDomain,
+                                                               /*resultIsOperandType=*/true, model);
+            model.setExpressionType(binary, result);
+            return result;
+        }
+
+        case ast::BinaryOperator::Modulo: {
+            const auto [operandExpected, operandSpan] = arithmeticOperandContext(expected, expectedAnnotationSpan);
+            const auto [leftType, rightType] =
+                checkMatchedOperands(binary.left(), binary.right(), operandExpected, operandSpan, model);
+            const Type result = resolveMatchedOperatorResult(binary, leftType, rightType, isIntegerDomain,
+                                                               /*resultIsOperandType=*/true, model);
+            model.setExpressionType(binary, result);
+            return result;
+        }
+
+        case ast::BinaryOperator::Less:
+        case ast::BinaryOperator::LessEqual:
+        case ast::BinaryOperator::Greater:
+        case ast::BinaryOperator::GreaterEqual: {
+            // Milestone 2 spec #10/#20: the whole-expression `expected`
+            // NEVER flows into comparison operands - a comparison's
+            // successful result is Bool, not the operand type - so
+            // checkMatchedOperands() is called with no operand context of
+            // its own; only sibling anchoring (inside that helper) still
+            // applies.
+            const auto [leftType, rightType] =
+                checkMatchedOperands(binary.left(), binary.right(), std::nullopt, std::nullopt, model);
+            const Type result = resolveMatchedOperatorResult(binary, leftType, rightType, isNumericDomain,
+                                                               /*resultIsOperandType=*/false, model);
+            model.setExpressionType(binary, result);
+            return result;
+        }
+
+        case ast::BinaryOperator::Equal:
+        case ast::BinaryOperator::NotEqual: {
+            // Same rule as comparison (Milestone 2 spec #10/#21): no
+            // whole-expression context, sibling anchoring only.
+            const auto [leftType, rightType] =
+                checkMatchedOperands(binary.left(), binary.right(), std::nullopt, std::nullopt, model);
+            const Type result = resolveMatchedOperatorResult(binary, leftType, rightType, isEqualityDomain,
+                                                               /*resultIsOperandType=*/false, model);
+            model.setExpressionType(binary, result);
+            return result;
+        }
+
+        case ast::BinaryOperator::And:
+        case ast::BinaryOperator::Or: {
+            // Logical operands never need checkMatchedOperands()
+            // (Milestone 2 spec #12/#22): Bool is already context-immune,
+            // so no anchor mechanism has anything to offer either side.
+            const Type leftType = inferExpr(binary.left(), model);
+            const Type rightType = inferExpr(binary.right(), model);
+
+            Type result = Type::error();
+            if (leftType.isError() || rightType.isError()) {
+                result = Type::error();
+            } else if (leftType.isUnresolved() || rightType.isUnresolved()) {
+                result = Type::unresolved();
+            } else if (leftType.isBool() && rightType.isBool()) {
+                result = Type::boolean();
+            } else {
+                model.addError(SemanticError{
+                    SemanticErrorKind::InvalidBinaryOperands,
+                    binary.operatorSpan(),
+                    std::nullopt,
+                    std::nullopt,
+                    std::nullopt,
+                });
+                result = Type::error();
+            }
+
+            model.setExpressionType(binary, result);
+            return result;
+        }
+    }
+
+    // Unreachable while BinaryOperator's enumerators match the switch
+    // above exactly - kept only so -Wreturn-type doesn't warn; the switch
+    // itself still has no `default:`.
+    const Type result = Type::error();
     model.setExpressionType(binary, result);
     return result;
+}
+
+std::pair<Type, Type> TypeChecker::checkMatchedOperands(const ast::Expr& left, const ast::Expr& right,
+                                                          std::optional<Type> operandExpected,
+                                                          std::optional<SourceSpan> operandExpectedAnnotationSpan,
+                                                          SemanticModel& model) const {
+    const bool leftFlexible = canAcceptNumericContext(left);
+    const bool rightFlexible = canAcceptNumericContext(right);
+
+    if (leftFlexible && !rightFlexible) {
+        // Discover the anchor from the fixed right side FIRST - it is
+        // checked exactly once, with no context of its own, and its
+        // result (if concrete numeric) becomes the context offered to the
+        // flexible left side. No annotation span travels with a
+        // sibling-derived anchor (Milestone 2 spec #14).
+        const Type rightType = checkExpr(right, std::nullopt, model);
+        const std::optional<Type> anchor = rightType.isNumeric() ? std::optional<Type>(rightType) : std::nullopt;
+        const Type leftType = checkExpr(left, anchor, model);
+        return {leftType, rightType};
+    }
+
+    if (!leftFlexible && rightFlexible) {
+        const Type leftType = checkExpr(left, std::nullopt, model);
+        const std::optional<Type> anchor = leftType.isNumeric() ? std::optional<Type>(leftType) : std::nullopt;
+        const Type rightType = checkExpr(right, anchor, model);
+        return {leftType, rightType};
+    }
+
+    if (leftFlexible && rightFlexible) {
+        // No internal anchor exists - only the caller-supplied
+        // whole-expression context (already filtered per operator family
+        // by the caller) can inform either side, and it is offered to
+        // both identically.
+        const Type leftType = checkExpr(left, operandExpected, model, operandExpectedAnnotationSpan);
+        const Type rightType = checkExpr(right, operandExpected, model, operandExpectedAnnotationSpan);
+        return {leftType, rightType};
+    }
+
+    // Neither side is flexible - context never applies to either.
+    const Type leftType = checkExpr(left, std::nullopt, model);
+    const Type rightType = checkExpr(right, std::nullopt, model);
+    return {leftType, rightType};
+}
+
+Type TypeChecker::resolveMatchedOperatorResult(const ast::BinaryExpr& binary, Type leftType, Type rightType,
+                                                bool (*domainAccepts)(Type), bool resultIsOperandType,
+                                                SemanticModel& model) const {
+    if (leftType.isError() || rightType.isError()) {
+        return Type::error();
+    }
+    if (leftType.isUnresolved() || rightType.isUnresolved()) {
+        return Type::unresolved();
+    }
+    if (leftType == rightType && domainAccepts(leftType)) {
+        return resultIsOperandType ? leftType : Type::boolean();
+    }
+
+    model.addError(SemanticError{
+        SemanticErrorKind::InvalidBinaryOperands,
+        binary.operatorSpan(),
+        std::nullopt,
+        std::nullopt,
+        std::nullopt,
+    });
+    return Type::error();
 }
 
 Type TypeChecker::checkCallExpr(const ast::CallExpr& call, SemanticModel& model) const {

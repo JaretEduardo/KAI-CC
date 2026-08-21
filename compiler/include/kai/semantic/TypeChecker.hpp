@@ -10,10 +10,12 @@
 
 #include <optional>
 #include <string_view>
+#include <utility>
 
 namespace kai::semantic {
 
-/// TYPE-CHECK MILESTONE 1: Literal & Annotation Foundation.
+/// TYPE-CHECK MILESTONE 1+2: Literal & Annotation Foundation, plus
+/// Primitive Operators.
 ///
 /// TypeChecker is a SEPARATE pass/class run strictly after
 /// SemanticAnalyzer::analyze() has already populated a SemanticModel's
@@ -26,12 +28,15 @@ namespace kai::semantic {
 /// (see checkIdentifierExpr() in TypeChecker.cpp) - a hard architectural
 /// boundary.
 ///
-/// This milestone deliberately does NOT implement primitive-operator
-/// typing, call validation, assignment semantics, or condition/return
-/// validation - every such outer expression kind is still fully
-/// traversed (its children are checked) but recorded as
-/// Type::unresolved() (see checkBinaryExpr()/checkCallExpr()/etc. in
-/// TypeChecker.cpp for the full per-ExprKind rules).
+/// Milestone 2 adds primitive-operator typing: Negate, Not, arithmetic
+/// (+ - * /), modulo (%), ordering (< <= > >=), equality (== !=), and
+/// logical (&& ||) - see checkUnaryExpr()/checkBinaryExpr() in
+/// TypeChecker.cpp. This milestone still does NOT implement call
+/// validation, assignment semantics, condition/return validation, or
+/// reference/range semantics - every such outer expression kind is still
+/// fully traversed (its children are checked) but recorded as
+/// Type::unresolved() (see checkCallExpr()/etc. in TypeChecker.cpp for
+/// the full per-ExprKind rules).
 ///
 /// typeOf() three-state contract (see SemanticModel::typeOf()):
 /// std::nullopt means an ast::Expr was never visited by this pass;
@@ -97,22 +102,56 @@ private:
     Type checkParenExpr(const ast::ParenExpr& paren, std::optional<Type> expected,
                          std::optional<SourceSpan> expectedAnnotationSpan, SemanticModel& model) const;
 
-    /// Special-cases ONLY Negate directly (through transparent ParenExpr
-    /// wrappers) over an Integer/Float LiteralExpr, treating the whole
-    /// negated-literal subtree as one contextually-typed numeric constant
-    /// (Milestone 1 spec #13/#14). Every other UnaryExpr shape - general
-    /// `-identifier`, `!expr`, `&expr`, `&mut expr` - stays
-    /// Type::unresolved(), though its operand is still fully checked.
+    /// Dispatches first to the Milestone-1 bare-literal-through-Paren
+    /// Negate fast path (unchanged - preserves the -128/-129/etc.
+    /// boundary-safe behavior), then to the Milestone-2 general Negate/
+    /// Not algorithms, then to the still-fully-deferred Ref/RefMut case
+    /// (Milestone 2 spec #6-#8/#23).
     Type checkUnaryExpr(const ast::UnaryExpr& unary, std::optional<Type> expected,
                          std::optional<SourceSpan> expectedAnnotationSpan, SemanticModel& model) const;
 
-    // Deferred outer expression kinds (Milestone 1 spec #8/#21): each
-    // checks all of its children with no expected context and always
-    // records Type::unresolved() for itself, even when a child comes
-    // back Type::error() - a child's error is deliberately NOT
-    // propagated to these outer nodes in this milestone (see
-    // TypeChecker.cpp).
-    Type checkBinaryExpr(const ast::BinaryExpr& binary, SemanticModel& model) const;
+    /// Milestone 2: dispatches per ast::BinaryOperator family - Range
+    /// stays fully deferred (Milestone 1 rule, unchanged); arithmetic/
+    /// modulo/ordering/equality route through checkMatchedOperands() and
+    /// resolveMatchedOperatorResult(); logical (&&/||) is checked inline,
+    /// needing no operand-anchoring. `expected`/`expectedAnnotationSpan`
+    /// are only ever honored by the arithmetic/modulo families (Milestone
+    /// 2 spec #10/#12) - ordering/equality never let the whole-expression
+    /// expected type flow into their operands.
+    Type checkBinaryExpr(const ast::BinaryExpr& binary, std::optional<Type> expected,
+                          std::optional<SourceSpan> expectedAnnotationSpan, SemanticModel& model) const;
+
+    /// The Milestone-2 operand-anchoring algorithm (spec #9/#12/#13),
+    /// shared by arithmetic/modulo/ordering/equality checking. Each of
+    /// `left`/`right` is checked through checkExpr() EXACTLY ONCE:
+    /// - if exactly one side is canAcceptNumericContext() ("flexible")
+    ///   and the other is not, the fixed side is checked first (with no
+    ///   context) and its own concrete numeric Type - if any - becomes
+    ///   the anchor context offered to the flexible side (never carrying
+    ///   `operandExpectedAnnotationSpan`, since that anchor did not come
+    ///   from an explicit annotation);
+    /// - if both sides are flexible, `operandExpected`/
+    ///   `operandExpectedAnnotationSpan` (the caller-filtered
+    ///   whole-expression context, if any) is offered to both;
+    /// - otherwise both sides are simply checked with no context.
+    /// No subtree is ever re-checked.
+    std::pair<Type, Type> checkMatchedOperands(const ast::Expr& left, const ast::Expr& right,
+                                                std::optional<Type> operandExpected,
+                                                std::optional<SourceSpan> operandExpectedAnnotationSpan,
+                                                SemanticModel& model) const;
+
+    /// Applies the Milestone-2 spec #4 Error/Unresolved propagation rule,
+    /// then - only once both operands are concrete - the operator's own
+    /// domain rule (`domainAccepts`, e.g. isNumeric()/isInteger()/a
+    /// combined equality predicate) and same-type requirement.
+    /// `resultIsOperandType` selects arithmetic/modulo's "result = shared
+    /// operand type" vs. ordering/equality's "result = Bool". Emits
+    /// InvalidBinaryOperands at `binary.operatorSpan()` on domain
+    /// failure - never when either operand was already Error/Unresolved.
+    Type resolveMatchedOperatorResult(const ast::BinaryExpr& binary, Type leftType, Type rightType,
+                                       bool (*domainAccepts)(Type), bool resultIsOperandType,
+                                       SemanticModel& model) const;
+
     Type checkCallExpr(const ast::CallExpr& call, SemanticModel& model) const;
     Type checkAssignmentExpr(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
     Type checkArrayLiteralExpr(const ast::ArrayLiteralExpr& array, SemanticModel& model) const;
