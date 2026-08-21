@@ -253,22 +253,41 @@ void TypeChecker::checkTopLevelDeclaration(const ast::Decl& decl, SemanticModel&
 }
 
 void TypeChecker::checkFunctionBody(const ast::FunctionDecl& fn, SemanticModel& model) const {
-    checkBlock(fn.body(), model);
+    // Milestone 5 spec #8: use the declaration mapping (each FunctionDecl -
+    // including a duplicate - has its own SymbolId/signature), never a
+    // textual name lookup, and never re-resolve the return TypeSyntax -
+    // SemanticAnalyzer already did that in Pass 1.
+    const std::optional<SymbolId> fnId = model.declarationSymbol(fn.name());
+    assert(fnId.has_value());
+
+    // Copied by value immediately (Milestone 5 spec #8): TypeChecker adds
+    // no symbols, but this avoids any lifetime coupling to SemanticModel's
+    // internal Symbol storage regardless, and only the small Type value is
+    // actually needed for the rest of this function's traversal. The
+    // annotation span (spec #9) comes from the AST's own TypeSyntax*, not
+    // from the Symbol - nullopt for an implicit Unit return.
+    const ReturnContext returnContext{
+        model.symbol(*fnId).signature->returnType,
+        fn.returnType() != nullptr ? std::optional<SourceSpan>(fn.returnType()->span()) : std::nullopt,
+    };
+
+    checkBlock(fn.body(), returnContext, model);
 }
 
-void TypeChecker::checkBlock(const ast::BlockStmt& block, SemanticModel& model) const {
+void TypeChecker::checkBlock(const ast::BlockStmt& block, const ReturnContext& returnContext,
+                              SemanticModel& model) const {
     for (const auto& stmt : block.statements()) {
-        checkStatement(*stmt, model);
+        checkStatement(*stmt, returnContext, model);
     }
 }
 
 // No `default:` case: StmtKind is fully implemented today, mirroring
-// SemanticAnalyzer.cpp's own exhaustive switch over it. No statement
-// validation happens yet - see TypeChecker.hpp's class comment.
-void TypeChecker::checkStatement(const ast::Stmt& stmt, SemanticModel& model) const {
+// SemanticAnalyzer.cpp's own exhaustive switch over it.
+void TypeChecker::checkStatement(const ast::Stmt& stmt, const ReturnContext& returnContext,
+                                  SemanticModel& model) const {
     switch (stmt.kind()) {
         case ast::StmtKind::Block:
-            checkBlock(static_cast<const ast::BlockStmt&>(stmt), model);
+            checkBlock(static_cast<const ast::BlockStmt&>(stmt), returnContext, model);
             return;
 
         case ast::StmtKind::Expr:
@@ -279,39 +298,109 @@ void TypeChecker::checkStatement(const ast::Stmt& stmt, SemanticModel& model) co
             checkVarDecl(static_cast<const ast::VarDeclStmt&>(stmt), model);
             return;
 
-        case ast::StmtKind::Return: {
-            const auto& returnStmt = static_cast<const ast::ReturnStmt&>(stmt);
-            if (const ast::Expr* value = returnStmt.value(); value != nullptr) {
-                inferExpr(*value, model);
-            }
+        case ast::StmtKind::Return:
+            checkReturnStmt(static_cast<const ast::ReturnStmt&>(stmt), returnContext, model);
             return;
-        }
 
-        case ast::StmtKind::If: {
-            const auto& ifStmt = static_cast<const ast::IfStmt&>(stmt);
-            for (const ast::IfBranch& branch : ifStmt.branches()) {
-                inferExpr(*branch.condition, model);
-                checkBlock(*branch.body, model);
-            }
-            if (const std::optional<ast::ElseClause>& elseClause = ifStmt.elseClause(); elseClause.has_value()) {
-                checkBlock(*elseClause->body, model);
-            }
+        case ast::StmtKind::If:
+            checkIfStmt(static_cast<const ast::IfStmt&>(stmt), returnContext, model);
             return;
-        }
 
-        case ast::StmtKind::While: {
-            const auto& whileStmt = static_cast<const ast::WhileStmt&>(stmt);
-            inferExpr(whileStmt.condition(), model);
-            checkBlock(whileStmt.body(), model);
+        case ast::StmtKind::While:
+            checkWhileStmt(static_cast<const ast::WhileStmt&>(stmt), returnContext, model);
             return;
-        }
 
-        case ast::StmtKind::For: {
-            const auto& forStmt = static_cast<const ast::ForStmt&>(stmt);
-            inferExpr(forStmt.iterable(), model);
-            checkBlock(forStmt.body(), model);
+        case ast::StmtKind::For:
+            checkForStmt(static_cast<const ast::ForStmt&>(stmt), returnContext, model);
             return;
+    }
+}
+
+void TypeChecker::checkIfStmt(const ast::IfStmt& ifStmt, const ReturnContext& returnContext,
+                               SemanticModel& model) const {
+    // Milestone 5 spec #4: every condition is validated independently;
+    // every branch body - including one whose own condition mismatched or
+    // was Error/Unresolved - is still traversed unconditionally. `else`
+    // has no condition of its own.
+    for (const ast::IfBranch& branch : ifStmt.branches()) {
+        checkCondition(*branch.condition, model);
+        checkBlock(*branch.body, returnContext, model);
+    }
+    if (const std::optional<ast::ElseClause>& elseClause = ifStmt.elseClause(); elseClause.has_value()) {
+        checkBlock(*elseClause->body, returnContext, model);
+    }
+}
+
+void TypeChecker::checkWhileStmt(const ast::WhileStmt& whileStmt, const ReturnContext& returnContext,
+                                  SemanticModel& model) const {
+    checkCondition(whileStmt.condition(), model);
+    checkBlock(whileStmt.body(), returnContext, model);
+}
+
+void TypeChecker::checkForStmt(const ast::ForStmt& forStmt, const ReturnContext& returnContext,
+                                SemanticModel& model) const {
+    // Milestone 5 spec #6: UNCHANGED from Milestone 1 - no iterable-type/
+    // Range/element-type validation, and the for-variable's Symbol type is
+    // untouched by this milestone.
+    inferExpr(forStmt.iterable(), model);
+    checkBlock(forStmt.body(), returnContext, model);
+}
+
+void TypeChecker::checkCondition(const ast::Expr& condition, SemanticModel& model) const {
+    // Milestone 5 spec #2-#3: a CONCRETE expected Type (Bool) states the
+    // semantic contract directly. Every current expression kind already
+    // refuses to contextually adapt to Bool on its own (literals only
+    // adapt within their own numeric family; arithmetic/modulo only
+    // accept a numeric outer context; comparison/equality/logical/calls/
+    // assignment never consult their own `expected` at all), so this is
+    // observationally identical to inferExpr() + comparison today - no
+    // condition-specific expression typing is introduced.
+    const Type conditionType = checkExpr(condition, Type::boolean(), model);
+
+    if (!conditionType.isError() && !conditionType.isUnresolved() && !(conditionType == Type::boolean())) {
+        model.addError(SemanticError{
+            SemanticErrorKind::TypeMismatch,
+            condition.span(),
+            std::nullopt,
+            Type::boolean(),
+            conditionType,
+        });
+    }
+}
+
+void TypeChecker::checkReturnStmt(const ast::ReturnStmt& returnStmt, const ReturnContext& returnContext,
+                                   SemanticModel& model) const {
+    const Type declaredReturnType = returnContext.returnType;
+
+    if (declaredReturnType.isError() || declaredReturnType.isUnresolved()) {
+        // Milestone 5 spec #13/#14: the declared return annotation itself
+        // already failed/was deferred - check the returned expression (if
+        // any) with no usable context so its own independent errors still
+        // surface, but never compare it against Error/Unresolved.
+        if (const ast::Expr* value = returnStmt.value(); value != nullptr) {
+            inferExpr(*value, model);
         }
+        return;
+    }
+
+    // Milestone 5 spec #15/#16: a bare `return` is treated as Type::unit()
+    // for this comparison ONLY - no AST node is fabricated, and no
+    // expression-type entry is ever recorded for it (ReturnStmt is a
+    // statement, not an Expr). A concrete declared return type is
+    // otherwise checked exactly like checkVarDecl() checks an initializer
+    // against its annotation - Unit is not special-cased in any way.
+    const Type actualType = returnStmt.value() != nullptr
+                                 ? checkExpr(*returnStmt.value(), declaredReturnType, model, returnContext.annotationSpan)
+                                 : Type::unit();
+
+    if (!actualType.isError() && !actualType.isUnresolved() && !(actualType == declaredReturnType)) {
+        model.addError(SemanticError{
+            SemanticErrorKind::TypeMismatch,
+            returnStmt.value() != nullptr ? returnStmt.value()->span() : returnStmt.span(),
+            returnContext.annotationSpan,
+            declaredReturnType,
+            actualType,
+        });
     }
 }
 

@@ -15,8 +15,9 @@
 
 namespace kai::semantic {
 
-/// TYPE-CHECK MILESTONE 1+2+3+4: Literal & Annotation Foundation, Primitive
-/// Operators, Function Calls, and Assignment & Binding Mutability.
+/// TYPE-CHECK MILESTONE 1+2+3+4+5: Literal & Annotation Foundation,
+/// Primitive Operators, Function Calls, Assignment & Binding Mutability,
+/// and Conditions & Return Validation.
 ///
 /// TypeChecker is a SEPARATE pass/class run strictly after
 /// SemanticAnalyzer::analyze() has already populated a SemanticModel's
@@ -57,11 +58,21 @@ namespace kai::semantic {
 /// call, a Function/Builtin identifier, ...) is a categorically invalid
 /// target.
 ///
-/// This milestone still does NOT implement condition/return validation
-/// or reference/range/borrow-mutation semantics - every such outer
-/// expression kind is still fully traversed (its children are checked)
-/// but recorded as Type::unresolved() (see checkIndexExpr()/etc. in
-/// TypeChecker.cpp for the full per-ExprKind rules).
+/// Milestone 5 adds if/while condition Bool validation and return-
+/// statement checking against the enclosing FunctionDecl's declared
+/// return Type (see ReturnContext, checkCondition(), checkIfStmt()/
+/// checkWhileStmt()/checkReturnStmt() in TypeChecker.cpp). A bare
+/// `return` is checked as though it returned Type::unit() - no AST node
+/// is fabricated for this; it is a purely local value used only for the
+/// comparison. This milestone still does NOT implement all-paths-return
+/// analysis, missing-return-at-function-end diagnostics, unreachable-code
+/// analysis, or for-iterable validation - `ForStmt::iterable()` is still
+/// only traversed for its own independent errors, never type-checked.
+///
+/// Reference/range/borrow-mutation semantics remain deferred - every such
+/// outer expression kind is still fully traversed (its children are
+/// checked) but recorded as Type::unresolved() (see checkIndexExpr()/etc.
+/// in TypeChecker.cpp for the full per-ExprKind rules).
 ///
 /// typeOf() three-state contract (see SemanticModel::typeOf()):
 /// std::nullopt means an ast::Expr was never visited by this pass;
@@ -85,21 +96,82 @@ public:
 private:
     // --- Top-level / statement traversal ---
 
+    /// Milestone 5: the enclosing FunctionDecl's declared return Type
+    /// (already resolved by SemanticAnalyzer - never re-resolved here)
+    /// plus the source span of its explicit `-> T` annotation, if any
+    /// (nullopt for an implicit Unit return). Created exactly once per
+    /// FunctionDecl, in checkFunctionBody(), and threaded by const
+    /// reference through the rest of that function's statement traversal
+    /// - never stored in SemanticModel, never held as TypeChecker member
+    /// state, so TypeChecker remains reentrant across functions/files.
+    struct ReturnContext {
+        Type returnType;
+        std::optional<SourceSpan> annotationSpan;
+    };
+
     void checkTopLevelDeclaration(const ast::Decl& decl, SemanticModel& model) const;
     void checkFunctionBody(const ast::FunctionDecl& fn, SemanticModel& model) const;
-    void checkBlock(const ast::BlockStmt& block, SemanticModel& model) const;
+    void checkBlock(const ast::BlockStmt& block, const ReturnContext& returnContext, SemanticModel& model) const;
 
-    /// Exhaustive over ast::StmtKind, no `default:`. No statement
-    /// validation happens yet (no Bool-condition requirement, no
-    /// return-type comparison, no for-variable element-type inference) -
-    /// see this class's own comment above.
-    void checkStatement(const ast::Stmt& stmt, SemanticModel& model) const;
+    /// Exhaustive over ast::StmtKind, no `default:`. Still does NOT
+    /// implement mutability/assignment-target checking at the statement
+    /// level beyond what checkVarDecl()/checkAssignmentExpr() already do,
+    /// nor all-paths-return/unreachable-code analysis (Milestone 5 spec
+    /// #23/#24) - only the ReturnStmt/IfStmt/WhileStmt cases below are new
+    /// in this milestone.
+    void checkStatement(const ast::Stmt& stmt, const ReturnContext& returnContext, SemanticModel& model) const;
 
     /// Implements the annotated-local and unannotated-local algorithms
     /// (Milestone 1 spec #19/#20): fetches the Local Symbol ALREADY
     /// created by SemanticAnalyzer through declarationSymbol() - never
     /// re-resolves the TypeSyntax annotation itself.
     void checkVarDecl(const ast::VarDeclStmt& varDecl, SemanticModel& model) const;
+
+    /// Milestone 5 spec #2-#4: validates every if/else-if condition
+    /// independently (never the parameterless `else`), then traverses
+    /// every branch body - including a mismatched/Error/Unresolved
+    /// condition's own body - unconditionally.
+    void checkIfStmt(const ast::IfStmt& ifStmt, const ReturnContext& returnContext, SemanticModel& model) const;
+
+    /// Milestone 5 spec #5: the same Bool-condition rule as checkIfStmt(),
+    /// with no additional loop-specific validation; the body is always
+    /// traversed afterward.
+    void checkWhileStmt(const ast::WhileStmt& whileStmt, const ReturnContext& returnContext,
+                         SemanticModel& model) const;
+
+    /// Milestone 5 spec #6: UNCHANGED from Milestone 1 - the iterable is
+    /// still only checked for its own independent errors (no Range/
+    /// element-type/iterable-type validation), and the for-variable's
+    /// Symbol type is untouched by this milestone.
+    void checkForStmt(const ast::ForStmt& forStmt, const ReturnContext& returnContext, SemanticModel& model) const;
+
+    /// Milestone 5 spec #2-#3: `checkExpr(condition, Type::boolean(),
+    /// model)` - a CONCRETE expected Type states the semantic contract
+    /// directly, though every current expression kind already refuses to
+    /// contextually adapt to Bool (an integer/float literal only adapts
+    /// to a matching numeric family; arithmetic/modulo only accept a
+    /// numeric outer context; comparison/equality/logical/calls/
+    /// assignment never consult their own `expected` at all) - so this is
+    /// observationally identical to inferExpr() followed by a comparison
+    /// today, while stating the contract explicitly and staying
+    /// consistent with every other "known expected type" call site.
+    /// Emits TypeMismatch only when the resulting Type is concrete and
+    /// not Bool; Error/Unresolved conditions emit nothing (spec #2).
+    void checkCondition(const ast::Expr& condition, SemanticModel& model) const;
+
+    /// Milestone 5 spec #7-#21: checks a return value (if present)
+    /// contextually against `returnContext.returnType` exactly like
+    /// checkVarDecl() checks an initializer against a declared
+    /// annotation - no return-specific literal/expression-context
+    /// algorithm. A bare `return` is treated as Type::unit() for this
+    /// comparison ONLY (spec #15) - no AST node is fabricated and no
+    /// expression-type entry is recorded for it, since ReturnStmt is a
+    /// statement. Error/Unresolved on either side of the comparison never
+    /// produces a diagnostic (spec #13/#14/#18/#19); a concrete mismatch
+    /// reuses TypeMismatch, with `relatedSpan = returnContext.annotationSpan`
+    /// (spec #9).
+    void checkReturnStmt(const ast::ReturnStmt& returnStmt, const ReturnContext& returnContext,
+                          SemanticModel& model) const;
 
     // --- Expression checking ---
 
