@@ -20,6 +20,14 @@ enum class SemanticErrorKind : std::uint8_t {
     DuplicateSymbol,
     UnknownIdentifier,
     UnknownType,
+    TypeMismatch,
+    LiteralOutOfRange,
+    InvalidUnaryOperand,
+    InvalidBinaryOperands,
+    InvalidArgumentCount,
+    NotCallable,
+    InvalidAssignmentTarget,
+    AssignmentToImmutableBinding,
 };
 
 /// A minimal, message-free description of a semantic failure - the
@@ -35,13 +43,31 @@ struct SemanticError {
     SourceSpan primarySpan;
 
     /// Set only when a second location is meaningful, e.g.
-    /// DuplicateSymbol's original declaration site.
+    /// DuplicateSymbol's original declaration site, or TypeMismatch's/
+    /// LiteralOutOfRange's explicit annotation span.
     std::optional<SourceSpan> relatedSpan;
+
+    /// Only meaningful for TypeMismatch (concrete expected type) and
+    /// LiteralOutOfRange (target integer type); nullopt otherwise. The
+    /// default member initializer (rather than relying on aggregate-init
+    /// value-initialization alone) is what lets every existing 3-field
+    /// SemanticError{...} call site in SemanticAnalyzer.cpp keep
+    /// compiling with no -Wmissing-field-initializers warning.
+    std::optional<Type> expectedType = std::nullopt;
+
+    /// Only meaningful for TypeMismatch (concrete actual type); nullopt
+    /// otherwise, including for LiteralOutOfRange.
+    std::optional<Type> actualType = std::nullopt;
 };
 
 /// Forward-declared only so SemanticModel can grant it access to its
 /// private mutators (see below) - not implemented in this phase.
 class SemanticAnalyzer;
+
+/// Forward-declared only so SemanticModel can grant it access to its
+/// private expression/symbol type mutators (see below). TypeChecker runs
+/// as a separate pass after SemanticAnalyzer, over the same SemanticModel.
+class TypeChecker;
 
 /// The result of semantic analysis on one SourceFile: every declared
 /// Symbol, every identifier-use resolution, every declaration-identifier
@@ -107,6 +133,19 @@ public:
 
     const std::vector<SemanticError>& errors() const noexcept { return errors_; }
 
+    /// The semantic Type recorded for `expr` by TypeChecker, or
+    /// std::nullopt if `expr` has not been type-checked at all. Distinct
+    /// from a recorded Type::unresolved()/Type::error() - see
+    /// TypeChecker.hpp's class comment for the three-state contract this
+    /// deliberately preserves.
+    std::optional<Type> typeOf(const ast::Expr& expr) const {
+        const auto it = expressionTypes_.find(&expr);
+        if (it == expressionTypes_.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
 private:
     // Only a future SemanticAnalyzer populates a SemanticModel. Nothing
     // else - not even tests - should be able to construct an arbitrary
@@ -114,6 +153,12 @@ private:
     // friendship keeps that mutation surface to exactly the one
     // component responsible for producing correct semantic facts.
     friend class SemanticAnalyzer;
+
+    /// TypeChecker is the only component allowed to record expression
+    /// types or overwrite a symbol's inferred type, mirroring the same
+    /// friendship-only-mutation contract SemanticAnalyzer already has
+    /// above - never exposed as public mutable semantic state.
+    friend class TypeChecker;
 
     SymbolId addSymbol(Symbol symbol) {
         symbols_.push_back(std::move(symbol));
@@ -130,10 +175,18 @@ private:
 
     void addError(SemanticError error) { errors_.push_back(std::move(error)); }
 
+    void setExpressionType(const ast::Expr& expr, Type type) { expressionTypes_.insert_or_assign(&expr, type); }
+
+    void setSymbolType(SymbolId id, Type type) {
+        assert(id.isValid());
+        symbols_[id.rawId()].type = type;
+    }
+
     std::vector<Symbol> symbols_;
     std::unordered_map<const ast::IdentifierExpr*, SymbolId> identifierResolutions_;
     std::unordered_map<const ast::Identifier*, SymbolId> declarationSymbols_;
     std::vector<SemanticError> errors_;
+    std::unordered_map<const ast::Expr*, Type> expressionTypes_;
 };
 
 } // namespace kai::semantic

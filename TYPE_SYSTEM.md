@@ -291,6 +291,31 @@ let ratio = 0.5f32
 
 This syntax is not required for the earliest KAI compiler milestone.
 
+An integer literal and a floating-point literal are separate families, and
+contextual typing never crosses that boundary:
+
+```kai
+let x: i64 = 10
+```
+
+is valid (an integer literal adopting a contextual integer type), but:
+
+```kai
+let x: f64 = 10
+```
+
+is a type mismatch - an integer literal never adopts a floating-point
+contextual type. The literal itself must be written as a float:
+
+```kai
+let x: f64 = 10.0
+```
+
+The same rule applies symmetrically: a floating-point literal never adopts a
+contextual integer type. This is not treated as an implicit conversion in
+either direction - it is a rule about which contextual types an integer or
+floating-point literal may resolve to in the first place.
+
 ---
 
 # 7. Numeric Conversions
@@ -1298,7 +1323,20 @@ Equality operators:
 !=
 ```
 
-require compatible types.
+require both operands to have the exact same concrete type, and that type
+must be one of:
+
+* a signed integer type
+* an unsigned integer type
+* a floating-point type
+* `bool`
+* `char`
+
+Result type:
+
+```text
+bool
+```
 
 Example:
 
@@ -1311,20 +1349,36 @@ if a == b {
 }
 ```
 
-Comparing unrelated types should be rejected.
-
-Invalid:
+Comparing different concrete types is rejected, including different
+concrete numeric types:
 
 ```kai
 let a: i32 = 10
-let b: String = String("10")
+let b: i64 = 10
 
 if a == b {
     ...
 }
 ```
 
-No implicit conversion should occur.
+is invalid - `i32` and `i64` are different concrete types, and there is no
+implicit numeric conversion. The same applies to comparing an integer type
+against a floating-point type, or a primitive against an unrelated type such
+as `String`.
+
+The unit type (`()`) is not part of the current committed equality domain:
+
+```kai
+if () == () {
+    ...
+}
+```
+
+is not supported by the current KAI 0.1 semantic subset. This reflects what
+is currently committed, not a claim that unit values can never become
+comparable in a future language version.
+
+No implicit conversion occurs for equality in either direction.
 
 ---
 
@@ -1339,13 +1393,45 @@ Ordering operators:
 >=
 ```
 
-are valid only for types that support ordering.
+require both operands to have the exact same concrete numeric type (a
+signed integer type, an unsigned integer type, or a floating-point type).
 
-Primitive numeric types support ordering.
+Result type:
+
+```text
+bool
+```
+
+No implicit conversion occurs: comparing two different concrete numeric
+types (e.g. `i32` against `i64`, or `i32` against `f32`) is rejected, the
+same as for arithmetic (see "Arithmetic Operators").
+
+`bool` and `char` do not support ordering in KAI 0.1.
 
 Future user-defined types may provide ordering through traits.
 
 The compiler must not invent arbitrary ordering for structs or enums.
+
+## Comparison and Equality Do Not Inherit Outer Context
+
+Unlike arithmetic and modulo (see "Arithmetic Operators"), a comparison or
+equality expression's own result type is always `bool`, never the operand
+type - so an outer expected type never flows down into a comparison's or
+equality's operands, even when both operands are literals:
+
+```kai
+let x: i64 = 1 < 2
+```
+
+does not cause `1` and `2` to become `i64` merely because the whole
+declaration expects `i64`. `1 < 2` has type `bool` regardless of `x`'s
+annotation, so this is a type mismatch (`i64` expected, `bool` found) - not
+a literal-adaptation success. The same applies to `==`/`!=`.
+
+A literal operand may still adopt type information from a *fixed* sibling
+operand within the same comparison or equality expression (e.g. `x < 1`
+where `x: i64` types the `1` as `i64`) - only the whole-expression outer
+context is excluded, not sibling context.
 
 ---
 
@@ -1944,3 +2030,688 @@ These questions should remain open until implementation or real KAI programs req
 KAI should expose enough type information to make behavior predictable while avoiding information that the compiler can safely infer locally.
 
 A type should communicate not only what data a value contains, but also enough information for humans, tools, and AI agents to reason about ownership, mutation, failure, and valid operations without inspecting unnecessary implementation details.
+
+---
+
+# 61. Arithmetic Operators
+
+Arithmetic operators:
+
+```text
++
+-
+*
+/
+```
+
+require both operands to have the exact same concrete numeric type - a
+signed integer type, an unsigned integer type, or a floating-point type.
+
+Result type:
+
+```text
+same as the operand type
+```
+
+There is no implicit numeric conversion:
+
+```kai
+let a: i32 = 1
+let b: i32 = 2
+let c = a + b   // i32
+```
+
+```kai
+let x: f32 = 1.0
+let y: f32 = 2.0
+let z = x / y   // f32
+```
+
+but:
+
+```kai
+let a: i32 = 1
+let b: i64 = 2
+let c = a + b   // error: different concrete types
+```
+
+```kai
+let a: i32 = 1
+let b: f32 = 2.0
+let c = a + b   // error: an integer type and a floating-point type are never
+                // the same concrete type
+```
+
+This document does not commit to a runtime overflow implementation beyond
+what "Integer Overflow" above already states.
+
+## Operand Context
+
+When one side of an arithmetic expression is an integer or floating-point
+literal (or a parenthesized/negated literal, or itself made up only of such
+literals), that literal may adopt the concrete numeric type of the other,
+fixed-type side - regardless of which side of the operator it appears on:
+
+```kai
+fn f(x: i64) {
+    let a = x + 1
+    let b = 1 + x
+
+    let c = x + (1 + 2)
+    let d = (1 + 2) + x
+}
+```
+
+`a`, `b`, `c`, and `d` are all `i64`: the literal `1` (and the purely
+literal expression `1 + 2`) adopts `x`'s type in every case, independent of
+source order. This is contextual literal typing (see "Integer Literals" and
+"Floating-Point Literals" above), not a numeric conversion - the same
+cross-family restriction still applies, so an integer literal added to an
+`f64` value does not become `f64`:
+
+```kai
+fn f(x: f64) {
+    let y = x + 1   // error: `1` stays an integer literal (i32 by default),
+                     // it does not adopt f64
+}
+```
+
+This operand-context behavior is specific to operators whose successful
+result type equals their operand type (arithmetic and modulo). It does not
+apply to comparison, equality, or logical operators - see "Comparison and
+Equality Do Not Inherit Outer Context" under "Ordering" for why.
+
+---
+
+# 62. Modulo
+
+The modulo operator:
+
+```text
+%
+```
+
+is integer-only: it requires both operands to have the exact same concrete
+integer type (signed or unsigned).
+
+Result type:
+
+```text
+same integer type
+```
+
+Examples:
+
+```kai
+let a: i32 = 7
+let b: i32 = 3
+let c = a % b     // i32
+```
+
+```kai
+let a: u64 = 7
+let b: u64 = 3
+let c = a % b     // u64
+```
+
+Floating-point operands are rejected:
+
+```kai
+let a: f32 = 7.0
+let b: f32 = 3.0
+let c = a % b     // error: modulo requires integer operands
+```
+
+The operand-context behavior described under "Arithmetic Operators" applies
+identically to modulo.
+
+---
+
+# 63. Unary Negation
+
+Unary negation:
+
+```text
+-x
+```
+
+is valid for:
+
+* signed integer types
+* floating-point types
+
+Result type:
+
+```text
+same as the operand type
+```
+
+Unary negation is not valid on an unsigned integer value:
+
+```kai
+fn f(x: u8) {
+    let y = -x   // error
+}
+```
+
+This general rule is distinct from negative-literal contextual typing/range
+fitting, which happens at compile time against a literal's exact value
+rather than against a general expression's type:
+
+```kai
+let x: i8 = -128   // valid: -128 fits i8
+```
+
+is valid because `-128` is a single compile-time-known literal value that
+fits within `i8`'s range - not because `i8` supports unary negation on an
+arbitrary unsigned-like value. See "Integer Literals" above for contextual
+literal typing.
+
+---
+
+# 64. Unary Logical Not
+
+The unary logical-not operator:
+
+```text
+!expr
+```
+
+requires a `bool` operand and returns `bool`:
+
+```kai
+let flag = true
+let inverted = !flag   // bool
+```
+
+KAI does not provide implicit truthiness: `!expr` is rejected for any
+concrete non-`bool` operand, including integers:
+
+```kai
+let value = 1
+let inverted = !value   // error
+```
+
+---
+
+# 65. Logical Binary Operators
+
+The logical binary operators:
+
+```text
+&&
+||
+```
+
+require both operands to be `bool` and return `bool`:
+
+```kai
+let a = true
+let b = false
+let both = a && b    // bool
+let either = a || b   // bool
+```
+
+As with unary logical-not, KAI does not provide implicit truthiness: a
+non-`bool` operand on either side is rejected, even if the other operand is
+`bool`.
+
+---
+
+# 66. Function Call Argument Checking
+
+Calling an ordinary user-defined function checks each argument against its
+corresponding declared parameter type, positionally:
+
+```kai
+fn take(value: i64) {}
+```
+
+There is no implicit conversion:
+
+```kai
+let x = 10   // x is i32
+take(x)      // error: i64 expected, i32 found
+```
+
+This is ordinary type checking at a call site - not overload resolution, and
+not a claim that function names carry a first-class value type (see
+"Function Values Are Not First-Class" below).
+
+Literal and expression contextual typing (see "Integer Literals",
+"Floating-Point Literals", and "Arithmetic Operators" above) applies in
+argument positions exactly as it does in an explicitly typed declaration:
+
+```kai
+take(10)       // the integer literal is typed directly as i64
+take(1 + 2)    // the pure arithmetic expression may be typed as i64
+```
+
+Neither is an implicit conversion - the literal/expression is typed as
+`i64` directly, the same way `let x: i64 = 10` types its initializer.
+
+The already-committed cross-family restriction is preserved: an integer
+literal never adopts a floating-point parameter type, and a
+floating-point literal never adopts an integer parameter type.
+
+```kai
+fn take(value: f64) {}
+
+take(1)     // error: value stays an integer literal, not f64
+take(1.0)   // valid
+```
+
+A call must provide the number of arguments the function declares - too
+few or too many are both errors. Every argument that is actually present
+in the call is still checked independently, so a call can report more than
+one distinct problem at once (e.g. two differently-typed arguments, or an
+argument count error alongside an unrelated error inside one of the
+arguments).
+
+---
+
+# 67. Function Call Result Type
+
+A successfully checked call to a user function has the function's declared
+return type:
+
+```kai
+fn get() -> i64 {}
+
+let x = get()   // x is i64
+```
+
+A function with no explicit return annotation returns the unit type:
+
+```kai
+fn do_work() {}
+
+let x = do_work()   // x is ()
+```
+
+A call's result type participates normally in later expression typing,
+exactly like any other value:
+
+```kai
+fn get() -> i64 {}
+
+let x = get() + 1   // x is i64
+```
+
+No first-class `Function` type is introduced by any of this - a call
+expression has the function's *return* type, never a type describing the
+function itself.
+
+---
+
+# 68. Function Values Are Not First-Class
+
+KAI 0.1 does not commit first-class function values. A function name being
+usable as the direct target of a call:
+
+```kai
+f()
+```
+
+does not mean `f` itself has a semantic function-value type - only the
+call expression `f()` has a type (see "Function Call Result Type" above).
+
+Parenthesized grouping around a direct function call target is supported,
+since parentheses are ordinary grouping syntax everywhere else in KAI:
+
+```kai
+(f)()
+(((f)))()
+```
+
+This is not a step toward first-class functions: it is the same grouping
+behavior parentheses already have around any other expression, applied to
+a name that happens to be a function. An arbitrary expression is not
+assumed to produce a callable value merely because it appears in a call
+position.
+
+---
+
+# 69. Non-Callable Expressions
+
+KAI rejects a call whose target expression is known to have a concrete,
+non-callable type:
+
+```kai
+let x = 1
+x()   // error: i32 is not callable
+
+1()   // error: i32 is not callable
+```
+
+This is a narrow check against a *known* concrete type - it is not the
+introduction of first-class functions, methods, callable structs,
+closures, or function pointers. None of those are implemented or
+committed in KAI 0.1.
+
+Correspondingly, calling an expression whose own callability is not yet
+modeled at all is not treated as an error:
+
+```kai
+obj.method()
+values[index]()
+result?()
+```
+
+Member access, indexing, and error propagation do not yet have committed
+semantics of their own (see the relevant sections above), so a call
+targeting one of them is neither accepted nor rejected - it is simply not
+yet checked. Method-call and function-value semantics remain future work.
+
+---
+
+# 70. Binding Mutability and Reassignment
+
+```kai
+let x = value
+```
+
+creates an immutable binding. Reassigning it is a semantic error:
+
+```kai
+let x = 1
+x = 2   // error
+```
+
+```kai
+mut x = value
+```
+
+creates a mutable binding, which may be reassigned when the assigned value
+is type-compatible with it (see "Assignment Type Checking" below):
+
+```kai
+mut x = 1
+x = 2   // valid
+```
+
+Function parameters are immutable bindings:
+
+```kai
+fn f(x: i64) {
+    x = 1   // error
+}
+```
+
+Binding mutability (`let` vs. `mut`) is a distinct concept from reference/
+referent mutability (`&T` vs. `&mut T`, see "Memory Model" §12 for the
+committed relationship between the two where borrowing is concerned).
+Assignment through a reference, and mutation reachable only through a
+`&mut` borrow, are separate, not-yet-committed concerns.
+
+---
+
+# 71. Assignment Targets
+
+The current KAI 0.1 semantic subset checks assignment to an identifier
+that resolves to a local variable or a function parameter, optionally
+wrapped in grouping parentheses:
+
+```kai
+x = value
+(x) = value
+(((x))) = value
+```
+
+Ordinary value-producing expressions are not assignment targets:
+
+```kai
+1 = value        // error
+(a + b) = value  // error
+f() = value      // error
+```
+
+A function or prelude name is not an assignment location either - it does
+not name a variable-like binding at all:
+
+```kai
+fn foo() {}
+
+foo = 1   // error
+```
+
+Assignment to a field or an element:
+
+```kai
+object.field = value
+values[index] = value
+```
+
+is not yet part of the checked subset. This is a current semantic-model
+limitation, not a statement that these forms are permanently invalid KAI
+syntax - their eventual assignability depends on field semantics,
+array/slice/`Buffer` semantics, and reference/ownership mutability, none
+of which are committed yet (see "Memory Model" and the `Buffer<T>`/slice
+sections above). Until those are designed, such an assignment is simply
+not yet checked, one way or the other.
+
+---
+
+# 72. Assignment Type Checking and Result
+
+The right-hand side of an assignment to a binding of known type is checked
+against that binding's type, the same way an explicitly typed declaration
+would be. There is no implicit conversion:
+
+```kai
+mut x: i64 = 0
+
+x = 1        // valid: the integer literal is typed directly as i64
+x = 1 + 2    // valid: the arithmetic expression may be typed as i64
+x = true     // error: bool is not i64
+```
+
+The already-committed cross-family restriction still applies: an integer
+literal assigned to a floating-point-typed binding does not adapt to it,
+and vice versa (see "Integer Literals" and "Floating-Point Literals"
+above).
+
+An assignment expression itself has the unit type, `()` - never the
+assigned value's type:
+
+```kai
+mut x = 0
+let y = (x = 1)   // y is ()
+```
+
+This is intentional, and it has one notable consequence: because the
+grammar is right-associative, `x = y = z` parses as `x = (y = z)` - but
+since `y = z` itself has type `()`, this is not C-style value-producing
+chained assignment. For ordinary, non-unit-typed variables, the outer
+assignment will generally fail, because its right-hand side is `()`, not
+the assigned value's type.
+
+Since an assignment's type is `()`, it does not become numeric merely
+because it appears inside another expression:
+
+```kai
+mut x: i64 = 0
+
+(x = 1) + 2   // error: () is not a numeric type
+```
+
+---
+
+# 73. Condition Typing
+
+The condition of `if` (and every `else if`) and `while` must have type
+`bool`. KAI has no truthiness - no other type is accepted, regardless of
+whether it could plausibly be treated as "truthy" in another language:
+
+```kai
+if true { ... }        // valid
+if 1 < 2 { ... }        // valid: comparison produces bool
+
+if 1 { ... }             // error: i32 is not bool
+if 1 + 2 { ... }         // error: arithmetic stays i32, not bool
+```
+
+A final `else` has no condition of its own and is unaffected by this rule.
+
+This composes with the rest of the type system without a dedicated
+"condition" rule of its own - a condition is simply an ordinary expression
+checked for `bool`:
+
+```kai
+fn predicate() -> bool { ... }
+
+if predicate() { ... }   // valid: the call has type bool
+```
+
+```kai
+mut flag: bool = false
+
+if flag = true { ... }   // error: assignment has type (), not bool
+```
+
+The second example is rejected for the same reason `(x = 1) + 2` is
+rejected above - an assignment's type is `()`, never the assigned value's
+type - not because of any special "assignment used as a condition" rule.
+
+This section covers `if` and `while` only. A `for` loop's iterable is not
+type-checked by this rule or by any other rule yet - iteration semantics
+remain a separate, still-deferred concern.
+
+---
+
+# 74. Return Type Compatibility
+
+Every `return` statement that appears in a function body is checked
+against that function's declared return type, the same way a `let`
+initializer is checked against an explicit annotation. There is no
+implicit conversion:
+
+```kai
+fn f() -> i64 {
+    return 1
+}
+```
+
+Contextual literal and expression typing apply in return position exactly
+as they do anywhere else:
+
+```kai
+fn f() -> i64 {
+    return 1 + 2   // the arithmetic expression may be typed as i64
+}
+```
+
+A bare `return` (with no expression) is checked as though it returned the
+unit type, `()`:
+
+```kai
+fn f() {
+    return       // valid: () matches f's declared (implicit) () return
+}
+
+fn f() -> i64 {
+    return       // error: expected i64, found ()
+}
+```
+
+The unit type is an ordinary return type, not a special case - a return
+expression is valid whenever its type matches the function's declared
+return type, *including* when that type is `()`:
+
+```kai
+fn a() {
+    return
+}
+
+fn b() {
+    return ()          // valid: () matches b's declared () return
+}
+
+fn do_work() {}
+
+fn c() {
+    return do_work()   // valid: do_work() also has type ()
+}
+
+fn d() -> () {
+    return ()          // valid, for the same reason, with an explicit annotation
+}
+```
+
+Conversely, a unit-returning function may not return a non-unit value,
+whether its unit return is implicit or written explicitly as `-> ()`:
+
+```kai
+fn f() {
+    return 1   // error: expected (), found i32
+}
+
+fn f() -> () {
+    return 1   // error: expected (), found i32
+}
+```
+
+A `return` statement never changes a function's declared return type -
+the declaration remains the function's semantic contract regardless of
+what its body returns; a mismatching `return` is a body error, exactly
+like a mismatching call argument is a call-site error rather than a
+change to the callee's signature.
+
+Every `return` in a function is checked independently:
+
+```kai
+fn f(x: bool) -> i64 {
+    if x {
+        return 1
+    }
+
+    return 2
+}
+```
+
+both returns above are checked against `i64` on their own merits.
+
+---
+
+# 75. Return-Statement Checking Is Not Return-Completeness Checking
+
+The rule in "Return Type Compatibility" above checks every `return`
+statement that actually appears in a function body against that
+function's declared return type - including a mismatched value and a
+mismatched bare `return`. It does **not** check whether a value-returning
+function returns at all, or on every possible path through its body.
+These are two different checks, and only the first is committed and
+implemented:
+
+```kai
+fn f() -> i64 {
+}
+```
+
+```kai
+fn f(cond: bool) -> i64 {
+    if cond {
+        return 1
+    }
+}
+```
+
+Neither example above is diagnosed today: KAI does not yet perform
+all-paths-return analysis (also called return-completeness analysis, or
+missing-return control-flow analysis) - checking that every path through
+a function's body reaches a `return` with a compatible value. That
+capability requires control-flow analysis that has not been built yet and
+is separate, staged work. Referring to this gap by the bare phrase
+"return validation" alone is ambiguous, since return-statement type
+checking is already implemented; the missing capability should be named
+specifically as all-paths-return (or return-completeness) analysis.
+
+Relatedly, code that follows a `return` statement is still fully checked
+today - KAI does not yet diagnose it as unreachable:
+
+```kai
+fn f() -> i64 {
+    return 1
+    let x = undefined_name   // still checked; still an error
+}
+```

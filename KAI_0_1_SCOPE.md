@@ -232,7 +232,8 @@ Initial semantic analyzer should eventually detect:
 - assignment to immutable bindings
 - invalid function argument count
 - invalid function argument types
-- missing return values
+- explicit return-statement type compatibility
+- return completeness (every path returns a value)
 - invalid condition types
 
 ---
