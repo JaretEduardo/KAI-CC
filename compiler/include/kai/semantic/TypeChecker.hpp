@@ -5,6 +5,7 @@
 #include "kai/ast/SourceFile.hpp"
 #include "kai/ast/Stmt.hpp"
 #include "kai/semantic/SemanticModel.hpp"
+#include "kai/semantic/Symbol.hpp"
 #include "kai/source/SourceLocation.hpp"
 #include "kai/source/SourceManager.hpp"
 
@@ -14,8 +15,8 @@
 
 namespace kai::semantic {
 
-/// TYPE-CHECK MILESTONE 1+2: Literal & Annotation Foundation, plus
-/// Primitive Operators.
+/// TYPE-CHECK MILESTONE 1+2+3: Literal & Annotation Foundation, Primitive
+/// Operators, and Function Calls.
 ///
 /// TypeChecker is a SEPARATE pass/class run strictly after
 /// SemanticAnalyzer::analyze() has already populated a SemanticModel's
@@ -31,12 +32,25 @@ namespace kai::semantic {
 /// Milestone 2 adds primitive-operator typing: Negate, Not, arithmetic
 /// (+ - * /), modulo (%), ordering (< <= > >=), equality (== !=), and
 /// logical (&& ||) - see checkUnaryExpr()/checkBinaryExpr() in
-/// TypeChecker.cpp. This milestone still does NOT implement call
-/// validation, assignment semantics, condition/return validation, or
-/// reference/range semantics - every such outer expression kind is still
-/// fully traversed (its children are checked) but recorded as
-/// Type::unresolved() (see checkCallExpr()/etc. in TypeChecker.cpp for
-/// the full per-ExprKind rules).
+/// TypeChecker.cpp.
+///
+/// Milestone 3 adds function-call typing for calls whose callee resolves
+/// (through transparent ParenExpr wrappers only) to a user-declared
+/// SymbolKind::Function - argument-count validation, positional
+/// contextual argument type checking against FunctionSignature, and
+/// CallExpr result typing from FunctionSignature.returnType - see
+/// checkCallExpr()/checkUserFunctionCall() in TypeChecker.cpp. Builtin
+/// calls remain intentionally fully deferred (their signatures are not
+/// committed); every other callee shape (a non-function-typed Local/
+/// Parameter, a literal, a deferred Member/Index/ErrorPropagation/Call
+/// expression, ...) is classified generically from its own checked Type.
+///
+/// This milestone still does NOT implement assignment semantics,
+/// condition/return validation, or reference/range semantics - every
+/// such outer expression kind is still fully traversed (its children are
+/// checked) but recorded as Type::unresolved() (see
+/// checkAssignmentExpr()/etc. in TypeChecker.cpp for the full per-
+/// ExprKind rules).
 ///
 /// typeOf() three-state contract (see SemanticModel::typeOf()):
 /// std::nullopt means an ast::Expr was never visited by this pass;
@@ -152,7 +166,50 @@ private:
                                        bool (*domainAccepts)(Type), bool resultIsOperandType,
                                        SemanticModel& model) const;
 
+    /// Milestone 3 classification entry point. Classifies `call.callee()`
+    /// (through transparent ParenExpr wrappers only, via
+    /// unwrapDirectCalleeIdentifier() in TypeChecker.cpp) into: a direct
+    /// Function-resolving identifier (checkUserFunctionCall()); a direct
+    /// Builtin-resolving identifier (checkBuiltinCall()); or - for every
+    /// other callee shape (a non-function-typed Local/Parameter, a
+    /// literal, a deferred Member/Index/ErrorPropagation/Call expression,
+    /// an unresolved identifier, ...) - a generic path that checks the
+    /// callee with no expected context and classifies purely from its
+    /// resulting Type: Error stays Error, Unresolved stays Unresolved
+    /// (neither ever emits NotCallable), and any other concrete Type
+    /// emits NotCallable and becomes Error. Classification never inspects
+    /// identifier source text - only SemanticModel::resolution()/
+    /// SymbolKind decide it - so a user function shadowing a Builtin
+    /// (Milestone 3 spec #21) is handled correctly with no special-casing.
     Type checkCallExpr(const ast::CallExpr& call, SemanticModel& model) const;
+
+    /// A resolved SymbolKind::Builtin callee (spec #20): the callee and
+    /// every argument are still checked (for their own independent
+    /// expression errors and so every visited node gets a typeOf entry),
+    /// but with no expected context anywhere, no argument-count check, no
+    /// argument-type check, and no NotCallable - CallExpr is always
+    /// Type::unresolved(), even when a child argument is itself Error,
+    /// because builtin CALL semantics (not the arguments' own expression
+    /// semantics) are what remain deferred - builtin signatures are not
+    /// committed (STANDARD_LIBRARY.md).
+    Type checkBuiltinCall(const ast::CallExpr& call, SemanticModel& model) const;
+
+    /// A resolved SymbolKind::Function callee (spec #6-#16): validates
+    /// argument count, checks each shared-prefix argument against its
+    /// corresponding parameter type (contextually, reusing checkExpr()
+    /// exactly as checkVarDecl() does - no call-specific literal/
+    /// expression-context algorithm), and computes CallExpr's result per
+    /// the Milestone 3 recovery table: Error on a wrong argument count or
+    /// any concrete argument TypeMismatch/argument Error; otherwise the
+    /// declared FunctionSignature::returnType, filtered through the
+    /// standard Error/Unresolved passthrough (an Unresolved argument or
+    /// an Unresolved/Error parameter type defers ONLY that position's own
+    /// compatibility check - it does not itself erase an otherwise-known
+    /// concrete return type). `functionSymbol.signature` is asserted
+    /// present (spec #5's SemanticAnalyzer-enforced invariant), never
+    /// fabricated.
+    Type checkUserFunctionCall(const ast::CallExpr& call, const Symbol& functionSymbol, SemanticModel& model) const;
+
     Type checkAssignmentExpr(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
     Type checkArrayLiteralExpr(const ast::ArrayLiteralExpr& array, SemanticModel& model) const;
     Type checkIndexExpr(const ast::IndexExpr& index, SemanticModel& model) const;

@@ -3,8 +3,10 @@
 #include "kai/ast/TypeSyntax.hpp"
 #include "kai/semantic/Symbol.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -195,6 +197,24 @@ std::pair<std::optional<Type>, std::optional<SourceSpan>> arithmeticOperandConte
 bool isNumericDomain(Type type) { return type.isNumeric(); }
 bool isIntegerDomain(Type type) { return type.isInteger(); }
 bool isEqualityDomain(Type type) { return type.isNumeric() || type.isBool() || type.isChar(); }
+
+// Milestone 3 spec #3: structural only, mirrors unwrapAdaptableLiteral's own
+// shape - unwraps ONLY transparent ParenExpr wrappers on the way to a bare
+// IdentifierExpr. Returns nullptr for anything else (a Binary/Call/Member/
+// ...), so `(1 + 2)()`, `obj.member()`, `result?()`, and `foo()()` are never
+// structurally rewritten into a direct function identifier - they fall
+// through to the generic callee-classification path in checkCallExpr(),
+// based on their own checked semantic Type. No first-class Function Type is
+// introduced by this helper or by anything that consumes it.
+const ast::IdentifierExpr* unwrapDirectCalleeIdentifier(const ast::Expr& expr) {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return unwrapDirectCalleeIdentifier(static_cast<const ast::ParenExpr&>(expr).inner());
+    }
+    if (expr.kind() == ast::ExprKind::Identifier) {
+        return &static_cast<const ast::IdentifierExpr&>(expr);
+    }
+    return nullptr;
+}
 
 } // namespace
 
@@ -740,11 +760,168 @@ Type TypeChecker::resolveMatchedOperatorResult(const ast::BinaryExpr& binary, Ty
 }
 
 Type TypeChecker::checkCallExpr(const ast::CallExpr& call, SemanticModel& model) const {
-    inferExpr(call.callee(), model);
+    // Milestone 3 spec #2: classification is driven ONLY by
+    // SemanticModel::resolution()/SymbolKind - never by typeOf(callee)
+    // (a Function/Builtin IdentifierExpr intentionally stays Unresolved,
+    // spec #4) and never by identifier source text (spec #21).
+    if (const ast::IdentifierExpr* directIdentifier = unwrapDirectCalleeIdentifier(call.callee())) {
+        if (const std::optional<SymbolId> id = model.resolution(*directIdentifier)) {
+            const Symbol& symbol = model.symbol(*id);
+            if (symbol.kind == SymbolKind::Function) {
+                // Records Unresolved through the identifier and every
+                // transparent ParenExpr wrapper (spec #4/#22) - the exact
+                // same, unmodified checkIdentifierExpr()/checkParenExpr()
+                // logic every other identifier/paren use already goes
+                // through.
+                inferExpr(call.callee(), model);
+                return checkUserFunctionCall(call, symbol, model);
+            }
+            if (symbol.kind == SymbolKind::Builtin) {
+                inferExpr(call.callee(), model);
+                return checkBuiltinCall(call, model);
+            }
+            // Parameter/Local: not a function/builtin - fall through to
+            // the generic path below, classified by its OWN Type.
+        }
+        // Unresolved identifier (UnknownIdentifier already emitted by
+        // SemanticAnalyzer): also falls through to the generic path.
+    }
+
+    const Type calleeType = inferExpr(call.callee(), model);
+    for (const auto& argument : call.arguments()) {
+        inferExpr(*argument, model);
+    }
+
+    Type result = Type::error();
+    if (calleeType.isError()) {
+        // Spec #18: e.g. an unresolved callee identifier - no second
+        // "not callable" diagnosis on top of the already-reported problem.
+        result = Type::error();
+    } else if (calleeType.isUnresolved()) {
+        // Spec #17/#19: a non-function-typed Local/Parameter whose own
+        // type isn't modeled yet, or a deferred Member/Index/
+        // ErrorPropagation/Call/other non-identifier callee expression -
+        // don't guess either way.
+        result = Type::unresolved();
+    } else {
+        // Spec #17: a genuinely concrete, non-function-typed callee.
+        model.addError(SemanticError{
+            SemanticErrorKind::NotCallable,
+            call.callee().span(),
+            std::nullopt,
+            std::nullopt,
+            calleeType,
+        });
+        result = Type::error();
+    }
+
+    model.setExpressionType(call, result);
+    return result;
+}
+
+Type TypeChecker::checkBuiltinCall(const ast::CallExpr& call, SemanticModel& model) const {
+    // Spec #20: builtin CALL semantics remain deferred - every argument
+    // is still checked (for its own independent expression errors, and so
+    // every visited node gets a typeOf entry), with no expected context,
+    // no argument-count check, and no argument-type check. CallExpr is
+    // unconditionally Type::unresolved(), even when a child argument
+    // itself becomes Error - unlike a validated user Function call (spec
+    // #10), a Builtin call's own "contract" is not yet modeled at all, so
+    // there is nothing concrete for a child Error to invalidate.
     for (const auto& argument : call.arguments()) {
         inferExpr(*argument, model);
     }
     const Type result = Type::unresolved();
+    model.setExpressionType(call, result);
+    return result;
+}
+
+Type TypeChecker::checkUserFunctionCall(const ast::CallExpr& call, const Symbol& functionSymbol,
+                                         SemanticModel& model) const {
+    // Spec #5: every SymbolKind::Function Symbol SemanticAnalyzer creates
+    // has a signature - an existing semantic-model invariant. TypeChecker
+    // adds no symbols and mutates no scopes; asserting here (rather than
+    // fabricating an Unresolved signature) matches SemanticAnalyzer.cpp's
+    // own established style for this exact invariant.
+    assert(functionSymbol.signature.has_value());
+    const FunctionSignature& signature = *functionSymbol.signature;
+
+    const std::size_t paramCount = signature.parameterTypes.size();
+    const std::size_t argCount = call.arguments().size();
+    const std::size_t sharedCount = std::min(paramCount, argCount);
+
+    bool hasConcreteMismatch = false;
+    bool hasArgumentError = false;
+
+    for (std::size_t i = 0; i < sharedCount; ++i) {
+        const ast::Expr& argument = *call.arguments()[i];
+        const Type paramType = signature.parameterTypes[i];
+        const std::optional<Type> paramContext = usableContext(paramType);
+
+        // No expectedAnnotationSpan (spec #6): FunctionSignature retains
+        // no parameter TypeSyntax span provenance.
+        const Type argumentType = checkExpr(argument, paramContext, model);
+
+        if (argumentType.isError()) {
+            // Spec #10: no TypeMismatch on top of an already-Error
+            // argument - just remember the call is not fully valid.
+            hasArgumentError = true;
+            continue;
+        }
+        if (argumentType.isUnresolved() || !paramContext.has_value()) {
+            // Spec #11/#12: argument compatibility deferred, not proven
+            // invalid - emit nothing, and do not treat this position as a
+            // reason to reject the call outright.
+            continue;
+        }
+        if (!(argumentType == paramType)) {
+            hasConcreteMismatch = true;
+            model.addError(SemanticError{
+                SemanticErrorKind::TypeMismatch,
+                argument.span(),
+                std::nullopt,
+                paramType,
+                argumentType,
+            });
+        }
+    }
+
+    // Extra arguments (spec #15): still checked, with no expected type.
+    for (std::size_t i = sharedCount; i < argCount; ++i) {
+        inferExpr(*call.arguments()[i], model);
+    }
+
+    Type result = Type::error();
+    if (argCount != paramCount) {
+        // Spec #15/#16: emitted AFTER every syntactically-present
+        // argument has already been visited above - independent argument
+        // diagnostics (TypeMismatch, or a pre-existing UnknownIdentifier)
+        // are never suppressed by a wrong count.
+        model.addError(SemanticError{
+            SemanticErrorKind::InvalidArgumentCount,
+            call.span(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+        });
+        result = Type::error();
+    } else if (hasConcreteMismatch || hasArgumentError) {
+        // Spec #9/#10: a genuinely-known-invalid call.
+        result = Type::error();
+    } else {
+        // Spec #11/#12/#13: nothing CONCRETELY wrong was found - deferred
+        // (Unresolved/Error) parameter/argument positions do not erase an
+        // otherwise-known declared return type.
+        const Type returnType = signature.returnType;
+        if (returnType.isError()) {
+            result = Type::error(); // no new diagnostic - UnknownType already belongs to the declaration
+        } else if (returnType.isUnresolved()) {
+            result = Type::unresolved();
+        } else {
+            result = returnType; // spec #14: never adapted to any OUTER expected context
+        }
+    }
+
     model.setExpressionType(call, result);
     return result;
 }

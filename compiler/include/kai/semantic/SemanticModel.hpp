@@ -24,6 +24,8 @@ enum class SemanticErrorKind : std::uint8_t {
     LiteralOutOfRange,
     InvalidUnaryOperand,
     InvalidBinaryOperands,
+    InvalidArgumentCount,
+    NotCallable,
 };
 
 /// A minimal, message-free description of a semantic failure - the
