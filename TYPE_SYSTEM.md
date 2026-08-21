@@ -291,6 +291,31 @@ let ratio = 0.5f32
 
 This syntax is not required for the earliest KAI compiler milestone.
 
+An integer literal and a floating-point literal are separate families, and
+contextual typing never crosses that boundary:
+
+```kai
+let x: i64 = 10
+```
+
+is valid (an integer literal adopting a contextual integer type), but:
+
+```kai
+let x: f64 = 10
+```
+
+is a type mismatch - an integer literal never adopts a floating-point
+contextual type. The literal itself must be written as a float:
+
+```kai
+let x: f64 = 10.0
+```
+
+The same rule applies symmetrically: a floating-point literal never adopts a
+contextual integer type. This is not treated as an implicit conversion in
+either direction - it is a rule about which contextual types an integer or
+floating-point literal may resolve to in the first place.
+
 ---
 
 # 7. Numeric Conversions
@@ -1298,7 +1323,20 @@ Equality operators:
 !=
 ```
 
-require compatible types.
+require both operands to have the exact same concrete type, and that type
+must be one of:
+
+* a signed integer type
+* an unsigned integer type
+* a floating-point type
+* `bool`
+* `char`
+
+Result type:
+
+```text
+bool
+```
 
 Example:
 
@@ -1311,20 +1349,36 @@ if a == b {
 }
 ```
 
-Comparing unrelated types should be rejected.
-
-Invalid:
+Comparing different concrete types is rejected, including different
+concrete numeric types:
 
 ```kai
 let a: i32 = 10
-let b: String = String("10")
+let b: i64 = 10
 
 if a == b {
     ...
 }
 ```
 
-No implicit conversion should occur.
+is invalid - `i32` and `i64` are different concrete types, and there is no
+implicit numeric conversion. The same applies to comparing an integer type
+against a floating-point type, or a primitive against an unrelated type such
+as `String`.
+
+The unit type (`()`) is not part of the current committed equality domain:
+
+```kai
+if () == () {
+    ...
+}
+```
+
+is not supported by the current KAI 0.1 semantic subset. This reflects what
+is currently committed, not a claim that unit values can never become
+comparable in a future language version.
+
+No implicit conversion occurs for equality in either direction.
 
 ---
 
@@ -1339,13 +1393,45 @@ Ordering operators:
 >=
 ```
 
-are valid only for types that support ordering.
+require both operands to have the exact same concrete numeric type (a
+signed integer type, an unsigned integer type, or a floating-point type).
 
-Primitive numeric types support ordering.
+Result type:
+
+```text
+bool
+```
+
+No implicit conversion occurs: comparing two different concrete numeric
+types (e.g. `i32` against `i64`, or `i32` against `f32`) is rejected, the
+same as for arithmetic (see "Arithmetic Operators").
+
+`bool` and `char` do not support ordering in KAI 0.1.
 
 Future user-defined types may provide ordering through traits.
 
 The compiler must not invent arbitrary ordering for structs or enums.
+
+## Comparison and Equality Do Not Inherit Outer Context
+
+Unlike arithmetic and modulo (see "Arithmetic Operators"), a comparison or
+equality expression's own result type is always `bool`, never the operand
+type - so an outer expected type never flows down into a comparison's or
+equality's operands, even when both operands are literals:
+
+```kai
+let x: i64 = 1 < 2
+```
+
+does not cause `1` and `2` to become `i64` merely because the whole
+declaration expects `i64`. `1 < 2` has type `bool` regardless of `x`'s
+annotation, so this is a type mismatch (`i64` expected, `bool` found) - not
+a literal-adaptation success. The same applies to `==`/`!=`.
+
+A literal operand may still adopt type information from a *fixed* sibling
+operand within the same comparison or equality expression (e.g. `x < 1`
+where `x: i64` types the `1` as `i64`) - only the whole-expression outer
+context is excluded, not sibling context.
 
 ---
 
@@ -1944,3 +2030,228 @@ These questions should remain open until implementation or real KAI programs req
 KAI should expose enough type information to make behavior predictable while avoiding information that the compiler can safely infer locally.
 
 A type should communicate not only what data a value contains, but also enough information for humans, tools, and AI agents to reason about ownership, mutation, failure, and valid operations without inspecting unnecessary implementation details.
+
+---
+
+# 61. Arithmetic Operators
+
+Arithmetic operators:
+
+```text
++
+-
+*
+/
+```
+
+require both operands to have the exact same concrete numeric type - a
+signed integer type, an unsigned integer type, or a floating-point type.
+
+Result type:
+
+```text
+same as the operand type
+```
+
+There is no implicit numeric conversion:
+
+```kai
+let a: i32 = 1
+let b: i32 = 2
+let c = a + b   // i32
+```
+
+```kai
+let x: f32 = 1.0
+let y: f32 = 2.0
+let z = x / y   // f32
+```
+
+but:
+
+```kai
+let a: i32 = 1
+let b: i64 = 2
+let c = a + b   // error: different concrete types
+```
+
+```kai
+let a: i32 = 1
+let b: f32 = 2.0
+let c = a + b   // error: an integer type and a floating-point type are never
+                // the same concrete type
+```
+
+This document does not commit to a runtime overflow implementation beyond
+what "Integer Overflow" above already states.
+
+## Operand Context
+
+When one side of an arithmetic expression is an integer or floating-point
+literal (or a parenthesized/negated literal, or itself made up only of such
+literals), that literal may adopt the concrete numeric type of the other,
+fixed-type side - regardless of which side of the operator it appears on:
+
+```kai
+fn f(x: i64) {
+    let a = x + 1
+    let b = 1 + x
+
+    let c = x + (1 + 2)
+    let d = (1 + 2) + x
+}
+```
+
+`a`, `b`, `c`, and `d` are all `i64`: the literal `1` (and the purely
+literal expression `1 + 2`) adopts `x`'s type in every case, independent of
+source order. This is contextual literal typing (see "Integer Literals" and
+"Floating-Point Literals" above), not a numeric conversion - the same
+cross-family restriction still applies, so an integer literal added to an
+`f64` value does not become `f64`:
+
+```kai
+fn f(x: f64) {
+    let y = x + 1   // error: `1` stays an integer literal (i32 by default),
+                     // it does not adopt f64
+}
+```
+
+This operand-context behavior is specific to operators whose successful
+result type equals their operand type (arithmetic and modulo). It does not
+apply to comparison, equality, or logical operators - see "Comparison and
+Equality Do Not Inherit Outer Context" under "Ordering" for why.
+
+---
+
+# 62. Modulo
+
+The modulo operator:
+
+```text
+%
+```
+
+is integer-only: it requires both operands to have the exact same concrete
+integer type (signed or unsigned).
+
+Result type:
+
+```text
+same integer type
+```
+
+Examples:
+
+```kai
+let a: i32 = 7
+let b: i32 = 3
+let c = a % b     // i32
+```
+
+```kai
+let a: u64 = 7
+let b: u64 = 3
+let c = a % b     // u64
+```
+
+Floating-point operands are rejected:
+
+```kai
+let a: f32 = 7.0
+let b: f32 = 3.0
+let c = a % b     // error: modulo requires integer operands
+```
+
+The operand-context behavior described under "Arithmetic Operators" applies
+identically to modulo.
+
+---
+
+# 63. Unary Negation
+
+Unary negation:
+
+```text
+-x
+```
+
+is valid for:
+
+* signed integer types
+* floating-point types
+
+Result type:
+
+```text
+same as the operand type
+```
+
+Unary negation is not valid on an unsigned integer value:
+
+```kai
+fn f(x: u8) {
+    let y = -x   // error
+}
+```
+
+This general rule is distinct from negative-literal contextual typing/range
+fitting, which happens at compile time against a literal's exact value
+rather than against a general expression's type:
+
+```kai
+let x: i8 = -128   // valid: -128 fits i8
+```
+
+is valid because `-128` is a single compile-time-known literal value that
+fits within `i8`'s range - not because `i8` supports unary negation on an
+arbitrary unsigned-like value. See "Integer Literals" above for contextual
+literal typing.
+
+---
+
+# 64. Unary Logical Not
+
+The unary logical-not operator:
+
+```text
+!expr
+```
+
+requires a `bool` operand and returns `bool`:
+
+```kai
+let flag = true
+let inverted = !flag   // bool
+```
+
+KAI does not provide implicit truthiness: `!expr` is rejected for any
+concrete non-`bool` operand, including integers:
+
+```kai
+let value = 1
+let inverted = !value   // error
+```
+
+---
+
+# 65. Logical Binary Operators
+
+The logical binary operators:
+
+```text
+&&
+||
+```
+
+require both operands to be `bool` and return `bool`:
+
+```kai
+let a = true
+let b = false
+let both = a && b    // bool
+let either = a || b   // bool
+```
+
+As with unary logical-not, KAI does not provide implicit truthiness: a
+non-`bool` operand on either side is rejected, even if the other operand is
+`bool`.
