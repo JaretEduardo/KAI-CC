@@ -86,6 +86,27 @@ public:
     constexpr bool isError() const noexcept { return kind_ == TypeKind::Error; }
     constexpr bool isUnresolved() const noexcept { return kind_ == TypeKind::Unresolved; }
 
+    /// Pure structural facts about `kind()` - stable regardless of any
+    /// future checker policy (conversions, operator applicability,
+    /// common-type computation), which belong elsewhere, never here.
+    constexpr bool isSignedInteger() const noexcept {
+        return kind_ == TypeKind::I8 || kind_ == TypeKind::I16 || kind_ == TypeKind::I32 || kind_ == TypeKind::I64;
+    }
+
+    constexpr bool isUnsignedInteger() const noexcept {
+        return kind_ == TypeKind::U8 || kind_ == TypeKind::U16 || kind_ == TypeKind::U32 || kind_ == TypeKind::U64;
+    }
+
+    constexpr bool isInteger() const noexcept { return isSignedInteger() || isUnsignedInteger(); }
+
+    constexpr bool isFloat() const noexcept { return kind_ == TypeKind::F32 || kind_ == TypeKind::F64; }
+
+    constexpr bool isNumeric() const noexcept { return isInteger() || isFloat(); }
+
+    constexpr bool isBool() const noexcept { return kind_ == TypeKind::Bool; }
+
+    constexpr bool isChar() const noexcept { return kind_ == TypeKind::Char; }
+
     friend constexpr bool operator==(const Type&, const Type&) noexcept = default;
 
 private:
