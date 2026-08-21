@@ -2402,3 +2402,135 @@ Member access, indexing, and error propagation do not yet have committed
 semantics of their own (see the relevant sections above), so a call
 targeting one of them is neither accepted nor rejected - it is simply not
 yet checked. Method-call and function-value semantics remain future work.
+
+---
+
+# 70. Binding Mutability and Reassignment
+
+```kai
+let x = value
+```
+
+creates an immutable binding. Reassigning it is a semantic error:
+
+```kai
+let x = 1
+x = 2   // error
+```
+
+```kai
+mut x = value
+```
+
+creates a mutable binding, which may be reassigned when the assigned value
+is type-compatible with it (see "Assignment Type Checking" below):
+
+```kai
+mut x = 1
+x = 2   // valid
+```
+
+Function parameters are immutable bindings:
+
+```kai
+fn f(x: i64) {
+    x = 1   // error
+}
+```
+
+Binding mutability (`let` vs. `mut`) is a distinct concept from reference/
+referent mutability (`&T` vs. `&mut T`, see "Memory Model" §12 for the
+committed relationship between the two where borrowing is concerned).
+Assignment through a reference, and mutation reachable only through a
+`&mut` borrow, are separate, not-yet-committed concerns.
+
+---
+
+# 71. Assignment Targets
+
+The current KAI 0.1 semantic subset checks assignment to an identifier
+that resolves to a local variable or a function parameter, optionally
+wrapped in grouping parentheses:
+
+```kai
+x = value
+(x) = value
+(((x))) = value
+```
+
+Ordinary value-producing expressions are not assignment targets:
+
+```kai
+1 = value        // error
+(a + b) = value  // error
+f() = value      // error
+```
+
+A function or prelude name is not an assignment location either - it does
+not name a variable-like binding at all:
+
+```kai
+fn foo() {}
+
+foo = 1   // error
+```
+
+Assignment to a field or an element:
+
+```kai
+object.field = value
+values[index] = value
+```
+
+is not yet part of the checked subset. This is a current semantic-model
+limitation, not a statement that these forms are permanently invalid KAI
+syntax - their eventual assignability depends on field semantics,
+array/slice/`Buffer` semantics, and reference/ownership mutability, none
+of which are committed yet (see "Memory Model" and the `Buffer<T>`/slice
+sections above). Until those are designed, such an assignment is simply
+not yet checked, one way or the other.
+
+---
+
+# 72. Assignment Type Checking and Result
+
+The right-hand side of an assignment to a binding of known type is checked
+against that binding's type, the same way an explicitly typed declaration
+would be. There is no implicit conversion:
+
+```kai
+mut x: i64 = 0
+
+x = 1        // valid: the integer literal is typed directly as i64
+x = 1 + 2    // valid: the arithmetic expression may be typed as i64
+x = true     // error: bool is not i64
+```
+
+The already-committed cross-family restriction still applies: an integer
+literal assigned to a floating-point-typed binding does not adapt to it,
+and vice versa (see "Integer Literals" and "Floating-Point Literals"
+above).
+
+An assignment expression itself has the unit type, `()` - never the
+assigned value's type:
+
+```kai
+mut x = 0
+let y = (x = 1)   // y is ()
+```
+
+This is intentional, and it has one notable consequence: because the
+grammar is right-associative, `x = y = z` parses as `x = (y = z)` - but
+since `y = z` itself has type `()`, this is not C-style value-producing
+chained assignment. For ordinary, non-unit-typed variables, the outer
+assignment will generally fail, because its right-hand side is `()`, not
+the assigned value's type.
+
+Since an assignment's type is `()`, it does not become numeric merely
+because it appears inside another expression:
+
+```kai
+mut x: i64 = 0
+
+(x = 1) + 2   // error: () is not a numeric type
+```
