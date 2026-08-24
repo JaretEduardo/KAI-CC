@@ -1,0 +1,189 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "KAI",
+    "scopeName": "source.kai",
+    "patterns": [
+        { "include": "#comments" },
+        { "include": "#function-declaration" },
+        { "include": "#keywords" },
+        { "include": "#constants" },
+        { "include": "#types" },
+        { "include": "#strings" },
+        { "include": "#chars" },
+        { "include": "#numbers" },
+        { "include": "#function-call" },
+        { "include": "#operators" },
+        { "include": "#punctuation" }
+    ],
+    "repository": {
+        "comments": {
+            "patterns": [
+                {
+                    "name": "comment.line.double-slash.kai",
+                    "match": "//.*$"
+                }
+            ]
+        },
+        "keywords": {
+            "patterns": [
+                {
+                    "name": "keyword.control.kai",
+                    "match": "\\b(if|else|while|for|in|return)\\b"
+                },
+                {
+                    "name": "storage.type.function.kai",
+                    "match": "\\bfn\\b"
+                },
+                {
+                    "name": "storage.type.kai",
+                    "match": "\\b(struct|enum)\\b"
+                },
+                {
+                    "name": "storage.modifier.kai",
+                    "match": "\\b(let|mut)\\b"
+                },
+                {
+                    "name": "keyword.other.kai",
+                    "match": "\\b(use|pub|as)\\b"
+                }
+            ]
+        },
+        "constants": {
+            "patterns": [
+                {
+                    "name": "constant.language.boolean.kai",
+                    "match": "\\b(true|false)\\b"
+                }
+            ]
+        },
+        "types": {
+            "patterns": [
+                {
+                    "comment": "Current KAI 0.1 primitive types (GRAMMAR.md #12), plus `str`, which is not yet a formal primitive_type production but is already valid, current syntax used throughout examples/*.kai.",
+                    "name": "support.type.primitive.kai",
+                    "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|char|str)\\b"
+                },
+                {
+                    "comment": "Heuristic: a capitalized identifier is highlighted as a named type (GRAMMAR.md #13 named_type), matching common usage such as String, Result, IOError.",
+                    "name": "entity.name.type.kai",
+                    "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+                }
+            ]
+        },
+        "strings": {
+            "name": "string.quoted.double.kai",
+            "begin": "\"",
+            "end": "\"",
+            "patterns": [
+                { "include": "#string-escape" }
+            ]
+        },
+        "chars": {
+            "name": "string.quoted.single.kai",
+            "begin": "'",
+            "end": "'",
+            "patterns": [
+                { "include": "#char-escape" }
+            ]
+        },
+        "string-escape": {
+            "name": "constant.character.escape.kai",
+            "match": "\\\\[nrt\\\\\"0]"
+        },
+        "char-escape": {
+            "name": "constant.character.escape.kai",
+            "match": "\\\\[nrt\\\\'0]"
+        },
+        "numbers": {
+            "patterns": [
+                {
+                    "name": "constant.numeric.float.kai",
+                    "match": "\\b[0-9]+\\.[0-9]+\\b"
+                },
+                {
+                    "name": "constant.numeric.integer.kai",
+                    "match": "\\b[0-9]+\\b"
+                }
+            ]
+        },
+        "function-declaration": {
+            "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "captures": {
+                "1": { "name": "storage.type.function.kai" },
+                "2": { "name": "entity.name.function.kai" }
+            }
+        },
+        "function-call": {
+            "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+            "name": "entity.name.function.kai"
+        },
+        "operators": {
+            "patterns": [
+                {
+                    "name": "keyword.operator.arrow.kai",
+                    "match": "->"
+                },
+                {
+                    "name": "keyword.operator.range.kai",
+                    "match": "\\.\\."
+                },
+                {
+                    "name": "keyword.operator.comparison.kai",
+                    "match": "==|!=|<=|>=|<|>"
+                },
+                {
+                    "name": "keyword.operator.logical.kai",
+                    "match": "&&|\\|\\||!"
+                },
+                {
+                    "name": "keyword.operator.assignment.kai",
+                    "match": "="
+                },
+                {
+                    "name": "keyword.operator.arithmetic.kai",
+                    "match": "\\+|\\-|\\*|/|%"
+                },
+                {
+                    "name": "keyword.operator.reference.kai",
+                    "match": "&"
+                },
+                {
+                    "name": "keyword.operator.error-propagation.kai",
+                    "match": "\\?"
+                }
+            ]
+        },
+        "punctuation": {
+            "patterns": [
+                {
+                    "name": "punctuation.separator.comma.kai",
+                    "match": ","
+                },
+                {
+                    "name": "punctuation.separator.colon.kai",
+                    "match": ":"
+                },
+                {
+                    "name": "punctuation.terminator.statement.kai",
+                    "match": ";"
+                },
+                {
+                    "name": "punctuation.accessor.kai",
+                    "match": "\\."
+                },
+                {
+                    "name": "punctuation.section.braces.kai",
+                    "match": "[{}]"
+                },
+                {
+                    "name": "punctuation.section.brackets.kai",
+                    "match": "[\\[\\]]"
+                },
+                {
+                    "name": "punctuation.section.parens.kai",
+                    "match": "[()]"
+                }
+            ]
+        }
+    }
+}
