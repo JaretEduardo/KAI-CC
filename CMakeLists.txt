@@ -62,6 +62,7 @@ add_library(kai_compiler STATIC
     compiler/src/semantic/TypeChecker.cpp
     compiler/src/semantic/ControlFlowAnalyzer.cpp
     compiler/src/codegen/LLVMCodeGenerator.cpp
+    compiler/src/codegen/LLVMExpressionLowering.cpp
 )
 
 # Public compiler headers

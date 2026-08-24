@@ -181,23 +181,82 @@ void testMultipleFunctionsBothExistAndVerify() {
     }
 }
 
-// TEST 3: an unsupported construct (a function parameter) must fail
-// generation cleanly rather than emit invalid/partial LLVM IR.
-void testUnsupportedParameterFailsCleanly() {
+// TEST 3 (M1/M2/M3): "a parameterized function must fail generation
+// cleanly" - REMOVED as of M4. Its exact premise (`fn identity(x: i64)
+// -> i64 { return x }` must fail codegen) is precisely what M4 was built
+// to make succeed - parameter lowering is no longer unsupported. See the
+// PARAMETERS test section below for its positive replacement.
+
+// GENERATOR REUSE / LIFETIME
+//
+// LLVMCodeGenerator::generate() may be called more than once on the same
+// instance (module_ is replaced each time - see generate()'s own class
+// comment). `functions_` (SymbolId -> llvm::Function*, populated in PASS
+// 1 and deliberately left uncleared ACROSS a single module's PASS 1/PASS
+// 2 so recursive/forward calls can find each other) must still be reset
+// at the START of every generate() call - otherwise a second generate()
+// call could resolve a call against a dangling llvm::Function* left over
+// from the FIRST (now-destroyed) module. This is distinct from
+// `locals_`, which is correctly reset per function body regardless.
+void testGeneratorReusedAcrossTwoModulesFunctionsDoNotLeak() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
-    Generated result = compileToLLVM(sm, codegen, "fn identity(x: i64) -> i64 {\n    return x\n}");
 
-    KAI_CHECK(result.parsed.has_value());
-    if (!result.parsed) {
+    Generated first = compileToLLVM(
+        sm, codegen, "fn firstOnly() -> i64 {\n    return 1\n}\nfn main() -> i64 {\n    return firstOnly()\n}");
+    KAI_CHECK(first.model.errors().empty());
+    KAI_CHECK(first.generationSucceeded); // (1) first generation succeeds
+
+    Generated second = compileToLLVM(
+        sm, codegen,
+        "fn secondHelper() -> i64 {\n    return 2\n}\nfn main() -> i64 {\n    return secondHelper()\n}");
+    KAI_CHECK(second.model.errors().empty());
+    KAI_CHECK(second.generationSucceeded); // (2) second generation succeeds
+    if (!second.generationSucceeded) {
         return;
     }
-    // The frontend itself accepts this program (a parameterized function
-    // returning its own parameter is fully valid KAI) - codegen is the
-    // one that must decline it explicitly, since M1 does not lower
-    // parameters.
-    KAI_CHECK(result.model.errors().empty());
-    KAI_CHECK(!result.generationSucceeded);
+
+    const llvm::Module& secondModule = codegen.module();
+
+    // (3) the second module verifies.
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    const bool broken = llvm::verifyModule(secondModule, &errorStream);
+    KAI_CHECK(!broken);
+    if (broken) {
+        std::cerr << "verifyModule reported: " << verifierErrors << '\n';
+    }
+
+    // (4) a function that existed ONLY in the first module must not
+    // remain in the second.
+    KAI_CHECK(secondModule.getFunction("firstOnly") == nullptr);
+    KAI_CHECK(secondModule.getFunction("secondHelper") != nullptr);
+
+    // (5) the call inside the second module's main() must resolve to a
+    // llvm::Function that actually belongs to THIS (second) module - not
+    // a stale pointer carried over from the first generate() call's
+    // (now-destroyed) module.
+    const llvm::Function* mainFn = secondModule.getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(mainFn->getEntryBlock().getTerminator());
+    KAI_CHECK(ret != nullptr);
+    if (ret == nullptr) {
+        return;
+    }
+    const auto* call = llvm::dyn_cast<llvm::CallInst>(ret->getReturnValue());
+    KAI_CHECK(call != nullptr);
+    if (call == nullptr) {
+        return;
+    }
+    const llvm::Function* calledFn = call->getCalledFunction();
+    KAI_CHECK(calledFn != nullptr);
+    if (calledFn != nullptr) {
+        KAI_CHECK(calledFn->getParent() == &secondModule);
+        KAI_CHECK(calledFn->getName() == "secondHelper");
+    }
 }
 
 // --- M2: Primitive Expression Lowering ---
@@ -540,17 +599,36 @@ void testReturnTrueLiteral() {
 // this suite's own class-level documentation and LLVMCodeGenerator's
 // header comment for why eager lowering is safe for M2's exact
 // side-effect-free expression grammar.
+// M4 UPDATE: &&/|| are now FINAL short-circuit operators (M2/M3's eager
+// CreateAnd/CreateOr provisional lowering is gone entirely - see the
+// dedicated SHORT CIRCUIT section below for the full structural proof
+// using Bool-returning calls). Even a trivial literal-operand expression
+// now lowers to real control flow - a conditional branch feeding an i1
+// PHI - never a folded/eager `and`/`or` instruction.
 void testLogicalAndOr() {
     SourceManager sm;
     LLVMCodeGenerator codegenAnd(sm);
     Generated andResult = compileToLLVM(sm, codegenAnd, "fn main() -> bool {\n    return true && false\n}");
     KAI_CHECK(andResult.generationSucceeded);
     if (andResult.generationSucceeded) {
-        const llvm::ConstantInt* c = returnedIntegerConstant(codegenAnd.module(), "main");
-        KAI_CHECK(c != nullptr);
-        if (c != nullptr) {
-            KAI_CHECK(c->getZExtValue() == 0);
+        const llvm::Function* fn = codegenAnd.module().getFunction("main");
+        KAI_CHECK(fn != nullptr);
+        bool sawPhi = false;
+        bool sawCondBr = false;
+        bool sawEagerAndOr = false;
+        for (const llvm::BasicBlock& block : *fn) {
+            for (const llvm::Instruction& inst : block) {
+                sawPhi |= llvm::isa<llvm::PHINode>(inst);
+                if (const auto* branch = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                    sawCondBr |= branch->isConditional();
+                }
+                sawEagerAndOr |=
+                    inst.getOpcode() == llvm::Instruction::And || inst.getOpcode() == llvm::Instruction::Or;
+            }
         }
+        KAI_CHECK(sawPhi);
+        KAI_CHECK(sawCondBr);
+        KAI_CHECK(!sawEagerAndOr);
     }
 
     SourceManager sm2;
@@ -558,11 +636,15 @@ void testLogicalAndOr() {
     Generated orResult = compileToLLVM(sm2, codegenOr, "fn main() -> bool {\n    return false || true\n}");
     KAI_CHECK(orResult.generationSucceeded);
     if (orResult.generationSucceeded) {
-        const llvm::ConstantInt* c = returnedIntegerConstant(codegenOr.module(), "main");
-        KAI_CHECK(c != nullptr);
-        if (c != nullptr) {
-            KAI_CHECK(c->getZExtValue() == 1);
+        const llvm::Function* fn = codegenOr.module().getFunction("main");
+        KAI_CHECK(fn != nullptr);
+        bool sawPhi = false;
+        for (const llvm::BasicBlock& block : *fn) {
+            for (const llvm::Instruction& inst : block) {
+                sawPhi |= llvm::isa<llvm::PHINode>(inst);
+            }
         }
+        KAI_CHECK(sawPhi);
     }
 }
 
@@ -881,21 +963,9 @@ void testIdentifierProducesLoad() {
     }
 }
 
-// A parameterized function still fails cleanly (M4 work) - a parameter's
-// IdentifierExpr use has no storage slot in M3, exactly like an
-// unresolved/unsupported symbol would.
-void testParameterIdentifierStillFailsCleanly() {
-    SourceManager sm;
-    LLVMCodeGenerator codegen(sm);
-    Generated result = compileToLLVM(sm, codegen, "fn identity(x: i64) -> i64 {\n    return x\n}");
-
-    KAI_CHECK(result.parsed.has_value());
-    if (!result.parsed) {
-        return;
-    }
-    KAI_CHECK(result.model.errors().empty());
-    KAI_CHECK(!result.generationSucceeded);
-}
+// "A parameterized function still fails cleanly" (M3) - REMOVED as of
+// M4, same reason as the M1 removal above: `fn identity(x: i64) -> i64
+// { return x }` now succeeds. See PARAMETERS below for its replacement.
 
 // SIGNEDNESS WITH LOCALS
 //
@@ -988,12 +1058,506 @@ void testIfStmtStillFailsCleanly() {
     KAI_CHECK(!result.generationSucceeded);
 }
 
+// --- M4: Parameters + Function Calls + Recursion + FINAL &&/|| ---
+
+// PARAMETERS
+
+void testOneParameterLoaded() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn f(x: i64) -> i64 {\n    return x\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("f");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    KAI_CHECK(fn->arg_size() == 1);
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(fn->getEntryBlock().getTerminator());
+    KAI_CHECK(ret != nullptr);
+    if (ret != nullptr) {
+        KAI_CHECK(llvm::isa<llvm::LoadInst>(ret->getReturnValue()));
+    }
+}
+
+void testTwoParametersArithmetic() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn add(a: i64, b: i64) -> i64 {\n    return a + b\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("add");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    KAI_CHECK(fn->arg_size() == 2);
+    int loadCount = 0;
+    bool sawAdd = false;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        loadCount += llvm::isa<llvm::LoadInst>(inst) ? 1 : 0;
+        sawAdd |= inst.getOpcode() == llvm::Instruction::Add;
+    }
+    KAI_CHECK(loadCount == 2);
+    KAI_CHECK(sawAdd);
+}
+
+void testParameterPlusLocal() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn f(x: i64) -> i64 {\n    let y: i64 = 2\n    return x + y\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
+void testParameterTypeWidthPreserved() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn f(x: i8) -> i8 {\n    return x\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("f");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    KAI_CHECK(fn->getArg(0)->getType()->isIntegerTy(8));
+    KAI_CHECK(fn->getReturnType()->isIntegerTy(8));
+}
+
+// CALLS
+
+void testZeroArgumentCall() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn answer() -> i64 {\n    return 42\n}\nfn main() -> i64 {\n    return answer()\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* mainFn = codegen.module().getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(mainFn->getEntryBlock().getTerminator());
+    KAI_CHECK(ret != nullptr);
+    if (ret != nullptr) {
+        const auto* call = llvm::dyn_cast<llvm::CallInst>(ret->getReturnValue());
+        KAI_CHECK(call != nullptr);
+        if (call != nullptr) {
+            KAI_CHECK(call->getCalledFunction() == codegen.module().getFunction("answer"));
+        }
+    }
+}
+
+void testParameterizedCall() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn add(a: i64, b: i64) -> i64 {\n    return a + b\n}\n"
+                                      "fn main() -> i64 {\n    return add(20, 22)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* mainFn = codegen.module().getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    bool sawCallWithTwoArgs = false;
+    for (const llvm::Instruction& inst : mainFn->getEntryBlock()) {
+        if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+            sawCallWithTwoArgs |= call->arg_size() == 2;
+        }
+    }
+    KAI_CHECK(sawCallWithTwoArgs);
+}
+
+void testCallUsedInArithmetic() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn inc(x: i64) -> i64 {\n    return x + 1\n}\n"
+                                      "fn main() -> i64 {\n    return inc(40) + 1\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    // Arithmetic consumes the CallInst's Value directly - no
+    // call-specific operator logic exists.
+    const llvm::Function* mainFn = codegen.module().getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    bool sawAddOfCall = false;
+    for (const llvm::Instruction& inst : mainFn->getEntryBlock()) {
+        if (inst.getOpcode() == llvm::Instruction::Add) {
+            sawAddOfCall |= llvm::isa<llvm::CallInst>(inst.getOperand(0));
+        }
+    }
+    KAI_CHECK(sawAddOfCall);
+}
+
+void testCallAsLocalInitializer() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn answer() -> i64 {\n    return 42\n}\nfn main() -> i64 {\n    let x: i64 = answer()\n    return x\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
+void testCallAsAssignmentRhs() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn answer() -> i64 {\n    return 42\n}\n"
+                                      "fn main() -> i64 {\n    mut y: i64 = 0\n    y = answer()\n    return y\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
+void testBoolCallWithUnaryNot() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn predicate() -> bool {\n    return true\n}\nfn main() -> bool {\n    return !predicate()\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* mainFn = codegen.module().getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    bool sawNotOfCall = false;
+    for (const llvm::Instruction& inst : mainFn->getEntryBlock()) {
+        if (inst.getOpcode() == llvm::Instruction::Xor) {
+            sawNotOfCall |= llvm::isa<llvm::CallInst>(inst.getOperand(0));
+        }
+    }
+    KAI_CHECK(sawNotOfCall);
+}
+
+// FORWARD
+
+void testForwardCall() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() -> i64 {\n    return answer()\n}\nfn answer() -> i64 {\n    return 42\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
+// RECURSION
+
+void testSelfRecursiveCallVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn recurse(x: i64) -> i64 {\n    return recurse(x)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("recurse");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(fn->getEntryBlock().getTerminator());
+    KAI_CHECK(ret != nullptr);
+    if (ret != nullptr) {
+        const auto* call = llvm::dyn_cast<llvm::CallInst>(ret->getReturnValue());
+        KAI_CHECK(call != nullptr);
+        if (call != nullptr) {
+            KAI_CHECK(call->getCalledFunction() == fn);
+        }
+    }
+}
+
+// MUTUAL RECURSION
+
+void testMutualRecursionVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn isEven(n: i64) -> bool {\n    return isOdd(n)\n}\n"
+                                      "fn isOdd(n: i64) -> bool {\n    return isEven(n)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(codegen.module().getFunction("isEven") != nullptr);
+    KAI_CHECK(codegen.module().getFunction("isOdd") != nullptr);
+}
+
+// UNIT FUNCTIONS
+
+void testExplicitBareReturnEmitsRetVoid() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn do_work() {\n    return\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("do_work");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(fn->getEntryBlock().getTerminator());
+    KAI_CHECK(ret != nullptr);
+    if (ret != nullptr) {
+        KAI_CHECK(ret->getReturnValue() == nullptr);
+    }
+}
+
+void testImplicitUnitFallthroughEmitsRetVoid() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn do_work() {\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("do_work");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(fn->getEntryBlock().getTerminator());
+    KAI_CHECK(ret != nullptr);
+    if (ret != nullptr) {
+        KAI_CHECK(ret->getReturnValue() == nullptr);
+    }
+}
+
+void testUnitReturningCallAsExprStmtSucceeds() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn do_work() {\n}\nfn main() -> i64 {\n    do_work()\n    return 42\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
+// SHORT CIRCUIT
+
+void testShortCircuitAndCallOnlyInRhsBlock() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn rhs() -> bool {\n    return true\n}\nfn test(a: bool) -> bool {\n    return a && rhs()\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Function* fn = codegen.module().getFunction("test");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    const llvm::BasicBlock& entry = fn->getEntryBlock();
+    const auto* condBr = llvm::dyn_cast<llvm::BranchInst>(entry.getTerminator());
+    KAI_CHECK(condBr != nullptr);
+    if (condBr == nullptr) {
+        return;
+    }
+    KAI_CHECK(condBr->isConditional());
+    // The branch condition is `a`, loaded from its parameter slot.
+    KAI_CHECK(llvm::isa<llvm::LoadInst>(condBr->getCondition()));
+
+    auto containsCall = [](const llvm::BasicBlock* block) {
+        for (const llvm::Instruction& inst : *block) {
+            if (llvm::isa<llvm::CallInst>(inst)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const bool trueHasCall = containsCall(condBr->getSuccessor(0));
+    const bool falseHasCall = containsCall(condBr->getSuccessor(1));
+    // Exactly one branch target (the RHS-evaluation block) contains the
+    // call - the short-circuit branch never does.
+    KAI_CHECK(trueHasCall != falseHasCall);
+
+    int callCount = 0;
+    bool sawPhi = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            callCount += llvm::isa<llvm::CallInst>(inst) ? 1 : 0;
+            sawPhi |= llvm::isa<llvm::PHINode>(inst);
+        }
+    }
+    KAI_CHECK(callCount == 1); // rhs() is called at most once, never eagerly
+    KAI_CHECK(sawPhi);
+}
+
+void testShortCircuitOrCallOnlyInRhsBlock() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn rhs() -> bool {\n    return true\n}\nfn test(a: bool) -> bool {\n    return a || rhs()\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Function* fn = codegen.module().getFunction("test");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    const auto* condBr = llvm::dyn_cast<llvm::BranchInst>(fn->getEntryBlock().getTerminator());
+    KAI_CHECK(condBr != nullptr);
+    if (condBr == nullptr) {
+        return;
+    }
+    KAI_CHECK(condBr->isConditional());
+
+    auto containsCall = [](const llvm::BasicBlock* block) {
+        for (const llvm::Instruction& inst : *block) {
+            if (llvm::isa<llvm::CallInst>(inst)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const bool trueHasCall = containsCall(condBr->getSuccessor(0));
+    const bool falseHasCall = containsCall(condBr->getSuccessor(1));
+    KAI_CHECK(trueHasCall != falseHasCall);
+
+    int callCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            callCount += llvm::isa<llvm::CallInst>(inst) ? 1 : 0;
+        }
+    }
+    KAI_CHECK(callCount == 1);
+}
+
+// `a && (b || t())` - proves nested short-circuit composes correctly:
+// two PHIs (inner `||`, outer `&&`), and `t()` is called at most once.
+void testNestedShortCircuit() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn t() -> bool {\n    return true\n}\n"
+                                      "fn test(a: bool, b: bool) -> bool {\n    return a && (b || t())\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Function* fn = codegen.module().getFunction("test");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    int phiCount = 0;
+    int callCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            phiCount += llvm::isa<llvm::PHINode>(inst) ? 1 : 0;
+            callCount += llvm::isa<llvm::CallInst>(inst) ? 1 : 0;
+        }
+    }
+    KAI_CHECK(phiCount == 2);
+    KAI_CHECK(callCount == 1);
+}
+
+// FAILURES
+
+void testBuiltinCallStillFailsCleanly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    print(1)\n}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+}
+
+// INTEGRATION
+
+void testParametersLocalsAssignmentCallIntegration() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn helper(x: i64) -> i64 {\n    return x + 1\n}\n"
+                                      "fn main() -> i64 {\n"
+                                      "    let a: i64 = 10\n"
+                                      "    mut b: i64 = 0\n"
+                                      "    b = helper(a)\n"
+                                      "    return a + b\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
 } // namespace
 
 int main() {
     testMainReturnsI64Literal();
     testMultipleFunctionsBothExistAndVerify();
-    testUnsupportedParameterFailsCleanly();
+    testGeneratorReusedAcrossTwoModulesFunctionsDoNotLeak();
 
     testIntegerAddition();
     testNestedArithmetic();
@@ -1035,13 +1599,40 @@ int main() {
     testAssignmentExprStmtSucceedsAsUnit();
 
     testIdentifierProducesLoad();
-    testParameterIdentifierStillFailsCleanly();
 
     testUnsignedComparisonWithLocal();
     testSignedComparisonWithLocal();
 
     testUnitLocalFailsCleanly();
     testIfStmtStillFailsCleanly();
+
+    testOneParameterLoaded();
+    testTwoParametersArithmetic();
+    testParameterPlusLocal();
+    testParameterTypeWidthPreserved();
+
+    testZeroArgumentCall();
+    testParameterizedCall();
+    testCallUsedInArithmetic();
+    testCallAsLocalInitializer();
+    testCallAsAssignmentRhs();
+    testBoolCallWithUnaryNot();
+
+    testForwardCall();
+    testSelfRecursiveCallVerifies();
+    testMutualRecursionVerifies();
+
+    testExplicitBareReturnEmitsRetVoid();
+    testImplicitUnitFallthroughEmitsRetVoid();
+    testUnitReturningCallAsExprStmtSucceeds();
+
+    testShortCircuitAndCallOnlyInRhsBlock();
+    testShortCircuitOrCallOnlyInRhsBlock();
+    testNestedShortCircuit();
+
+    testBuiltinCallStillFailsCleanly();
+
+    testParametersLocalsAssignmentCallIntegration();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }
