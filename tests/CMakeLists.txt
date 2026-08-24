@@ -52,6 +52,8 @@ kai_add_test(semantic_type_checker_control_tests semantic/type_checker/Condition
 
 kai_add_test(semantic_control_flow_analyzer_tests semantic/ControlFlowAnalyzerTests.cpp)
 
+kai_add_test(codegen_llvm_code_generator_tests codegen/LLVMCodeGeneratorTests.cpp)
+
 # kaicc_cli-specific tests: linked against kaicc_cli (not kai_compiler
 # directly) since kai_add_test() always links kai_compiler and
 # kaicc_cli's TokenPrinter helpers live one layer above that.
