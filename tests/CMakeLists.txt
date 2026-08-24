@@ -41,6 +41,7 @@ kai_add_test(semantic_type_tests semantic/TypeTests.cpp)
 kai_add_test(semantic_model_tests semantic/SemanticModelTests.cpp)
 kai_add_test(semantic_analyzer_tests semantic/SemanticAnalyzerTests.cpp)
 kai_add_test(semantic_type_checker_tests semantic/TypeCheckerTests.cpp)
+kai_add_test(semantic_control_flow_analyzer_tests semantic/ControlFlowAnalyzerTests.cpp)
 
 # kaicc_cli-specific tests: linked against kaicc_cli (not kai_compiler
 # directly) since kai_add_test() always links kai_compiler and

@@ -66,7 +66,7 @@ Goal: understand and validate KAI programs.
 - [ ] Type checking
 - [x] Function signatures
 - [ ] Function calls
-- [ ] Return validation
+- [x] Return validation
 - [ ] Mutability checking
 - [ ] Structured semantic diagnostics
 - [ ] Initial HIR
