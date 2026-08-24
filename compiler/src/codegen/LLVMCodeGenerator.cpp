@@ -14,8 +14,31 @@
 namespace kai::codegen {
 
 using semantic::SemanticModel;
+using semantic::Symbol;
+using semantic::SymbolId;
+using semantic::SymbolKind;
 using semantic::Type;
 using semantic::TypeKind;
+
+namespace {
+
+// Structural-only unwrap (never a semantic decision - TypeChecker's own
+// unwrapAssignmentTargetIdentifier() in TypeChecker.cpp already validated
+// this exact target shape): finds the bare IdentifierExpr an assignment
+// target names, transparently through ParenExpr wrappers. Returns nullptr
+// for any other shape (Member/Index/etc.) - those never reach a slot
+// lookup, and fail there like any other unsupported target.
+const ast::IdentifierExpr* unwrapAssignmentTargetIdentifier(const ast::Expr& expr) {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return unwrapAssignmentTargetIdentifier(static_cast<const ast::ParenExpr&>(expr).inner());
+    }
+    if (expr.kind() == ast::ExprKind::Identifier) {
+        return &static_cast<const ast::IdentifierExpr&>(expr);
+    }
+    return nullptr;
+}
+
+} // namespace
 
 LLVMCodeGenerator::LLVMCodeGenerator(const SourceManager& sources) : sources_(sources) {}
 
@@ -62,14 +85,14 @@ bool LLVMCodeGenerator::generateTopLevelDecl(const ast::Decl& decl, const Semant
 bool LLVMCodeGenerator::generateFunction(const ast::FunctionDecl& fn, const SemanticModel& model) {
     // Declaration mapping, not a name lookup - mirrors TypeChecker's and
     // ControlFlowAnalyzer's own established pattern.
-    const std::optional<semantic::SymbolId> fnId = model.declarationSymbol(fn.name());
+    const std::optional<SymbolId> fnId = model.declarationSymbol(fn.name());
     assert(fnId.has_value());
 
-    const semantic::Symbol& symbol = model.symbol(*fnId);
+    const Symbol& symbol = model.symbol(*fnId);
     assert(symbol.signature.has_value());
     const semantic::FunctionSignature& signature = *symbol.signature;
 
-    // M1/M2: zero-parameter functions only - parameter lowering is out of
+    // M1-M3: zero-parameter functions only - parameter lowering is out of
     // scope for these milestones, not merely unimplemented by oversight.
     if (!signature.parameterTypes.empty()) {
         return false;
@@ -86,39 +109,142 @@ bool LLVMCodeGenerator::generateFunction(const ast::FunctionDecl& fn, const Sema
 
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context_, "entry", function);
 
-    // M1/M2: a body of exactly one ReturnStmt. Anything else (zero
-    // statements, more than one statement, or a non-Return statement)
-    // fails explicitly rather than emitting an incomplete function body
-    // or a second terminator into `entry`. Locals/control-flow statements
-    // remain M3+.
-    const std::vector<ast::StmtPtr>& statements = fn.body().statements();
-    if (statements.size() != 1 || statements[0]->kind() != ast::StmtKind::Return) {
+    // Fresh per function - a slot from a previous function must never be
+    // visible to this one.
+    locals_.clear();
+
+    llvm::IRBuilder<> builder(entry);
+    return generateBlock(fn.body(), *function, builder, model);
+}
+
+bool LLVMCodeGenerator::generateBlock(const ast::BlockStmt& block, llvm::Function& function,
+                                       llvm::IRBuilder<>& builder, const SemanticModel& model) {
+    for (const auto& stmt : block.statements()) {
+        if (builder.GetInsertBlock()->getTerminator() != nullptr) {
+            // A prior ReturnStmt already terminated this block. The
+            // frontend still fully checked every statement that follows
+            // (M5's "no unreachable-code analysis" stance) - M3 simply
+            // stops LOWERING them here rather than append instructions
+            // after an LLVM terminator, which would be invalid IR.
+            break;
+        }
+        if (!generateStatement(*stmt, function, builder, model)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// No `default:` case: StmtKind is fully implemented today, mirroring
+// TypeChecker.cpp's/ControlFlowAnalyzer.cpp's own exhaustive switch over
+// it. If/While/For are explicit failures - control-flow lowering does not
+// exist yet.
+bool LLVMCodeGenerator::generateStatement(const ast::Stmt& stmt, llvm::Function& function, llvm::IRBuilder<>& builder,
+                                           const SemanticModel& model) {
+    switch (stmt.kind()) {
+        case ast::StmtKind::Block:
+            // Recurses into the SAME BasicBlock/builder (M3 spec §15) -
+            // no new block is created, since M3 has no control flow to
+            // justify one. Note: KAI 0.1's current grammar has no
+            // standalone `{ ... }` statement production (parseStatement()
+            // only reaches parseBlock() via fn/if/while/for) - this case
+            // exists for StmtKind switch-exhaustiveness and forward
+            // compatibility, not because it is reachable from real source
+            // text today.
+            return generateBlock(static_cast<const ast::BlockStmt&>(stmt), function, builder, model);
+
+        case ast::StmtKind::VarDecl:
+            return generateVarDeclStmt(static_cast<const ast::VarDeclStmt&>(stmt), function, builder, model);
+
+        case ast::StmtKind::Expr:
+            return generateExprStmt(static_cast<const ast::ExprStmt&>(stmt), builder, model);
+
+        case ast::StmtKind::Return:
+            return generateReturnStmt(static_cast<const ast::ReturnStmt&>(stmt), builder, model);
+
+        case ast::StmtKind::If:
+        case ast::StmtKind::While:
+        case ast::StmtKind::For:
+            // Control flow remains deferred - never silently skipped.
+            return false;
+    }
+    return false;
+}
+
+bool LLVMCodeGenerator::generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llvm::Function& function,
+                                             llvm::IRBuilder<>& builder, const SemanticModel& model) {
+    // Declaration mapping, not a name lookup.
+    const std::optional<SymbolId> id = model.declarationSymbol(varDecl.name());
+    assert(id.has_value());
+
+    // The Symbol's Type is TypeChecker's own already-resolved truth - for
+    // an inferred `let x = 40` this is exactly the type
+    // checkVarDecl()/setSymbolType() already assigned; for an annotated
+    // `let x: i64 = 40` it is the resolved annotation. Both are handled
+    // by this one code path - the initializer's own AST shape is never
+    // inspected to decide the local's type.
+    const Symbol& symbol = model.symbol(*id);
+    llvm::Type* llvmType = lowerType(symbol.type);
+    if (llvmType == nullptr || llvmType->isVoidTy()) {
+        // nullptr: Error/Unresolved/Char, same as everywhere else.
+        // isVoidTy(): a Unit-typed local - LLVM has no storable void
+        // value, so this is an explicit, documented M3 policy failure,
+        // not a fallthrough of the Error/Unresolved case (lowerType()
+        // legitimately returns void for Unit, since Unit IS a valid
+        // function return type - only a LOCAL's storage type rejects it).
         return false;
     }
 
-    return generateReturnStmt(static_cast<const ast::ReturnStmt&>(*statements[0]), *entry, model);
+    const std::optional<llvm::Value*> initializer = lowerExpr(varDecl.initializer(), model, builder);
+    if (!initializer.has_value() || *initializer == nullptr) {
+        // nullopt: lowering failure. nullptr: a Unit-valued initializer
+        // (e.g. `let y = (x = 1)`) - already excluded by the isVoidTy()
+        // check above in practice (such a `y` is itself Unit-typed), but
+        // checked again here defensively rather than trusted implicitly.
+        return false;
+    }
+    if ((*initializer)->getType() != llvmType) {
+        return false;
+    }
+
+    llvm::AllocaInst* slot = createEntryBlockAlloca(function, llvmType, sources_.text(varDecl.name().span));
+    builder.CreateStore(*initializer, slot);
+    locals_.emplace_back(*id, slot);
+    return true;
 }
 
-bool LLVMCodeGenerator::generateReturnStmt(const ast::ReturnStmt& stmt, llvm::BasicBlock& block,
+bool LLVMCodeGenerator::generateExprStmt(const ast::ExprStmt& stmt, llvm::IRBuilder<>& builder,
+                                          const SemanticModel& model) {
+    // The resulting value (if any) is discarded either way - only
+    // lowering failure is statement failure. Covers both a value-
+    // producing expression used for effect and a Unit-valued
+    // AssignmentExpr (`y = y + 1`) used for its store side effect.
+    return lowerExpr(stmt.expr(), model, builder).has_value();
+}
+
+bool LLVMCodeGenerator::generateReturnStmt(const ast::ReturnStmt& stmt, llvm::IRBuilder<>& builder,
                                             const SemanticModel& model) {
-    // M1/M2: bare `return` (Unit) is out of scope - only a valued,
+    // Bare `return` (Unit) remains out of scope - only a valued,
     // expression-producing return is supported.
     const ast::Expr* value = stmt.value();
     if (value == nullptr) {
         return false;
     }
 
-    llvm::IRBuilder<> builder(&block);
-
-    // The one expression dispatcher handles every M2-supported shape
-    // (literals, parens, unary, binary) uniformly - no return-specific
-    // operator logic is duplicated here.
+    // The one expression dispatcher handles every supported shape
+    // (literals, parens, unary, binary, identifiers, assignment)
+    // uniformly - no return-specific operator/local logic is duplicated
+    // here.
     const std::optional<llvm::Value*> result = lowerExpr(*value, model, builder);
-    if (!result.has_value()) {
+    if (!result.has_value() || *result == nullptr) {
+        // nullopt: lowering failure. nullptr: a Unit-valued return
+        // expression - not supported (a non-Unit function could never
+        // type-check one anyway; a Unit-returning function's bare
+        // `return` already took the value-is-nullptr branch above).
         return false;
     }
 
-    if ((*result)->getType() != block.getParent()->getReturnType()) {
+    if ((*result)->getType() != builder.GetInsertBlock()->getParent()->getReturnType()) {
         return false;
     }
 
@@ -144,15 +270,17 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerExpr(const ast::Expr& expr, 
             return lowerUnaryExpr(static_cast<const ast::UnaryExpr&>(expr), model, builder);
         case ast::ExprKind::Binary:
             return lowerBinaryExpr(static_cast<const ast::BinaryExpr&>(expr), model, builder);
-
-        // Explicitly deferred to later milestones (M3+): identifier loads
-        // and calls need locals/functions-as-values; assignment needs
-        // mutable storage; array/index/member need compound types; Unit
-        // is a legitimate value this milestone simply does not produce
-        // yet; error propagation needs Result.
         case ast::ExprKind::Identifier:
-        case ast::ExprKind::Call:
+            return lowerIdentifierExpr(static_cast<const ast::IdentifierExpr&>(expr), model, builder);
         case ast::ExprKind::Assignment:
+            return lowerAssignmentExpr(static_cast<const ast::AssignmentExpr&>(expr), model, builder);
+
+        // Explicitly deferred to later milestones (M4+): calls need
+        // functions-as-values; array/index/member need compound types;
+        // Unit is a legitimate value this milestone simply does not
+        // produce as an expression's own literal form yet; error
+        // propagation needs Result.
+        case ast::ExprKind::Call:
         case ast::ExprKind::ArrayLiteral:
         case ast::ExprKind::Index:
         case ast::ExprKind::Member:
@@ -184,10 +312,9 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerLiteralExpr(const ast::Liter
             // already does. This is the SAME mechanical decimal-text ->
             // magnitude conversion, not a second semantic algorithm:
             // TypeChecker has already established that this text is a
-            // valid, in-range literal of `type` (spec #18 in this
-            // milestone's design) - codegen never re-derives range
-            // validity or contextual typing here, it only re-reads the
-            // digits TypeChecker already validated.
+            // valid, in-range literal of `type` - codegen never
+            // re-derives range validity or contextual typing here, it
+            // only re-reads the digits TypeChecker already validated.
             std::uint64_t magnitude = 0;
             const auto result = std::from_chars(text.data(), text.data() + text.size(), magnitude);
             if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) {
@@ -222,7 +349,7 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerLiteralExpr(const ast::Liter
 
         case ast::LiteralKind::String:
         case ast::LiteralKind::Char:
-            // Explicitly deferred - not part of M2's primitive scope.
+            // Explicitly deferred - not part of this milestone's scope.
             return std::nullopt;
     }
     return std::nullopt;
@@ -237,7 +364,7 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerUnaryExpr(const ast::UnaryEx
     }
 
     const std::optional<llvm::Value*> operand = lowerExpr(unary.operand(), model, builder);
-    if (!operand.has_value()) {
+    if (!operand.has_value() || *operand == nullptr) {
         return std::nullopt;
     }
 
@@ -284,11 +411,11 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerBinaryExpr(const ast::Binary
     }
 
     const std::optional<llvm::Value*> left = lowerExpr(binary.left(), model, builder);
-    if (!left.has_value()) {
+    if (!left.has_value() || *left == nullptr) {
         return std::nullopt;
     }
     const std::optional<llvm::Value*> right = lowerExpr(binary.right(), model, builder);
-    if (!right.has_value()) {
+    if (!right.has_value() || *right == nullptr) {
         return std::nullopt;
     }
 
@@ -407,12 +534,13 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerBinaryExpr(const ast::Binary
             // TypeChecker's isEqualityDomain also accepts Char - but no
             // ExprKind this milestone lowers can ever produce a Char
             // value (Char literals are explicitly deferred in
-            // lowerLiteralExpr(), and identifiers/calls are deferred
-            // entirely), so a Char operandType can never actually reach
-            // here with both operands already lowered - the isInteger()/
-            // isBool()/isFloat() checks below are exhaustive in practice
-            // for this milestone, and Char falls through to the explicit
-            // failure like any other unsupported case.
+            // lowerLiteralExpr(), and identifiers can only be Local/
+            // Parameter, never a Char-typed literal source), so a Char
+            // operandType can never actually reach here with both
+            // operands already lowered - the isInteger()/isBool()/
+            // isFloat() checks below are exhaustive in practice, and Char
+            // falls through to the explicit failure like any other
+            // unsupported case.
             if (operandType->isInteger() || operandType->isBool()) {
                 return builder.CreateICmpEQ(*left, *right);
             }
@@ -432,13 +560,9 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerBinaryExpr(const ast::Binary
 
         case ast::BinaryOperator::And:
             // Eager (non-short-circuiting) `and` on i1 operands - see
-            // this class's own header comment for why this is a safe,
-            // explicitly provisional choice for M2's exact expression
-            // grammar (both operands are already fully, unconditionally
-            // lowered above regardless of operator, and nothing M2 can
-            // express has an observable side effect), and why it must be
-            // revisited before a later milestone puts a call expression
-            // in logical operand position.
+            // this class's own header comment for exactly why this
+            // remains acceptable only through M3, and why it must be
+            // resolved before call lowering merges.
             return builder.CreateAnd(*left, *right);
 
         case ast::BinaryOperator::Or:
@@ -448,6 +572,81 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerBinaryExpr(const ast::Binary
             return std::nullopt; // handled above; unreachable
     }
     return std::nullopt;
+}
+
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerIdentifierExpr(const ast::IdentifierExpr& identifier,
+                                                                    const SemanticModel& model,
+                                                                    llvm::IRBuilder<>& builder) {
+    // Identity comes only from resolution - never identifier source text.
+    const std::optional<SymbolId> id = model.resolution(identifier);
+    if (!id.has_value()) {
+        return std::nullopt;
+    }
+
+    const Symbol& symbol = model.symbol(*id);
+    if (symbol.kind != SymbolKind::Local) {
+        // Parameter: no storage slot exists yet in M3 (parameters remain
+        // unsupported until M4) - falls through to the same "no slot"
+        // failure a missing Local would. Function/Builtin: no modeled
+        // value as a plain identifier (TypeChecker itself records
+        // Type::unresolved() for these, so lowerExpr()'s own gate would
+        // already have caught them - this check is the direct,
+        // documented reason, not a redundant guess).
+        return std::nullopt;
+    }
+
+    llvm::AllocaInst* slot = findLocalSlot(*id);
+    if (slot == nullptr) {
+        return std::nullopt;
+    }
+
+    // The slot's own allocated type drives the load - never independently
+    // re-lowered from model.typeOf(), so a load's type can never drift
+    // from the alloca it reads.
+    return builder.CreateLoad(slot->getAllocatedType(), slot);
+}
+
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerAssignmentExpr(const ast::AssignmentExpr& assignment,
+                                                                    const SemanticModel& model,
+                                                                    llvm::IRBuilder<>& builder) {
+    const ast::IdentifierExpr* targetIdentifier = unwrapAssignmentTargetIdentifier(assignment.target());
+    if (targetIdentifier == nullptr) {
+        return std::nullopt;
+    }
+
+    const std::optional<SymbolId> id = model.resolution(*targetIdentifier);
+    if (!id.has_value()) {
+        return std::nullopt;
+    }
+
+    // A successfully type-checked AssignmentExpr guarantees the target is
+    // a mutable, storage-backed Local (TypeChecker rejects Parameter
+    // targets via AssignmentToImmutableBinding - parameters can never be
+    // mutable per GRAMMAR.md §10 - and rejects every other target shape
+    // outright) - so "no slot found" is sufficient, on its own, to reject
+    // every case M3 does not support. No separate mutability/target-shape
+    // check is duplicated here.
+    llvm::AllocaInst* slot = findLocalSlot(*id);
+    if (slot == nullptr) {
+        return std::nullopt;
+    }
+
+    const std::optional<llvm::Value*> rhs = lowerExpr(assignment.value(), model, builder);
+    if (!rhs.has_value() || *rhs == nullptr) {
+        return std::nullopt;
+    }
+    if ((*rhs)->getType() != slot->getAllocatedType()) {
+        return std::nullopt;
+    }
+
+    builder.CreateStore(*rhs, slot);
+
+    // KAI assignment is Unit-valued, not a C-style value-producing
+    // expression - the stored value is never returned as the result of
+    // this expression. std::optional<llvm::Value*>{nullptr} is the
+    // deliberate "successful Unit expression" representation this
+    // milestone's design reserves distinctly from std::nullopt (failure).
+    return std::optional<llvm::Value*>(nullptr);
 }
 
 // No `default:` case: TypeKind is fully implemented today, mirroring
@@ -478,6 +677,22 @@ llvm::Type* LLVMCodeGenerator::lowerType(Type type) {
         case TypeKind::Error:
         case TypeKind::Char:
             return nullptr;
+    }
+    return nullptr;
+}
+
+llvm::AllocaInst* LLVMCodeGenerator::createEntryBlockAlloca(llvm::Function& function, llvm::Type* type,
+                                                             llvm::StringRef name) {
+    llvm::BasicBlock& entry = function.getEntryBlock();
+    llvm::IRBuilder<> entryBuilder(&entry, entry.begin());
+    return entryBuilder.CreateAlloca(type, nullptr, name);
+}
+
+llvm::AllocaInst* LLVMCodeGenerator::findLocalSlot(SymbolId id) const {
+    for (const auto& [slotId, slot] : locals_) {
+        if (slotId == id) {
+            return slot;
+        }
     }
     return nullptr;
 }

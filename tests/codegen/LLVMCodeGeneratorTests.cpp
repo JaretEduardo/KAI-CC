@@ -640,14 +640,345 @@ void testUnsupportedRangeFailsCleanly() {
     KAI_CHECK(!result.generationSucceeded);
 }
 
-// A body with more than one statement (here, a local declaration ahead
-// of the return) is a fully valid, frontend-clean KAI program - locals
-// are M3 work, so M2 codegen must still decline the whole function
-// rather than lower only the return and ignore the earlier statement.
-void testLocalDeclarationStatementFailsCleanly() {
+// --- M3: Local Variables + Identifier Loads + Assignment ---
+//
+// Unlike M2, most of these expressions can no longer constant-fold to a
+// bare ConstantInt: a CreateLoad of a runtime alloca is not a compile-time
+// constant, so arithmetic/comparisons built on it become real
+// instructions (add/icmp/etc. over a load), not folded literals. Tests
+// below inspect the actual instruction sequence for exactly this reason.
+
+// LOCALS
+
+void testAnnotatedLocalReturnIdentifier() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
-    Generated result = compileToLLVM(sm, codegen, "fn main() -> i64 {\n    let x: i64 = 1\n    return x\n}");
+    Generated result = compileToLLVM(sm, codegen, "fn main() -> i64 {\n    let x: i64 = 40\n    return x\n}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr || fn->empty()) {
+        return;
+    }
+
+    // alloca, store, load, ret - the full M3 pipeline for a single local.
+    const llvm::BasicBlock& entry = fn->getEntryBlock();
+    bool sawAlloca = false;
+    bool sawStore = false;
+    bool sawLoad = false;
+    for (const llvm::Instruction& inst : entry) {
+        sawAlloca |= llvm::isa<llvm::AllocaInst>(inst);
+        sawStore |= llvm::isa<llvm::StoreInst>(inst);
+        sawLoad |= llvm::isa<llvm::LoadInst>(inst);
+    }
+    KAI_CHECK(sawAlloca);
+    KAI_CHECK(sawStore);
+    KAI_CHECK(sawLoad);
+
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(entry.getTerminator());
+    KAI_CHECK(ret != nullptr);
+    if (ret != nullptr) {
+        KAI_CHECK(llvm::isa<llvm::LoadInst>(ret->getReturnValue()));
+    }
+}
+
+void testInferredLocalReturnIdentifier() {
+    // `let x = 40` with no annotation and no usable context infers i32
+    // (M1's own default-literal-type rule - checkVarDecl()'s unannotated
+    // path calls inferExpr(), never forwarding the enclosing return
+    // type's context). The declared return type is i32 to match - NOT
+    // i64 - so this program actually type-checks: x's fixed i32 type
+    // sibling-anchors the `+ 2` literal to i32 too (comparisons/
+    // arithmetic never let an outer context override an already-fixed
+    // identifier operand's own type - see checkMatchedOperands() in
+    // TypeChecker.cpp).
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() -> i32 {\n    let x = 40\n    return x + 2\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    // Symbol.type (i32, inferred) is what drives storage - not any
+    // backend-side re-inference. The slot's allocated type is the direct,
+    // structural proof of this.
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr || fn->empty()) {
+        return;
+    }
+    bool sawI32Alloca = false;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&inst)) {
+            sawI32Alloca |= alloca->getAllocatedType()->isIntegerTy(32);
+        }
+    }
+    KAI_CHECK(sawI32Alloca);
+}
+
+void testTwoLocalsArithmetic() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() -> i64 {\n    let x: i64 = 40\n    let y: i64 = 2\n    return x + y\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    // Two genuinely runtime operands (two separate loads) - the `add`
+    // cannot be constant-folded away, unlike every M2 arithmetic test.
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr || fn->empty()) {
+        return;
+    }
+    int loadCount = 0;
+    bool sawAdd = false;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        loadCount += llvm::isa<llvm::LoadInst>(inst) ? 1 : 0;
+        sawAdd |= inst.getOpcode() == llvm::Instruction::Add;
+    }
+    KAI_CHECK(loadCount == 2);
+    KAI_CHECK(sawAdd);
+}
+
+void testBoolLocal() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() -> bool {\n    let x: bool = true\n    return x\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
+void testFloatLocal() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() -> f64 {\n    let x: f64 = 1.5\n    return x + 2.5\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
+// MUTABILITY / ASSIGNMENT
+
+void testMutableLocalAssignment() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn main() -> i64 {\n    mut y: i64 = 1\n    y = y + 1\n    return y\n}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    // Structural proof of the full load/store pipeline: at least two
+    // stores (the initializer, and the reassignment) and at least two
+    // loads (reading y for `y + 1`, and reading y again for the return)
+    // into/out of the SAME single alloca.
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr || fn->empty()) {
+        return;
+    }
+    int storeCount = 0;
+    int loadCount = 0;
+    const llvm::AllocaInst* slot = nullptr;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&inst)) {
+            slot = alloca;
+        }
+        if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+            ++storeCount;
+            KAI_CHECK(store->getPointerOperand() == slot);
+        }
+        loadCount += llvm::isa<llvm::LoadInst>(inst) ? 1 : 0;
+    }
+    KAI_CHECK(storeCount == 2);
+    KAI_CHECK(loadCount == 2);
+
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(fn->getEntryBlock().getTerminator());
+    KAI_CHECK(ret != nullptr);
+    if (ret != nullptr) {
+        KAI_CHECK(llvm::isa<llvm::LoadInst>(ret->getReturnValue()));
+    }
+}
+
+// The full M3 required end-state program, verbatim.
+void testFullImperativeBody() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() -> i64 {\n"
+                                      "    let x: i64 = 40\n"
+                                      "    mut y: i64 = 1\n"
+                                      "    y = y + 1\n"
+                                      "    return x + y\n"
+                                      "}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
+// An assignment used purely as a statement for its store side effect -
+// ExprStmt must accept a Unit-valued lowerExpr() success.
+void testAssignmentExprStmtSucceedsAsUnit() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() -> i64 {\n    mut y: i64 = 1\n    y = 5\n    return y\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+}
+
+// IDENTIFIER
+
+void testIdentifierProducesLoad() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() -> i64 {\n    let x: i64 = 40\n    return x\n}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(fn->getEntryBlock().getTerminator());
+    KAI_CHECK(ret != nullptr);
+    if (ret != nullptr) {
+        KAI_CHECK(llvm::isa<llvm::LoadInst>(ret->getReturnValue()));
+    }
+}
+
+// A parameterized function still fails cleanly (M4 work) - a parameter's
+// IdentifierExpr use has no storage slot in M3, exactly like an
+// unresolved/unsupported symbol would.
+void testParameterIdentifierStillFailsCleanly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn identity(x: i64) -> i64 {\n    return x\n}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+}
+
+// SIGNEDNESS WITH LOCALS
+//
+// Unlike M2 (where comparisons could never receive a concrete unsigned
+// operand type at all - see OperatorTests's own comment), a local's
+// explicit annotation now supplies one directly, finally making an
+// unsigned comparison constructible.
+
+void testUnsignedComparisonWithLocal() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() -> bool {\n    let x: u8 = 250\n    return x < 251\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    bool sawUnsignedCompare = false;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+            sawUnsignedCompare |= cmp->getPredicate() == llvm::CmpInst::ICMP_ULT;
+        }
+    }
+    KAI_CHECK(sawUnsignedCompare);
+}
+
+void testSignedComparisonWithLocal() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() -> bool {\n    let x: i8 = -1\n    return x < 0\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    bool sawSignedCompare = false;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+            sawSignedCompare |= cmp->getPredicate() == llvm::CmpInst::ICMP_SLT;
+        }
+    }
+    KAI_CHECK(sawSignedCompare);
+}
+
+// FAILURES
+
+// LLVM has no storable void value - a Unit-typed local is an explicit,
+// documented M3 policy failure (see generateVarDeclStmt()'s own comment),
+// not a fallthrough of the Error/Unresolved case.
+void testUnitLocalFailsCleanly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() -> i64 {\n    mut x: i64 = 0\n    let y = (x = 1)\n    return x\n}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+}
+
+void testIfStmtStillFailsCleanly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() -> i64 {\n    if true {\n        return 1\n    }\n    return 2\n}");
 
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
@@ -692,7 +1023,25 @@ int main() {
     testParenthesizedReturnExpression();
 
     testUnsupportedRangeFailsCleanly();
-    testLocalDeclarationStatementFailsCleanly();
+
+    testAnnotatedLocalReturnIdentifier();
+    testInferredLocalReturnIdentifier();
+    testTwoLocalsArithmetic();
+    testBoolLocal();
+    testFloatLocal();
+
+    testMutableLocalAssignment();
+    testFullImperativeBody();
+    testAssignmentExprStmtSucceedsAsUnit();
+
+    testIdentifierProducesLoad();
+    testParameterIdentifierStillFailsCleanly();
+
+    testUnsignedComparisonWithLocal();
+    testSignedComparisonWithLocal();
+
+    testUnitLocalFailsCleanly();
+    testIfStmtStillFailsCleanly();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }
