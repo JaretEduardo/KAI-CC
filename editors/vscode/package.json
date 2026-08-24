@@ -1,0 +1,46 @@
+{
+    "name": "kai-language",
+    "displayName": "KAI Language Support",
+    "description": "Syntax highlighting and basic editing configuration for the KAI programming language.",
+    "version": "0.1.0",
+    "publisher": "kai-lang",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/JaretEduardo/KAI-CC.git",
+        "directory": "editors/vscode"
+    },
+    "engines": {
+        "vscode": "^1.80.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "kai",
+                "aliases": [
+                    "KAI",
+                    "kai"
+                ],
+                "extensions": [
+                    ".kai"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "kai",
+                "scopeName": "source.kai",
+                "path": "./syntaxes/kai.tmLanguage.json"
+            }
+        ],
+        "snippets": [
+            {
+                "language": "kai",
+                "path": "./snippets/kai.json"
+            }
+        ]
+    }
+}

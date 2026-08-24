@@ -1,0 +1,58 @@
+{
+    "Function": {
+        "prefix": "fn",
+        "body": [
+            "fn ${1:name}(${2:params})${3: -> ${4:ReturnType}} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "Function declaration"
+    },
+    "Main function": {
+        "prefix": "main",
+        "body": [
+            "fn main() {",
+            "\t$0",
+            "}"
+        ],
+        "description": "Entry-point function"
+    },
+    "If": {
+        "prefix": "if",
+        "body": [
+            "if ${1:condition} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "If statement"
+    },
+    "If / else": {
+        "prefix": "ifelse",
+        "body": [
+            "if ${1:condition} {",
+            "\t$2",
+            "} else {",
+            "\t$0",
+            "}"
+        ],
+        "description": "If / else statement"
+    },
+    "While loop": {
+        "prefix": "while",
+        "body": [
+            "while ${1:condition} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "While loop"
+    },
+    "For loop": {
+        "prefix": "for",
+        "body": [
+            "for ${1:item} in ${2:iterable} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "For loop"
+    }
+}
