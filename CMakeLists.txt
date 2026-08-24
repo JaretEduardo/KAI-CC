@@ -42,6 +42,7 @@ add_library(kai_compiler STATIC
     compiler/src/parser/Parser.cpp
     compiler/src/semantic/SemanticAnalyzer.cpp
     compiler/src/semantic/TypeChecker.cpp
+    compiler/src/semantic/ControlFlowAnalyzer.cpp
 )
 
 # Public compiler headers

@@ -28,6 +28,7 @@ enum class SemanticErrorKind : std::uint8_t {
     NotCallable,
     InvalidAssignmentTarget,
     AssignmentToImmutableBinding,
+    MissingReturn,
 };
 
 /// A minimal, message-free description of a semantic failure - the
@@ -68,6 +69,12 @@ class SemanticAnalyzer;
 /// private expression/symbol type mutators (see below). TypeChecker runs
 /// as a separate pass after SemanticAnalyzer, over the same SemanticModel.
 class TypeChecker;
+
+/// Forward-declared only so SemanticModel can grant it access to
+/// addError() (see below). ControlFlowAnalyzer runs as a third, separate
+/// pass after TypeChecker, over the same SemanticModel - it needs no
+/// other mutator: it never records expression/symbol types.
+class ControlFlowAnalyzer;
 
 /// The result of semantic analysis on one SourceFile: every declared
 /// Symbol, every identifier-use resolution, every declaration-identifier
@@ -159,6 +166,10 @@ private:
     /// friendship-only-mutation contract SemanticAnalyzer already has
     /// above - never exposed as public mutable semantic state.
     friend class TypeChecker;
+
+    /// ControlFlowAnalyzer only ever needs addError() - it never records
+    /// expression/symbol types, adds symbols, or resolves names.
+    friend class ControlFlowAnalyzer;
 
     SymbolId addSymbol(Symbol symbol) {
         symbols_.push_back(std::move(symbol));
