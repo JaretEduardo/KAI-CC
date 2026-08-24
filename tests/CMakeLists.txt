@@ -40,7 +40,16 @@ kai_add_test(parser_tests parser/ParserTests.cpp)
 kai_add_test(semantic_type_tests semantic/TypeTests.cpp)
 kai_add_test(semantic_model_tests semantic/SemanticModelTests.cpp)
 kai_add_test(semantic_analyzer_tests semantic/SemanticAnalyzerTests.cpp)
-kai_add_test(semantic_type_checker_tests semantic/TypeCheckerTests.cpp)
+# TypeChecker tests are split by milestone/responsibility (see
+# tests/semantic/type_checker/TypeCheckerTestSupport.hpp) rather than one
+# monolithic file - each category is its own small CTest executable so it
+# stays independently runnable and cheap to read.
+kai_add_test(semantic_type_checker_literal_tests semantic/type_checker/LiteralAndInferenceTests.cpp)
+kai_add_test(semantic_type_checker_operator_tests semantic/type_checker/OperatorTests.cpp)
+kai_add_test(semantic_type_checker_call_tests semantic/type_checker/CallTests.cpp)
+kai_add_test(semantic_type_checker_assignment_tests semantic/type_checker/AssignmentTests.cpp)
+kai_add_test(semantic_type_checker_control_tests semantic/type_checker/ConditionAndReturnTests.cpp)
+
 kai_add_test(semantic_control_flow_analyzer_tests semantic/ControlFlowAnalyzerTests.cpp)
 
 # kaicc_cli-specific tests: linked against kaicc_cli (not kai_compiler
