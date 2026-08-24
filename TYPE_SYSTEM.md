@@ -2673,15 +2673,26 @@ both returns above are checked against `i64` on their own merits.
 
 ---
 
-# 75. Return-Statement Checking Is Not Return-Completeness Checking
+# 75. Return Completeness (All-Paths-Return) Analysis
 
 The rule in "Return Type Compatibility" above checks every `return`
 statement that actually appears in a function body against that
-function's declared return type - including a mismatched value and a
-mismatched bare `return`. It does **not** check whether a value-returning
-function returns at all, or on every possible path through its body.
-These are two different checks, and only the first is committed and
+function's declared return type. It does **not** check whether a
+value-returning function returns at all, or on every possible path
+through its body. These are two different checks, and both are now
 implemented:
+
+- **Return-statement type compatibility** (`# 74` above) - every
+  `return` that appears is checked against the declared return type.
+- **Return completeness** (this section) - a function with a concrete,
+  non-`()` return type must be structurally unable to fall through to
+  the end of its body without reaching a `return`.
+
+Referring to either one by the bare phrase "return validation" remains
+ambiguous; name the specific check instead.
+
+A function whose body can fall through to its end produces
+`MissingReturn`:
 
 ```kai
 fn f() -> i64 {
@@ -2696,22 +2707,177 @@ fn f(cond: bool) -> i64 {
 }
 ```
 
-Neither example above is diagnosed today: KAI does not yet perform
-all-paths-return analysis (also called return-completeness analysis, or
-missing-return control-flow analysis) - checking that every path through
-a function's body reaches a `return` with a compatible value. That
-capability requires control-flow analysis that has not been built yet and
-is separate, staged work. Referring to this gap by the bare phrase
-"return validation" alone is ambiguous, since return-statement type
-checking is already implemented; the missing capability should be named
-specifically as all-paths-return (or return-completeness) analysis.
+Both examples above are diagnosed as `MissingReturn`. A function whose
+every path reaches a `return` is complete and produces no diagnostic:
 
-Relatedly, code that follows a `return` statement is still fully checked
-today - KAI does not yet diagnose it as unreachable:
+```kai
+fn f(cond: bool) -> i64 {
+    if cond {
+        return 1
+    } else {
+        return 2
+    }
+}
+```
+
+### Distinct from return-statement type compatibility
+
+Return completeness is purely structural: it asks only whether control
+can reach the end of the body, never whether a `return` it encounters
+along the way has the right type. A function whose only `return`
+structurally terminates every path is complete even if that `return`
+itself is type-mismatched - `TypeMismatch` is produced, not
+`MissingReturn`:
+
+```kai
+fn f() -> i64 {
+    return true   // TypeMismatch: expected i64, found bool - not MissingReturn
+}
+```
+
+A bare `return` behaves the same way: it structurally terminates the
+path (so it never causes `MissingReturn`) even though it is typed as `()`
+and is itself flagged as a mismatch against a non-`()` return type:
+
+```kai
+fn f() -> i64 {
+    return        // TypeMismatch: expected i64, found () - not MissingReturn
+}
+```
+
+The two diagnostics are independent and may legitimately coexist when a
+function has both problems on different paths:
+
+```kai
+fn f(cond: bool) -> i64 {
+    if cond {
+        return    // TypeMismatch: expected i64, found ()
+    }
+    // the `false` path reaches the end of the function: MissingReturn
+}
+```
+
+### Unit-returning functions
+
+A function whose declared return type is `()`, implicit or explicit, has
+no completeness requirement - it is valid whether or not every path
+returns explicitly:
+
+```kai
+fn f() {
+}
+
+fn f() -> () {
+}
+
+fn f(cond: bool) {
+    if cond {
+        return
+    }
+}
+```
+
+### Structural `if` / `else if` / `else` rule
+
+An `if` chain is complete only when it has a final `else` and every
+branch - the initial `if`, every `else if`, and the final `else` - is
+itself complete:
+
+```kai
+fn f(cond: bool) -> i64 {
+    if cond {
+        return 1
+    }
+}
+```
+
+is incomplete (`MissingReturn`) because there is no `else`: control can
+always fall out the bottom when `cond` is false. Adding the `else` makes
+it complete:
+
+```kai
+fn f(cond: bool) -> i64 {
+    if cond {
+        return 1
+    } else {
+        return 2
+    }
+}
+```
+
+### Current analysis limitation: no constant-condition reasoning
+
+The current analysis does not evaluate condition expressions at all -
+not even literal `true`/`false`. An `if` with no `else` is treated as
+incomplete regardless of its condition:
+
+```kai
+fn f() -> i64 {
+    if true {
+        return 1
+    }
+}
+```
+
+is still diagnosed as `MissingReturn` today, even though `true` can never
+be false. This is a **limitation of the current analysis, not a KAI
+language rule** - a later revision may add constant-condition reasoning
+that recognizes this case as complete.
+
+### Current analysis limitation: `while` never proves completeness
+
+A `while` loop is conservatively treated as never proving completeness by
+itself, regardless of its condition or body:
+
+```kai
+fn f() -> i64 {
+    while true {
+        return 1
+    }
+}
+```
+
+is diagnosed as `MissingReturn` today, even though `while true` never
+exits on its own. As with constant-condition `if`, this is an **accepted
+limitation of the current analysis, not the intended final behavior**,
+and may be refined once constant-condition and divergence reasoning are
+added.
+
+### `for` loops
+
+A `for` loop likewise never proves completeness by itself: its iterable
+may execute zero times, so a `return` inside a `for` body does not make
+the enclosing path complete without a subsequent `return` after the
+loop:
+
+```kai
+fn f() -> i64 {
+    for i in 0..10 {
+        return 1
+    }
+    // still required: the loop may run zero iterations
+}
+```
+
+`for`-loop iterable and element type checking remain deferred, as
+before; this only describes `for`'s effect on return completeness.
+
+### Not unreachable-code analysis
+
+Return completeness only decides whether a body can fall through to its
+end; it does not diagnose code that can never run. Code that follows a
+`return` statement is still fully, independently checked, exactly as
+before:
 
 ```kai
 fn f() -> i64 {
     return 1
-    let x = undefined_name   // still checked; still an error
+    let x = undefined_name   // still checked; still an error; not "unreachable"
 }
 ```
+
+KAI does not yet have unreachable-code analysis, constant-condition flow
+reasoning, divergence analysis, or a general control-flow graph. Return
+completeness is a narrow, purely structural check layered on the
+existing AST shape - it is not a byproduct of, and does not require, any
+of those.

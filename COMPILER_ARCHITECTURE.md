@@ -170,9 +170,22 @@ Semantic analysis is responsible for:
 - return type validation
 - mutability validation
 
-Implemented so far: top-level function collection, primitive/unit type resolution for function signatures and local annotations, lexical scoping with same-scope duplicate detection and nested shadowing, prelude name seeding, lexical resolution of identifier uses (undefined-name and duplicate-symbol detection), primitive literal typing (including contextual literal typing and integer literal range checking), local type inference for currently-typed expressions, annotated local compatibility checking, primitive operator type checking (unary negation/not, arithmetic, modulo, comparison, equality, logical), ordinary user-function call validation (argument-count validation, contextual argument checking against the declared signature, call result typing, and known non-callable-expression detection), assignment checking for a local variable or parameter target (binding mutability validation, right-hand-side compatibility against the target's type, and assignment-expression unit typing), if/else-if/while condition Bool validation, and explicit return-statement type compatibility against the enclosing function's declared return type (including contextual return-expression checking and bare-return-as-unit compatibility).
+Semantic analysis runs as three separate passes over one shared semantic
+model, each running to completion before the next begins:
 
-Not yet implemented: all-paths-return / return-completeness analysis, unreachable-code and other control-flow analysis, for-loop iterable/element type validation, member/index assignment semantics, builtin call signature validation, compound/reference semantic types, ownership/borrow checking, and first-class function/method call semantics. The type checker as a whole is not yet complete.
+- **SemanticAnalyzer** - scopes, symbol tables, name resolution, function
+  signature collection.
+- **TypeChecker** - expression types and type-compatibility checks
+  (literals, operators, calls, assignment, conditions, explicit
+  return-statement type compatibility).
+- **ControlFlowAnalyzer** - structural control-flow properties, currently
+  limited to return completeness (all-paths-return). This pass does not
+  build or expose a control-flow graph; it is a narrow, purely structural
+  traversal of the existing AST shape.
+
+Implemented so far: top-level function collection, primitive/unit type resolution for function signatures and local annotations, lexical scoping with same-scope duplicate detection and nested shadowing, prelude name seeding, lexical resolution of identifier uses (undefined-name and duplicate-symbol detection), primitive literal typing (including contextual literal typing and integer literal range checking), local type inference for currently-typed expressions, annotated local compatibility checking, primitive operator type checking (unary negation/not, arithmetic, modulo, comparison, equality, logical), ordinary user-function call validation (argument-count validation, contextual argument checking against the declared signature, call result typing, and known non-callable-expression detection), assignment checking for a local variable or parameter target (binding mutability validation, right-hand-side compatibility against the target's type, and assignment-expression unit typing), if/else-if/while condition Bool validation, explicit return-statement type compatibility against the enclosing function's declared return type (including contextual return-expression checking and bare-return-as-unit compatibility), and structural return-completeness (all-paths-return) analysis via the separate ControlFlowAnalyzer pass, producing a `MissingReturn` diagnostic for a concrete non-unit-returning function whose body can structurally fall through to its end without reaching a `return`.
+
+Not yet implemented: unreachable-code analysis, constant-condition flow reasoning (e.g. recognizing `if true` or `while true` as always executing), divergence analysis, a general control-flow graph, for-loop iterable/element type validation, member/index assignment semantics, builtin call signature validation, compound/reference semantic types, ownership/borrow checking, and first-class function/method call semantics. Semantic analysis as a whole is not yet complete.
 
 Example errors:
 
