@@ -23,11 +23,13 @@
 
 namespace kai::codegen {
 
-/// LLVM CODEGEN MILESTONE 1+2+3+4+5: Minimal LLVM Module + Function +
+/// LLVM CODEGEN MILESTONE 1+2+3+4+5+6: Minimal LLVM Module + Function +
 /// Integer Return (M1), Primitive Expression Lowering (M2), Local
 /// Variables + Identifier Loads + Assignment (M3), Parameters + Function
 /// Calls + Recursion + FINAL short-circuit &&/|| (M4), If/Else/Else-If +
-/// While statement-level control flow (M5, ForStmt still deferred).
+/// While statement-level control flow (M5, ForStmt still deferred), and a
+/// minimal `print` builtin lowered to a tiny native runtime ABI (M6,
+/// `panic`/`assert` still deferred).
 ///
 /// LLVMCodeGenerator lowers an already-fully-checked AST into an
 /// llvm::Module:
@@ -100,15 +102,26 @@ namespace kai::codegen {
 ///   in an explicit `return`, possibly via if/else) needs no further
 ///   action here at all.
 ///
+/// M6 additionally recognizes exactly one Builtin call: `print(x)`,
+/// resolved via `model.resolution()`/SymbolKind::Builtin (a user
+/// declaration shadowing `print` resolves as an ordinary
+/// SymbolKind::Function instead - see STANDARD_LIBRARY.md §3 - and is
+/// lowered exactly like any other user-function call, never hijacked by
+/// this builtin path). `print(x)` lowers to a call into this project's
+/// own tiny native runtime ABI (runtime/kai_runtime.h/.c) selected by
+/// `x`'s own semantic Type - see lowerPrintCall() for the exact supported
+/// Type set and runtime function names.
+///
 /// Any other function shape, statement kind, or expression kind causes
 /// generate() to fail explicitly (return false) rather than emit partial
-/// or malformed LLVM IR - see generate()'s own documentation. Builtin
-/// calls, non-direct/first-class-function-value calls, method calls, `for`
-/// iteration, Range, a Unit-typed local variable (LLVM has no storable
-/// void value - see generateVarDeclStmt()), and every non-primitive-scalar
-/// semantic Type (references, arrays, str/String, structs, enums,
-/// generics, Result, Option, ...) are explicitly deferred to later LLVM
-/// codegen milestones (M6+).
+/// or malformed LLVM IR - see generate()'s own documentation. Every other
+/// Builtin call (`panic`, `assert`, ...), non-direct/first-class-
+/// function-value calls, method calls, `for` iteration, Range, a
+/// Unit-typed local variable (LLVM has no storable void value - see
+/// generateVarDeclStmt()), and every non-primitive-scalar semantic Type
+/// (references, arrays, str/String, structs, enums, generics, Result,
+/// Option, ...) are explicitly deferred to later LLVM codegen milestones
+/// (M7+).
 class LLVMCodeGenerator {
 public:
     /// `sources` must outlive every generate() call - it is the only way
@@ -308,9 +321,24 @@ private:
     /// that distinction unambiguous. Reads `model.typeOf(expr)` as
     /// semantic ground truth for every dispatch decision - never
     /// re-infers a type independently. Fails (returns std::nullopt) for
-    /// an Error/Unresolved semantic Type, or for any ExprKind this
-    /// milestone does not lower (ArrayLiteral, Index, Member, Unit,
-    /// ErrorPropagation).
+    /// an Error semantic Type, or for any ExprKind this milestone does
+    /// not lower (ArrayLiteral, Index, Member, Unit, ErrorPropagation).
+    ///
+    /// Unresolved is REJECTED with exactly one narrow, structurally-
+    /// identified exception (M6): a CallExpr whose direct callee resolves
+    /// (via `model.resolution()`/SymbolKind::Builtin - never identifier
+    /// text) to `print`. TypeChecker's checkBuiltinCall() always records
+    /// Type::unresolved() for a builtin CALL itself (STANDARD_LIBRARY.md
+    /// §3: builtin call signatures are not yet committed), regardless of
+    /// its arguments' own concrete types - so without this exception a
+    /// recognized, supported `print(x)` could never reach lowerCallExpr()
+    /// at all. This is deliberately NOT "allow Unresolved for any Call":
+    /// every other Unresolved CallExpr shape (an unsupported Builtin, a
+    /// non-function-typed callee, a deferred callee expression - see
+    /// TypeChecker.cpp's checkCallExpr()) is still rejected here exactly
+    /// as before. See the anonymous-namespace `isPrintBuiltinCall()`
+    /// helper in LLVMExpressionLowering.cpp for the exact structural
+    /// check.
     ///
     /// IMPORTANT: may move `builder`'s insertion point to a different
     /// BasicBlock than the one current when it was called (short-circuit
@@ -382,20 +410,71 @@ private:
     std::optional<llvm::Value*> lowerAssignmentExpr(const ast::AssignmentExpr& assignment,
                                                      const semantic::SemanticModel& model, llvm::IRBuilder<>& builder);
 
-    /// A direct (or transparently-parenthesized) user-function call -
-    /// the current frontend-supported call subset. Resolution is
-    /// exclusively `model.resolution()`/`SymbolKind` (never identifier
-    /// text); the callee's already-declared llvm::Function (from PASS 1 -
-    /// see `functions_`) is found by SymbolId, which is what actually
-    /// makes forward and recursive calls work with no special-casing
-    /// here. A CallExpr resolving to SymbolKind::Builtin, or any callee
-    /// shape that isn't a direct/parenthesized identifier, fails
-    /// explicitly - builtins and first-class/method call forms remain
-    /// deferred. Returns std::optional<llvm::Value*>{nullptr} - Unit
-    /// success, never a fabricated LLVM value - for a call to a
-    /// Unit-returning function.
+    /// A direct (or transparently-parenthesized) call - the current
+    /// frontend-supported call subset. Resolution is exclusively
+    /// `model.resolution()`/`SymbolKind` (never identifier text). Any
+    /// callee shape that isn't a direct/parenthesized identifier fails
+    /// explicitly - first-class/method call forms remain deferred.
+    ///
+    ///   SymbolKind::Function: the callee's already-declared
+    ///   llvm::Function (from PASS 1 - see `functions_`) is found by
+    ///   SymbolId, which is what actually makes forward and recursive
+    ///   calls work with no special-casing here. Returns
+    ///   std::optional<llvm::Value*>{nullptr} - Unit success, never a
+    ///   fabricated LLVM value - for a call to a Unit-returning function.
+    ///
+    ///   SymbolKind::Builtin (M6): delegates to lowerBuiltinCallExpr() -
+    ///   `type` (the CALL's own semantic Type) is not used for this path,
+    ///   since TypeChecker's checkBuiltinCall() always records
+    ///   Type::unresolved() for a builtin CallExpr itself, regardless of
+    ///   its arguments' own concrete types (see TypeChecker.cpp) - see
+    ///   lowerExpr()'s own comment on the narrow Unresolved-gate exception
+    ///   this requires.
     std::optional<llvm::Value*> lowerCallExpr(const ast::CallExpr& call, semantic::Type type,
                                                const semantic::SemanticModel& model, llvm::IRBuilder<>& builder);
+
+    /// Dispatches a CallExpr already confirmed (by lowerCallExpr(), via
+    /// `model.resolution()`/SymbolKind - never identifier text) to resolve
+    /// to `builtinSymbol` (SymbolKind::Builtin). M6 recognizes exactly one
+    /// builtin by its resolved Symbol::name: `print` (see
+    /// lowerPrintCall()). Every other recognized builtin (`panic`,
+    /// `assert`, ...) fails generation explicitly - M6 spec §17: never a
+    /// silently-skipped/no-op builtin call.
+    std::optional<llvm::Value*> lowerBuiltinCallExpr(const ast::CallExpr& call, const semantic::Symbol& builtinSymbol,
+                                                      const semantic::SemanticModel& model,
+                                                      llvm::IRBuilder<>& builder);
+
+    /// Lowers `print(x)` to a call into this project's own tiny native
+    /// runtime ABI (runtime/kai_runtime.h/.c) rather than a libc printf
+    /// formatting decision tree inlined into generated IR - KAI print
+    /// semantics stay a small, closed dispatch over `x`'s own semantic
+    /// Type (read from `model.typeOf()` - print has no committed
+    /// FunctionSignature to validate against yet, see
+    /// STANDARD_LIBRARY.md §3, so this IS the argument-count/argument-type
+    /// validation for this one recognized builtin - deliberately narrow,
+    /// not a general type checker):
+    ///
+    ///   exactly 1 argument, with a real, non-Error/non-Unresolved
+    ///   semantic Type, required - anything else fails explicitly.
+    ///
+    ///   signed integer   -> sign-extend to i64,  call `kai_print_i64`
+    ///   unsigned integer -> zero-extend to i64,  call `kai_print_u64`
+    ///   Bool              -> zero-extend to i32,  call `kai_print_bool`
+    ///   F32/F64           -> extend to double,    call `kai_print_f64`
+    ///   anything else (Char, String, ...)         -> explicit failure
+    ///
+    /// Each runtime function is declared into the CURRENT module via
+    /// `module_->getOrInsertFunction()` - this both creates the
+    /// `declare` the first time a given ABI function is needed AND
+    /// transparently reuses that exact same llvm::Function for every
+    /// subsequent `print` call requiring it, so multiple `print(i64...)`
+    /// calls in one module never produce duplicate declarations. Always
+    /// returns std::optional<llvm::Value*>{nullptr} on success - print is
+    /// an effectful, Unit-valued builtin (M6 spec §10): its call must
+    /// never surface the runtime function's own (void) C ABI return as a
+    /// KAI value.
+    std::optional<llvm::Value*> lowerPrintCall(const ast::CallExpr& call, const semantic::SemanticModel& model,
+                                                llvm::IRBuilder<>& builder);
 
     /// Maps a semantic::Type to its LLVM counterpart, covering every
     /// primitive scalar kind this milestone's Type models (Unit and the

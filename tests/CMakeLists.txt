@@ -54,6 +54,29 @@ kai_add_test(semantic_control_flow_analyzer_tests semantic/ControlFlowAnalyzerTe
 
 kai_add_test(codegen_llvm_code_generator_tests codegen/LLVMCodeGeneratorTests.cpp)
 
+# kai_runtime-specific test: links kai_runtime directly (not kai_compiler)
+# to prove the tiny native runtime (LLVM CODEGEN MILESTONE 6) builds
+# cleanly and exports the exact C ABI symbols generated code will
+# `declare`/`call` in M7. Captured-stdout verification is deferred to
+# M7's end-to-end native executable test, where it provides more value
+# (a real generated-and-linked KAI program's actual output) - this test
+# only proves each symbol links and runs without crashing.
+add_executable(kai_runtime_tests runtime/KaiRuntimeTests.cpp)
+
+target_link_libraries(kai_runtime_tests
+    PRIVATE
+        kai_runtime
+)
+
+target_include_directories(kai_runtime_tests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+kai_enable_warnings(kai_runtime_tests)
+
+add_test(NAME kai_runtime_tests COMMAND kai_runtime_tests)
+
 # kaicc_cli-specific tests: linked against kaicc_cli (not kai_compiler
 # directly) since kai_add_test() always links kai_compiler and
 # kaicc_cli's TokenPrinter helpers live one layer above that.

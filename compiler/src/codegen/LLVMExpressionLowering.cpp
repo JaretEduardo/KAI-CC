@@ -61,6 +61,29 @@ const ast::IdentifierExpr* unwrapDirectCalleeIdentifier(const ast::Expr& expr) {
     return nullptr;
 }
 
+// The ONE narrow, structurally-identified exception to lowerExpr()'s
+// Unresolved gate (M6 spec §8): true only for a CallExpr whose direct
+// callee resolves - via `model.resolution()`/SymbolKind, never identifier
+// text - to a Builtin named `print`. TypeChecker's checkBuiltinCall()
+// always records Type::unresolved() for a builtin CALL itself (see
+// TypeChecker.cpp), so without this a valid, supported `print(x)` could
+// never reach lowerCallExpr() at all. Deliberately NOT "any Call is
+// exempt" - an unresolved identifier, a non-Builtin/non-Function callee,
+// or a recognized-but-unsupported Builtin (`panic`/`assert`) all still
+// return false here and stay rejected by the ordinary Unresolved gate.
+bool isPrintBuiltinCall(const ast::CallExpr& call, const SemanticModel& model) {
+    const ast::IdentifierExpr* callee = unwrapDirectCalleeIdentifier(call.callee());
+    if (callee == nullptr) {
+        return false;
+    }
+    const std::optional<SymbolId> id = model.resolution(*callee);
+    if (!id.has_value()) {
+        return false;
+    }
+    const Symbol& symbol = model.symbol(*id);
+    return symbol.kind == SymbolKind::Builtin && symbol.name == "print";
+}
+
 } // namespace
 
 // No `default:` case: ExprKind is fully implemented today, mirroring the
@@ -68,8 +91,17 @@ const ast::IdentifierExpr* unwrapDirectCalleeIdentifier(const ast::Expr& expr) {
 std::optional<llvm::Value*> LLVMCodeGenerator::lowerExpr(const ast::Expr& expr, const SemanticModel& model,
                                                           llvm::IRBuilder<>& builder) {
     const std::optional<Type> type = model.typeOf(expr);
-    if (!type.has_value() || type->isError() || type->isUnresolved()) {
+    if (!type.has_value() || type->isError()) {
         return std::nullopt;
+    }
+    if (type->isUnresolved()) {
+        // See isPrintBuiltinCall()'s own comment: the ONE narrow,
+        // structurally-identified exception to rejecting Unresolved here.
+        if (expr.kind() != ast::ExprKind::Call ||
+            !isPrintBuiltinCall(static_cast<const ast::CallExpr&>(expr), model)) {
+            return std::nullopt;
+        }
+        return lowerCallExpr(static_cast<const ast::CallExpr&>(expr), *type, model, builder);
     }
 
     switch (expr.kind()) {
@@ -530,11 +562,14 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerCallExpr(const ast::CallExpr
     }
 
     const Symbol& calleeSymbol = model.symbol(*calleeId);
+    if (calleeSymbol.kind == SymbolKind::Builtin) {
+        // `type` (the CALL's own Type) is deliberately unused on this
+        // path - see lowerBuiltinCallExpr()'s own doc comment.
+        return lowerBuiltinCallExpr(call, calleeSymbol, model, builder);
+    }
     if (calleeSymbol.kind != SymbolKind::Function) {
-        // Builtin (print/panic/assert/...): explicitly deferred - never
-        // lowered as if it were an ordinary call. Local/Parameter: not
-        // callable in this milestone either (no first-class Function
-        // Type exists to call through).
+        // Local/Parameter: not callable in this milestone (no first-class
+        // Function Type exists to call through).
         return std::nullopt;
     }
 
@@ -592,6 +627,79 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerCallExpr(const ast::CallExpr
     }
 
     return callInst;
+}
+
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerBuiltinCallExpr(const ast::CallExpr& call,
+                                                                     const Symbol& builtinSymbol,
+                                                                     const SemanticModel& model,
+                                                                     llvm::IRBuilder<>& builder) {
+    if (builtinSymbol.name == "print") {
+        return lowerPrintCall(call, model, builder);
+    }
+    // `panic`/`assert`/any other future prelude name: recognized (via
+    // SymbolKind::Builtin) but not yet lowerable - explicit failure, M6
+    // spec §17: never a silently-skipped/no-op builtin call.
+    return std::nullopt;
+}
+
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerPrintCall(const ast::CallExpr& call, const SemanticModel& model,
+                                                               llvm::IRBuilder<>& builder) {
+    // print has no committed FunctionSignature to validate against
+    // (STANDARD_LIBRARY.md §3) - this arity check IS this builtin's
+    // entire argument-count validation, not a general type checker.
+    if (call.arguments().size() != 1) {
+        return std::nullopt;
+    }
+
+    const ast::Expr& argumentExpr = *call.arguments()[0];
+    const std::optional<Type> argumentType = model.typeOf(argumentExpr);
+    if (!argumentType.has_value() || argumentType->isError() || argumentType->isUnresolved()) {
+        return std::nullopt;
+    }
+
+    const std::optional<llvm::Value*> argument = lowerExpr(argumentExpr, model, builder);
+    if (!argument.has_value() || *argument == nullptr) {
+        return std::nullopt;
+    }
+
+    llvm::Type* i64Type = llvm::Type::getInt64Ty(context_);
+    llvm::Type* i32Type = llvm::Type::getInt32Ty(context_);
+    llvm::Type* doubleType = llvm::Type::getDoubleTy(context_);
+    llvm::Type* voidType = llvm::Type::getVoidTy(context_);
+
+    llvm::Value* runtimeArgument = nullptr;
+    llvm::FunctionCallee runtimeFn;
+    if (argumentType->isSignedInteger()) {
+        runtimeArgument = (*argument)->getType() == i64Type ? *argument : builder.CreateSExt(*argument, i64Type);
+        runtimeFn = module_->getOrInsertFunction("kai_print_i64",
+                                                  llvm::FunctionType::get(voidType, {i64Type}, /*isVarArg=*/false));
+    } else if (argumentType->isUnsignedInteger()) {
+        runtimeArgument = (*argument)->getType() == i64Type ? *argument : builder.CreateZExt(*argument, i64Type);
+        runtimeFn = module_->getOrInsertFunction("kai_print_u64",
+                                                  llvm::FunctionType::get(voidType, {i64Type}, /*isVarArg=*/false));
+    } else if (argumentType->isBool()) {
+        runtimeArgument = builder.CreateZExt(*argument, i32Type);
+        runtimeFn = module_->getOrInsertFunction("kai_print_bool",
+                                                  llvm::FunctionType::get(voidType, {i32Type}, /*isVarArg=*/false));
+    } else if (argumentType->isFloat()) {
+        runtimeArgument =
+            (*argument)->getType() == doubleType ? *argument : builder.CreateFPExt(*argument, doubleType);
+        runtimeFn = module_->getOrInsertFunction("kai_print_f64",
+                                                  llvm::FunctionType::get(voidType, {doubleType}, /*isVarArg=*/false));
+    } else {
+        // Char/String/any other unsupported print argument Type -
+        // explicit failure, never a silently-skipped print (M6 spec §2:
+        // char/string printing is not required for this milestone).
+        return std::nullopt;
+    }
+
+    builder.CreateCall(runtimeFn, {runtimeArgument});
+
+    // print is an effectful, Unit-valued builtin (M6 spec §10) - never
+    // surface the runtime function's own (void) C ABI return as a KAI
+    // value. Same std::optional<llvm::Value*>{nullptr} convention as
+    // lowerAssignmentExpr()/a Unit-returning user function call.
+    return std::optional<llvm::Value*>(nullptr);
 }
 
 } // namespace kai::codegen

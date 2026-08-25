@@ -127,6 +127,25 @@ target_link_libraries(kaicc
 
 kai_enable_warnings(kaicc)
 
+# Tiny native runtime KAI-generated LLVM IR calls into (LLVM CODEGEN
+# MILESTONE 6 - see runtime/kai_runtime.h for the exact exported C ABI
+# and compiler/include/kai/codegen/LLVMCodeGenerator.hpp's lowerPrintCall()
+# doc comment for how generated modules reference it). Deliberately its
+# own target, separate from kai_compiler/kaicc: the compiler process
+# itself never calls into this library - it only emits `declare`/`call`
+# references to these symbols by name. M7 is expected to link this
+# runtime's object code into the final native executable.
+add_library(kai_runtime STATIC
+    runtime/kai_runtime.c
+)
+
+target_include_directories(kai_runtime
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/runtime
+)
+
+kai_enable_warnings(kai_runtime)
+
 # Tests
 enable_testing()
 add_subdirectory(tests)

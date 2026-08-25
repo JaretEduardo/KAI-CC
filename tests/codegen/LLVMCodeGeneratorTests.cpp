@@ -1513,10 +1513,15 @@ void testNestedShortCircuit() {
 
 // FAILURES
 
-void testBuiltinCallStillFailsCleanly() {
+// RETARGETED (M6): this test's exact premise ("`print(...)` fails codegen
+// cleanly because ALL builtins are unsupported") is superseded outright by
+// M6, which recognizes and lowers `print`. `panic`/`assert` remain
+// unsupported Builtins, so they now carry this test's original intent -
+// see the PRINT BUILTIN test group below for `print`'s own coverage.
+void testUnsupportedBuiltinCallStillFailsCleanly() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
-    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    print(1)\n}");
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    panic(1)\n}");
 
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
@@ -2221,6 +2226,320 @@ void testForStmtStillFailsCleanly() {
     KAI_CHECK(!result.generationSucceeded);
 }
 
+// --- M6: minimal `print` builtin + runtime ABI ---
+
+// PRINT BUILTIN
+
+// A literal argument: `42` defaults to i32 (CLAUDE.md's literal-typing
+// rule) - proves sign-extension to the normalized `kai_print_i64` ABI.
+void testPrintLiteralI32SignExtendsToI64() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    print(42)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* runtimeFn = module.getFunction("kai_print_i64");
+    KAI_CHECK(runtimeFn != nullptr);
+    if (runtimeFn == nullptr) {
+        return;
+    }
+    KAI_CHECK(runtimeFn->isDeclaration()); // declared, never defined in this module
+    KAI_CHECK(runtimeFn->getReturnType()->isVoidTy());
+    KAI_CHECK(runtimeFn->arg_size() == 1);
+    KAI_CHECK(runtimeFn->getArg(0)->getType()->isIntegerTy(64));
+
+    const llvm::Function* mainFn = module.getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+
+    // A CONSTANT operand's sign-extension is constant-folded by LLVM
+    // itself (CreateSExt on a ConstantInt never emits a real SExtInst) -
+    // so the sign-extension is verified here by checking the resulting
+    // call argument is the correctly-widened i64 constant, not by
+    // looking for an SExtInst instruction (see
+    // testPrintUnsignedVariableZeroExtends()/
+    // testPrintF32VariableExtendsToDouble() below for cases where the
+    // extended operand is NOT a constant, and a real instruction does
+    // appear).
+    bool sawCall = false;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() == runtimeFn) {
+                    sawCall = true;
+                    KAI_CHECK(call->getType()->isVoidTy());
+                    KAI_CHECK(call->arg_size() == 1);
+                    if (call->arg_size() == 1) {
+                        const auto* argument = llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(0));
+                        KAI_CHECK(argument != nullptr);
+                        if (argument != nullptr) {
+                            KAI_CHECK(argument->getType()->isIntegerTy(64));
+                            KAI_CHECK(argument->getSExtValue() == 42);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawCall);
+
+    std::string ir;
+    llvm::raw_string_ostream irStream(ir);
+    module.print(irStream, nullptr);
+    std::cerr << "--- LLVMCodeGeneratorTests: representative print IR ---\n" << ir;
+}
+
+// An i64-typed local: no sign-extension is needed (already the runtime
+// ABI's own width) - only the load and the call should appear.
+void testPrintVariableI64() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    let x: i64 = 42\n    print(x)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* mainFn = codegen.module().getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+
+    bool sawLoad = false;
+    bool sawCall = false;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            sawLoad |= llvm::isa<llvm::LoadInst>(inst);
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "kai_print_i64") {
+                    sawCall = true;
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawLoad);
+    KAI_CHECK(sawCall);
+}
+
+// An unsigned local: must zero-extend, never sign-extend (M6 spec §13).
+void testPrintUnsignedVariableZeroExtends() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    let x: u32 = 5\n    print(x)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Module& module = codegen.module();
+    KAI_CHECK(module.getFunction("kai_print_u64") != nullptr);
+    KAI_CHECK(module.getFunction("kai_print_i64") == nullptr); // never the signed ABI for an unsigned value
+
+    const llvm::Function* mainFn = module.getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    bool sawZExt = false;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            sawZExt |= llvm::isa<llvm::ZExtInst>(inst);
+        }
+    }
+    KAI_CHECK(sawZExt);
+}
+
+void testPrintBoolLiteral() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    print(true)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* runtimeFn = codegen.module().getFunction("kai_print_bool");
+    KAI_CHECK(runtimeFn != nullptr);
+    if (runtimeFn == nullptr) {
+        return;
+    }
+    KAI_CHECK(runtimeFn->arg_size() == 1);
+    KAI_CHECK(runtimeFn->getArg(0)->getType()->isIntegerTy(32));
+}
+
+void testPrintFloatLiteral() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    print(3.5)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* runtimeFn = codegen.module().getFunction("kai_print_f64");
+    KAI_CHECK(runtimeFn != nullptr);
+    if (runtimeFn == nullptr) {
+        return;
+    }
+    KAI_CHECK(runtimeFn->arg_size() == 1);
+    KAI_CHECK(runtimeFn->getArg(0)->getType()->isDoubleTy());
+}
+
+// An f32 local must extend to double before the call (M6 spec §15).
+void testPrintF32VariableExtendsToDouble() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    let x: f32 = 1.5\n    print(x)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* mainFn = codegen.module().getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    bool sawFPExt = false;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            sawFPExt |= llvm::isa<llvm::FPExtInst>(inst);
+        }
+    }
+    KAI_CHECK(sawFPExt);
+}
+
+// Three prints of the same ABI type must reuse ONE runtime declaration
+// (M6 spec §11) and each still becomes its own CallInst.
+void testMultiplePrintsReuseRuntimeDeclaration() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    print(1)\n    print(2)\n    print(3)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    int declCount = 0;
+    for (const llvm::Function& fn : codegen.module()) {
+        declCount += fn.getName() == "kai_print_i64" ? 1 : 0;
+    }
+    KAI_CHECK(declCount == 1);
+
+    const llvm::Function* mainFn = codegen.module().getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    int callCount = 0;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                callCount += (call->getCalledFunction() != nullptr &&
+                              call->getCalledFunction()->getName() == "kai_print_i64")
+                                 ? 1
+                                 : 0;
+            }
+        }
+    }
+    KAI_CHECK(callCount == 3);
+}
+
+// A string argument: KAI's Type vocabulary has no TypeKind::String yet
+// (see Type.hpp), so a string literal's own semantic Type is
+// Type::unresolved() - lowerPrintCall()'s own argument-Type check rejects
+// it explicitly (M6 spec §9), never reaching the runtime-ABI dispatch.
+void testPrintUnsupportedStringArgumentFailsCleanly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    print(\"hi\")\n}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+}
+
+// A user-declared `print` must shadow the builtin entirely (M6 spec §7) -
+// resolved and lowered as an ordinary user Function call, never hijacked
+// by the runtime-ABI path.
+void testUserDefinedPrintShadowsBuiltin() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn print(x: i64) -> i64 {\n    return x\n}\nfn main() -> i64 {\n    return print(5)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Module& module = codegen.module();
+    // No runtime ABI declaration at all - the builtin path was never taken.
+    KAI_CHECK(module.getFunction("kai_print_i64") == nullptr);
+    KAI_CHECK(module.getFunction("kai_print_u64") == nullptr);
+    KAI_CHECK(module.getFunction("kai_print_bool") == nullptr);
+    KAI_CHECK(module.getFunction("kai_print_f64") == nullptr);
+
+    const llvm::Function* userPrint = module.getFunction("print");
+    KAI_CHECK(userPrint != nullptr);
+    if (userPrint == nullptr) {
+        return;
+    }
+    KAI_CHECK(!userPrint->isDeclaration()); // a real, user-defined body
+    KAI_CHECK(userPrint->getReturnType()->isIntegerTy(64));
+
+    const llvm::Function* mainFn = module.getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    bool sawCallToUserPrint = false;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                sawCallToUserPrint |= call->getCalledFunction() == userPrint;
+            }
+        }
+    }
+    KAI_CHECK(sawCallToUserPrint);
+}
+
 } // namespace
 
 int main() {
@@ -2298,7 +2617,7 @@ int main() {
     testShortCircuitOrCallOnlyInRhsBlock();
     testNestedShortCircuit();
 
-    testBuiltinCallStillFailsCleanly();
+    testUnsupportedBuiltinCallStillFailsCleanly();
 
     testParametersLocalsAssignmentCallIntegration();
 
@@ -2326,6 +2645,16 @@ int main() {
     testShadowingInsideIfBranch();
 
     testForStmtStillFailsCleanly();
+
+    testPrintLiteralI32SignExtendsToI64();
+    testPrintVariableI64();
+    testPrintUnsignedVariableZeroExtends();
+    testPrintBoolLiteral();
+    testPrintFloatLiteral();
+    testPrintF32VariableExtendsToDouble();
+    testMultiplePrintsReuseRuntimeDeclaration();
+    testPrintUnsupportedStringArgumentFailsCleanly();
+    testUserDefinedPrintShadowsBuiltin();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }
