@@ -1,6 +1,7 @@
 #include "kai/cli/AstPrinter.hpp"
 #include "kai/cli/CompileCommand.hpp"
 #include "kai/cli/InspectCommand.hpp"
+#include "kai/cli/SemanticCallQueryCommand.hpp"
 #include "kai/cli/SemanticQueryCommand.hpp"
 #include "kai/cli/TokenPrinter.hpp"
 #include "kai/source/SourceManager.hpp"
@@ -30,6 +31,9 @@ void printUsage() {
     std::cout << "  kaicc inspect <file.kai> --json\n";
     std::cout << "  kaicc definition <file.kai> --line N --column M --json\n";
     std::cout << "  kaicc references <file.kai> --line N --column M --json\n";
+    std::cout << "  kaicc callers <file.kai> --line N --column M --json\n";
+    std::cout << "  kaicc callees <file.kai> --line N --column M --json\n";
+    std::cout << "  kaicc call-graph <file.kai> --json\n";
     std::cout << "Try 'kaicc --version'\n";
 }
 
@@ -140,6 +144,48 @@ int main(int argc, char* argv[]) {
         const kai::cli::SemanticQueryKind kind =
             firstArg == "definition" ? kai::cli::SemanticQueryKind::Definition : kai::cli::SemanticQueryKind::References;
         return kai::cli::runSemanticQueryCommand(kind, sources, argv[2], *line, *column, std::cout, std::cerr);
+    }
+
+    // SEMANTIC INSPECTION MILESTONE 3: `kaicc callers <file.kai> --line N
+    // --column M --json` / `kaicc callees <file.kai> --line N --column M
+    // --json` - the same fixed-shape argv parse as definition/references
+    // (see SemanticCallQueryCommand.hpp).
+    if (firstArg == "callers" || firstArg == "callees") {
+        bool usageOk = argc == 8 && std::string_view(argv[3]) == "--line" &&
+                        std::string_view(argv[5]) == "--column" && std::string_view(argv[7]) == "--json";
+
+        std::optional<std::uint32_t> line;
+        std::optional<std::uint32_t> column;
+        if (usageOk) {
+            line = parsePositiveLineOrColumn(argv[4]);
+            column = parsePositiveLineOrColumn(argv[6]);
+            usageOk = line.has_value() && column.has_value();
+        }
+
+        if (!usageOk) {
+            std::cerr << "kaicc: error: expected 'kaicc " << firstArg
+                       << " <file.kai> --line N --column M --json' (N and M must be positive integers)\n";
+            std::cerr << "Usage: kaicc " << firstArg << " <file.kai> --line N --column M --json\n";
+            return 1;
+        }
+
+        kai::SourceManager sources;
+        const kai::cli::CallQueryKind kind =
+            firstArg == "callers" ? kai::cli::CallQueryKind::Callers : kai::cli::CallQueryKind::Callees;
+        return kai::cli::runCallQueryCommand(kind, sources, argv[2], *line, *column, std::cout, std::cerr);
+    }
+
+    // SEMANTIC INSPECTION MILESTONE 3: `kaicc call-graph <file.kai>
+    // --json` - the whole direct call graph, no position to validate.
+    if (firstArg == "call-graph") {
+        if (argc != 4 || std::string_view(argv[3]) != "--json") {
+            std::cerr << "kaicc: error: expected 'kaicc call-graph <file.kai> --json'\n";
+            std::cerr << "Usage: kaicc call-graph <file.kai> --json\n";
+            return 1;
+        }
+
+        kai::SourceManager sources;
+        return kai::cli::runCallGraphCommand(sources, argv[2], std::cout, std::cerr);
     }
 
     if (firstArg.starts_with("--")) {

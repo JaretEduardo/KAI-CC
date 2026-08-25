@@ -111,6 +111,19 @@ struct SemanticSymbolInfo {
     std::optional<std::string> enclosingFunction;
 };
 
+/// Builds the complete Function SemanticSymbolInfo (name, definition,
+/// parameter summary, returnType) for `fn` - the ONE shared "declaration
+/// -> tooling symbol info" construction for a FunctionDecl (M3 spec §30:
+/// SemanticInspector and SemanticQuery previously each rebuilt this
+/// independently; SemanticCallQuery would have made it a third - this
+/// free function is the smallest extraction that eliminates all three).
+/// Requires `fn` already have a resolved Symbol+FunctionSignature in
+/// `model` (true for any FunctionDecl once SemanticAnalyzer's Pass 1 has
+/// run, which is always the case by the time any of this milestone's
+/// query classes ever runs).
+SemanticSymbolInfo buildFunctionSymbolInfo(const SourceManager& sources, const SemanticModel& model,
+                                            const ast::FunctionDecl& fn);
+
 /// The complete result of inspecting one already-fully-checked
 /// SourceFile.
 struct SemanticInspectionResult {

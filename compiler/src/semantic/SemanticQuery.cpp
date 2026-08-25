@@ -127,55 +127,36 @@ void SemanticQuery::indexFile(const ast::SourceFile& file) {
 }
 
 void SemanticQuery::indexFunction(const ast::FunctionDecl& fn) {
-    // This declaration-side indexing intentionally mirrors
-    // SemanticInspector::collectFunction()'s own construction of a
-    // Function/Parameter SemanticSymbolInfo - both classes need the
-    // identical "declaration -> tooling symbol info" mapping, just from
-    // two different entry points (enumerate-everything vs. index-by-
-    // position), so this is the SAME semantic fact computed twice, not
-    // two independently-invented shapes.
+    // M3 spec §30: the shared builder used by SemanticInspector too -
+    // this eliminates what M2's own report had flagged as a 2-way (now
+    // 3-way, with SemanticCallQuery) duplication of the exact same
+    // "declaration -> tooling symbol info" construction.
     const std::optional<SymbolId> fnId = model_.declarationSymbol(fn.name());
     assert(fnId.has_value());
-    const Symbol& fnSymbol = model_.symbol(*fnId);
-    assert(fnSymbol.declaredAt.has_value());
-    assert(fnSymbol.signature.has_value());
-
-    const std::string name(sources_.text(fn.name().span));
-    const FunctionSignature& signature = *fnSymbol.signature;
-    const InspectionRange fnDefinition = inspectionRangeOf(sources_, *fnSymbol.declaredAt);
-
-    SemanticSymbolInfo functionInfo;
-    functionInfo.name = name;
-    functionInfo.kind = SemanticSymbolKind::Function;
-    functionInfo.definition = fnDefinition;
-    functionInfo.returnType = signature.returnType;
-
-    for (const ast::Param& param : fn.params()) {
-        const std::optional<SymbolId> paramId = model_.declarationSymbol(param.name);
-        assert(paramId.has_value());
-        const Symbol& paramSymbol = model_.symbol(*paramId);
-        assert(paramSymbol.declaredAt.has_value());
-        functionInfo.parameters.push_back(SemanticParameterInfo{
-            std::string(sources_.text(param.name.span)),
-            paramSymbol.type,
-            inspectionRangeOf(sources_, *paramSymbol.declaredAt),
-        });
-    }
+    SemanticSymbolInfo functionInfo = buildFunctionSymbolInfo(sources_, model_, fn);
+    const InspectionRange fnDefinition = functionInfo.definition;
+    const std::string name = functionInfo.name;
 
     addDeclaration(*fnId, fnDefinition, functionInfo);
 
-    for (const ast::Param& param : fn.params()) {
+    // Each parameter still needs its OWN SymbolId for the occurrence
+    // index (SemanticSymbolInfo/SemanticParameterInfo deliberately never
+    // carry one) - re-resolved here, but name/type/definition are reused
+    // directly from the shared builder's own parameter summary rather
+    // than re-derived from the AST/SemanticModel a second time.
+    for (std::size_t i = 0; i < fn.params().size(); ++i) {
+        const ast::Param& param = fn.params()[i];
         const std::optional<SymbolId> paramId = model_.declarationSymbol(param.name);
-        const Symbol& paramSymbol = model_.symbol(*paramId);
-        const InspectionRange paramDefinition = inspectionRangeOf(sources_, *paramSymbol.declaredAt);
+        assert(paramId.has_value());
+        const SemanticParameterInfo& paramSummary = functionInfo.parameters[i];
 
         SemanticSymbolInfo paramInfo;
-        paramInfo.name = std::string(sources_.text(param.name.span));
+        paramInfo.name = paramSummary.name;
         paramInfo.kind = SemanticSymbolKind::Parameter;
-        paramInfo.definition = paramDefinition;
-        paramInfo.type = paramSymbol.type;
+        paramInfo.definition = paramSummary.definition;
+        paramInfo.type = paramSummary.type;
         paramInfo.enclosingFunction = name;
-        addDeclaration(*paramId, paramDefinition, std::move(paramInfo));
+        addDeclaration(*paramId, paramSummary.definition, std::move(paramInfo));
     }
 
     indexBlock(fn.body(), name);

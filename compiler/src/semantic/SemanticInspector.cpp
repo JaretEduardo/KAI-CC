@@ -16,6 +16,42 @@ InspectionRange inspectionRangeOf(const SourceManager& sources, SourceSpan span)
     };
 }
 
+// M3 spec §30: the shared "declaration -> tooling symbol info" builder
+// for a FunctionDecl, now reused by SemanticInspector (below),
+// SemanticQuery, and SemanticCallQuery - eliminating what M2 had flagged
+// as a 2-way (soon 3-way) duplication.
+SemanticSymbolInfo buildFunctionSymbolInfo(const SourceManager& sources, const SemanticModel& model,
+                                            const ast::FunctionDecl& fn) {
+    // Declaration mapping, not a name lookup - mirrors every other
+    // compiler-internal consumer of SemanticModel (TypeChecker,
+    // ControlFlowAnalyzer, LLVMCodeGenerator all use this exact pattern).
+    const std::optional<SymbolId> fnId = model.declarationSymbol(fn.name());
+    assert(fnId.has_value());
+    const Symbol& fnSymbol = model.symbol(*fnId);
+    assert(fnSymbol.declaredAt.has_value()); // every Function Symbol is declared from real source (never a Builtin)
+    assert(fnSymbol.signature.has_value());  // Pass 1 of SemanticAnalyzer always resolves one
+
+    SemanticSymbolInfo info;
+    info.name = std::string(sources.text(fn.name().span));
+    info.kind = SemanticSymbolKind::Function;
+    info.definition = inspectionRangeOf(sources, *fnSymbol.declaredAt);
+    info.returnType = fnSymbol.signature->returnType;
+
+    info.parameters.reserve(fn.params().size());
+    for (const ast::Param& param : fn.params()) {
+        const std::optional<SymbolId> paramId = model.declarationSymbol(param.name);
+        assert(paramId.has_value());
+        const Symbol& paramSymbol = model.symbol(*paramId);
+        assert(paramSymbol.declaredAt.has_value());
+        info.parameters.push_back(SemanticParameterInfo{
+            std::string(sources.text(param.name.span)),
+            paramSymbol.type,
+            inspectionRangeOf(sources, *paramSymbol.declaredAt),
+        });
+    }
+    return info;
+}
+
 SemanticInspectionResult SemanticInspector::inspect(const ast::SourceFile& file) const {
     SemanticInspectionResult result;
     result.file = std::string(sources_.fileName(file.file()));
@@ -37,48 +73,21 @@ SemanticInspectionResult SemanticInspector::inspect(const ast::SourceFile& file)
 }
 
 void SemanticInspector::collectFunction(const ast::FunctionDecl& fn, SemanticInspectionResult& result) const {
-    // Declaration mapping, not a name lookup - mirrors every other
-    // compiler-internal consumer of SemanticModel (TypeChecker,
-    // ControlFlowAnalyzer, LLVMCodeGenerator all use this exact pattern).
-    const std::optional<SymbolId> fnId = model_.declarationSymbol(fn.name());
-    assert(fnId.has_value());
-    const Symbol& fnSymbol = model_.symbol(*fnId);
-    assert(fnSymbol.declaredAt.has_value()); // every Function Symbol is declared from real source (never a Builtin)
-    assert(fnSymbol.signature.has_value());  // Pass 1 of SemanticAnalyzer always resolves one
+    SemanticSymbolInfo functionInfo = buildFunctionSymbolInfo(sources_, model_, fn);
+    const std::string name = functionInfo.name;
 
-    const std::string name(sources_.text(fn.name().span));
-    const FunctionSignature& signature = *fnSymbol.signature;
-
-    SemanticSymbolInfo functionInfo;
-    functionInfo.name = name;
-    functionInfo.kind = SemanticSymbolKind::Function;
-    functionInfo.definition = inspectionRangeOf(sources_, *fnSymbol.declaredAt);
-    functionInfo.returnType = signature.returnType;
-
-    // Parameter summary (nested, in declaration order) - see
-    // SemanticSymbolInfo's own header comment for why parameters ALSO
-    // get an independent, flat entry below (M1 spec §12: "top-level
-    // symbols contains all user-authored symbols").
-    functionInfo.parameters.reserve(fn.params().size());
+    // Flat top-level parameter entries (M1 spec §12: "top-level symbols
+    // contains all user-authored symbols") - built FROM the shared
+    // helper's own parameter summary above, never re-derived from the
+    // AST/SemanticModel a second time.
     std::vector<SemanticSymbolInfo> flatParameters;
-    flatParameters.reserve(fn.params().size());
-
-    for (const ast::Param& param : fn.params()) {
-        const std::optional<SymbolId> paramId = model_.declarationSymbol(param.name);
-        assert(paramId.has_value());
-        const Symbol& paramSymbol = model_.symbol(*paramId);
-        assert(paramSymbol.declaredAt.has_value());
-
-        const std::string paramName(sources_.text(param.name.span));
-        const InspectionRange paramDefinition = inspectionRangeOf(sources_, *paramSymbol.declaredAt);
-
-        functionInfo.parameters.push_back(SemanticParameterInfo{paramName, paramSymbol.type, paramDefinition});
-
+    flatParameters.reserve(functionInfo.parameters.size());
+    for (const SemanticParameterInfo& param : functionInfo.parameters) {
         SemanticSymbolInfo flatParameter;
-        flatParameter.name = paramName;
+        flatParameter.name = param.name;
         flatParameter.kind = SemanticSymbolKind::Parameter;
-        flatParameter.definition = paramDefinition;
-        flatParameter.type = paramSymbol.type;
+        flatParameter.definition = param.definition;
+        flatParameter.type = param.type;
         flatParameter.enclosingFunction = name;
         flatParameters.push_back(std::move(flatParameter));
     }

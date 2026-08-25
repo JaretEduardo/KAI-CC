@@ -62,6 +62,10 @@ kai_add_test(semantic_inspector_tests semantic/SemanticInspectorTests.cpp)
 # compiler-layer query with no CLI/JSON concerns of its own.
 kai_add_test(semantic_query_tests semantic/SemanticQueryTests.cpp)
 
+# SEMANTIC INSPECTION MILESTONE 3: SemanticCallQuery tested independently
+# of the CLI, like every other kai_add_test() suite.
+kai_add_test(semantic_call_query_tests semantic/SemanticCallQueryTests.cpp)
+
 kai_add_test(codegen_llvm_code_generator_tests codegen/LLVMCodeGeneratorTests.cpp)
 
 # LLVM CODEGEN MILESTONE 7: LLVMObjectEmitter tested independently of the
@@ -153,6 +157,24 @@ target_include_directories(semantic_query_command_tests
 kai_enable_warnings(semantic_query_command_tests)
 
 add_test(NAME semantic_query_command_tests COMMAND semantic_query_command_tests)
+
+# SEMANTIC INSPECTION MILESTONE 3: `kaicc callers|callees|call-graph` CLI/
+# JSON integration tests - same reasoning as semantic_query_command_tests.
+add_executable(semantic_call_query_command_tests cli/SemanticCallQueryCommandTests.cpp)
+
+target_link_libraries(semantic_call_query_command_tests
+    PRIVATE
+        kaicc_cli
+)
+
+target_include_directories(semantic_call_query_command_tests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+kai_enable_warnings(semantic_call_query_command_tests)
+
+add_test(NAME semantic_call_query_command_tests COMMAND semantic_call_query_command_tests)
 
 # kai_runtime-specific test: links kai_runtime directly (not kai_compiler)
 # to prove the tiny native runtime (LLVM CODEGEN MILESTONE 6) builds
