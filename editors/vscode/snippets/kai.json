@@ -54,5 +54,15 @@
             "}"
         ],
         "description": "For loop"
+    },
+    "Immutable variable": {
+        "prefix": "let",
+        "body": "let ${1:name}: ${2:i64} = ${3:0}",
+        "description": "Declare an immutable local variable"
+    },
+    "Mutable variable": {
+        "prefix": "mut",
+        "body": "mut ${1:name}: ${2:i64} = ${3:0}",
+        "description": "Declare a mutable local variable"
     }
 }
