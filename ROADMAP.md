@@ -30,18 +30,19 @@ A small set of KAI programs can be written on paper with clearly defined behavio
 
 Goal: parse KAI source code.
 
-- [ ] CMake project setup
-- [ ] LLVM development environment
-- [ ] Source manager
-- [ ] Token representation
-- [ ] Lexer
-- [ ] Lexer tests
-- [ ] Parser
-- [ ] Parser tests
-- [ ] AST
-- [ ] AST printer
-- [ ] Source spans
-- [ ] Initial diagnostics
+- [x] CMake project setup
+- [x] LLVM development environment
+- [x] Source manager
+- [x] Token representation
+- [x] Lexer
+- [x] Lexer tests
+- [x] Parser
+- [x] Parser tests
+- [x] AST
+- [x] AST printer
+- [x] Source spans
+- [ ] Initial diagnostics (ParseError/SemanticError exist as structured-but-minimal stand-ins - no stable
+      code/severity/notes yet, see COMPILER_ARCHITECTURE.md §10 - not the committed Diagnostic shape yet)
 
 Target:
 
@@ -62,14 +63,15 @@ Goal: understand and validate KAI programs.
 - [x] Symbol table
 - [x] Lexical scopes
 - [x] Primitive types
-- [ ] Type inference
-- [ ] Type checking
+- [x] Type inference
+- [x] Type checking
 - [x] Function signatures
-- [ ] Function calls
+- [x] Function calls
 - [x] Return validation
-- [ ] Mutability checking
-- [ ] Structured semantic diagnostics
-- [ ] Initial HIR
+- [x] Mutability checking
+- [ ] Structured semantic diagnostics (same caveat as Phase 1's "Initial diagnostics")
+- [ ] Initial HIR (postponed, not abandoned - LLVMCodeGenerator lowers AST + SemanticModel directly to LLVM IR
+      for the MVP, see COMPILER_ARCHITECTURE.md §2's "Current Implementation Status")
 
 Target:
 
@@ -81,22 +83,35 @@ Invalid programs should fail before code generation with useful diagnostics.
 
 Goal: compile the first native KAI programs.
 
-- [ ] LLVM module generation
-- [ ] Primitive value lowering
-- [ ] Arithmetic
-- [ ] Comparisons
-- [ ] Variables
-- [ ] Functions
-- [ ] Function calls
-- [ ] if / else
-- [ ] while
-- [ ] return
-- [ ] print runtime function
-- [ ] Object file generation
-- [ ] Linking
-- [ ] `kaicc` executable
+- [x] LLVM module generation
+- [x] Primitive value lowering
+- [x] Arithmetic
+- [x] Comparisons
+- [x] Variables
+- [x] Functions
+- [x] Function calls
+- [x] if / else
+- [x] while
+- [x] return
+- [x] print runtime function
+- [x] Object file generation
+- [x] Linking
+- [x] `kaicc` executable
 
-Milestone:
+Status: implemented for the current MVP primitive-value subset (signed/unsigned integers, Bool, f32/f64) on
+Fedora Linux x86_64 - `print` does not yet support string literals/values (strings remain a Phase 5 backend
+item), so the illustrative `"Hello from KAI"` example below does not compile yet. What genuinely compiles,
+links, and runs natively today via `kaicc hello.kai -o hello && ./hello`:
+
+    fn main() {
+        print(42)
+    }
+
+Output:
+
+    42
+
+Milestone (original illustrative form, pending string support):
 
     kaicc hello.kai -o hello
     ./hello
