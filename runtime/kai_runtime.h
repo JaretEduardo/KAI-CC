@@ -33,6 +33,18 @@ void kai_print_u64(uint64_t value);
 void kai_print_bool(int32_t value);
 void kai_print_f64(double value);
 
+/* Minimal String Literal Support milestone: `data` points to `length`
+ * bytes of KAI string data (immutable static literal storage - see
+ * LLVMCodeGenerator's lowerType()/lowerLiteralExpr() for the { ptr, i64 }
+ * descriptor this is called with). `length` is the DECODED byte length,
+ * never derived here via strlen() - KAI string literals may legally
+ * contain an embedded \0 escape (GRAMMAR.md's String production), which
+ * would truncate a NUL-terminated/strlen-based implementation. Writes
+ * exactly `length` bytes, then the same newline every other kai_print_*
+ * function appends.
+ */
+void kai_print_str(const char* data, uint64_t length);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

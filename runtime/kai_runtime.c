@@ -24,3 +24,12 @@ void kai_print_bool(int32_t value) {
 void kai_print_f64(double value) {
     printf("%g\n", value);
 }
+
+void kai_print_str(const char* data, uint64_t length) {
+    /* fwrite, never strlen/fputs: `length` is the DECODED byte length and
+     * may legally exceed the position of an embedded '\0' escape byte
+     * inside `data` - a NUL-terminated write would silently truncate
+     * valid KAI string data (see kai_runtime.h's own comment). */
+    fwrite(data, 1, (size_t)length, stdout);
+    fputc('\n', stdout);
+}

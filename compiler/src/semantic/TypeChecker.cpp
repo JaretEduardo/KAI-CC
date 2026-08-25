@@ -99,6 +99,7 @@ std::optional<IntegerRange> integerRangeFor(Type type) {
         case TypeKind::F64:
         case TypeKind::Bool:
         case TypeKind::Char:
+        case TypeKind::Str:
             return std::nullopt;
     }
     return std::nullopt;
@@ -532,10 +533,18 @@ Type TypeChecker::checkLiteralExpr(const ast::LiteralExpr& literal, std::optiona
             break;
 
         case ast::LiteralKind::String:
-            // Type model does not represent str/String yet (Milestone 1
-            // spec #18) - Unresolved, never Error, and never a
-            // TypeMismatch solely because of this temporary gap.
-            result = Type::unresolved();
+            // Minimal String Literal Support milestone: a string literal
+            // now has the concrete internal Type::str() (see its own
+            // comment in Type.hpp) instead of Type::unresolved(). This is
+            // deliberately narrow - it types the LITERAL expression only;
+            // it does not make `str` a spellable type annotation (that
+            // remains UnknownType via SemanticAnalyzer's
+            // lookupPrimitiveTypeName(), unchanged) and does not model
+            // any operator/method contract for Str beyond ordinary
+            // existing domain checks (isNumericDomain/isEqualityDomain
+            // below both already exclude Str, so e.g. `"a" + "b"` still
+            // correctly fails as InvalidBinaryOperands).
+            result = Type::str();
             break;
     }
 

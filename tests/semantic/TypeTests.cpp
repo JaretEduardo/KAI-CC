@@ -1,8 +1,11 @@
 #include "kai/semantic/Type.hpp"
 
+#include "kai/semantic/SemanticTypeName.hpp"
+
 #include "support/check.hpp"
 
 using kai::semantic::Type;
+using kai::semantic::typeName;
 using kai::semantic::TypeKind;
 
 namespace {
@@ -66,13 +69,35 @@ void testBoolAndCharFactories() {
     KAI_CHECK(Type::character().kind() == TypeKind::Char);
 }
 
+// Minimal String Literal Support milestone: Type::str()/isStr() - a
+// temporary internal type only (see Type::str()'s own comment), not a
+// declaration that KAI's final str/String/&str design is settled.
+void testStrFactory() {
+    const Type type = Type::str();
+
+    KAI_CHECK(type.kind() == TypeKind::Str);
+    KAI_CHECK(type.isStr());
+    KAI_CHECK(!type.isError());
+    KAI_CHECK(!type.isUnresolved());
+    KAI_CHECK(!type.isNumeric());
+    KAI_CHECK(!type.isBool());
+    KAI_CHECK(!type.isChar());
+}
+
+// The canonical semantic-tooling renderer (SemanticTypeName.hpp) must
+// stay total over TypeKind - Str renders as "str" (M8 spec #17), the same
+// name kaicc inspect's JSON output uses for an inferred string local.
+void testTypeNameOfStr() {
+    KAI_CHECK(typeName(Type::str()) == "str");
+}
+
 // --- None of the primitive/unit factories ever report as Error/Unresolved ---
 
 void testPrimitiveAndUnitTypesAreNeitherErrorNorUnresolved() {
     const Type types[] = {
         Type::unit(),  Type::i8(),  Type::i16(),    Type::i32(),  Type::i64(),
         Type::u8(),    Type::u16(), Type::u32(),    Type::u64(),  Type::f32(),
-        Type::f64(),   Type::boolean(), Type::character(),
+        Type::f64(),   Type::boolean(), Type::character(), Type::str(),
     };
 
     for (const Type& type : types) {
@@ -111,6 +136,8 @@ int main() {
     testUnsignedIntegerFactories();
     testFloatingPointFactories();
     testBoolAndCharFactories();
+    testStrFactory();
+    testTypeNameOfStr();
 
     testPrimitiveAndUnitTypesAreNeitherErrorNorUnresolved();
 

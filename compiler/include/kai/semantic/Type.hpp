@@ -28,6 +28,12 @@ enum class TypeKind : std::uint8_t {
 
     Bool,
     Char,
+
+    /// See Type::str()'s own comment: a temporary, deliberately
+    /// underspecified internal type, not a declaration that KAI's final
+    /// str/String/&str design (still open - see TYPE_SYSTEM.md,
+    /// DESIGN_QUESTIONS.md) has been settled.
+    Str,
 };
 
 /// A semantic type: a small, closed, value-typed kind tag. Never
@@ -47,11 +53,12 @@ enum class TypeKind : std::uint8_t {
 ///   semantic error (e.g. a NamedTypeSyntax naming an unknown type).
 ///   Always accompanied by a SemanticError recording why.
 ///
-/// Only Unit and the primitive numeric/bool/char kinds are modeled here.
-/// References, slices, arrays, generics, strings, and functions-as-
-/// values are not represented by this milestone - a syntactic type in
-/// one of those shapes resolves to Type::unresolved(), never a
-/// fabricated Type of some new kind invented to stand in for it.
+/// Only Unit, the primitive numeric/bool/char kinds, and (as of the
+/// Minimal String Literal Support milestone) Str are modeled here.
+/// References, slices, arrays, generics, and functions-as-values remain
+/// unrepresented - a syntactic type in one of those shapes still resolves
+/// to Type::unresolved(), never a fabricated Type of some new kind
+/// invented to stand in for it.
 ///
 /// Deliberately no single `primitive(TypeKind)` factory: that shape
 /// would let a caller pass Error/Unresolved into it and read at the call
@@ -82,6 +89,22 @@ public:
     static constexpr Type boolean() noexcept { return Type(TypeKind::Bool); }
     static constexpr Type character() noexcept { return Type(TypeKind::Char); }
 
+    /// Minimal String Literal Support milestone ONLY: an internal type
+    /// meaning "immutable UTF-8 byte sequence backed by static literal
+    /// storage" (a `{ ptr, i64 }` pointer+length descriptor - see
+    /// LLVMCodeGenerator's lowerType()). This is deliberately NOT a
+    /// declaration that KAI's final string design is settled: TYPE_SYSTEM.md
+    /// describes an owned `String` plus borrowed `&str`, SYNTAX.md uses a
+    /// bare `str` annotation, and DESIGN_QUESTIONS.md still lists "what
+    /// exactly is `str`?" as open. Str exists only so a string LITERAL
+    /// expression (and a local inferred from one) has a concrete Type
+    /// instead of Type::unresolved(); it is never reachable from a
+    /// spellable source-level type annotation (SemanticAnalyzer's
+    /// lookupPrimitiveTypeName() intentionally does not recognize `str`,
+    /// so `let x: str = ...` still resolves to Type::error() /
+    /// UnknownType, unchanged).
+    static constexpr Type str() noexcept { return Type(TypeKind::Str); }
+
     constexpr TypeKind kind() const noexcept { return kind_; }
     constexpr bool isError() const noexcept { return kind_ == TypeKind::Error; }
     constexpr bool isUnresolved() const noexcept { return kind_ == TypeKind::Unresolved; }
@@ -106,6 +129,8 @@ public:
     constexpr bool isBool() const noexcept { return kind_ == TypeKind::Bool; }
 
     constexpr bool isChar() const noexcept { return kind_ == TypeKind::Char; }
+
+    constexpr bool isStr() const noexcept { return kind_ == TypeKind::Str; }
 
     friend constexpr bool operator==(const Type&, const Type&) noexcept = default;
 

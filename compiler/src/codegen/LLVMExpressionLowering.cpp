@@ -10,13 +10,17 @@
 #include "kai/codegen/LLVMCodeGenerator.hpp"
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/Support/Casting.h>
 
 #include <cassert>
 #include <charconv>
 #include <cstddef>
 #include <optional>
+#include <string>
+#include <string_view>
 
 namespace kai::codegen {
 
@@ -82,6 +86,68 @@ bool isPrintBuiltinCall(const ast::CallExpr& call, const SemanticModel& model) {
     }
     const Symbol& symbol = model.symbol(*id);
     return symbol.kind == SymbolKind::Builtin && symbol.name == "print";
+}
+
+// Decodes a KAI string literal's exact byte content from its full source
+// lexeme (`"..."`, quotes included - LiteralExpr never stores a decoded
+// value; see its own class comment). This is the SAME kind of purely
+// mechanical, already-validated-by-the-lexer decode as the integer/float/
+// bool cases in lowerLiteralExpr() below: Lexer.cpp's scanString() has
+// already rejected any literal whose escapes are not one of
+// \n \r \t \\ \" \0 (GRAMMAR.md's String production), so this only
+// translates those exact six escapes to their actual bytes - it never
+// re-validates, and never recognizes any other escape.
+//
+// The result is a byte buffer, not a C string: std::string tolerates
+// embedded '\0' bytes fine (its size()/data() never depend on strlen()),
+// which matters because \0 is one of the supported escapes (M8 spec #6 -
+// see kai_runtime.h's kai_print_str()).
+std::string decodeStringLiteralBytes(std::string_view lexeme) {
+    assert(lexeme.size() >= 2 && lexeme.front() == '"' && lexeme.back() == '"');
+    std::string decoded;
+    decoded.reserve(lexeme.size() - 2);
+
+    for (std::size_t i = 1; i + 1 < lexeme.size(); ++i) {
+        const char c = lexeme[i];
+        if (c != '\\') {
+            decoded.push_back(c);
+            continue;
+        }
+
+        // The lexer only ever produces a StringLiteral token when a
+        // backslash is followed by one more, in-bounds, supported escape
+        // character - safe to advance and switch on it unconditionally.
+        ++i;
+        switch (lexeme[i]) {
+            case 'n':
+                decoded.push_back('\n');
+                break;
+            case 'r':
+                decoded.push_back('\r');
+                break;
+            case 't':
+                decoded.push_back('\t');
+                break;
+            case '\\':
+                decoded.push_back('\\');
+                break;
+            case '"':
+                decoded.push_back('"');
+                break;
+            case '0':
+                decoded.push_back('\0');
+                break;
+            default:
+                // Unreachable: Lexer::scanString()'s
+                // isSupportedStringEscapeChar() already rejected every
+                // other escape as Invalid before this token could ever
+                // become a StringLiteral.
+                assert(false && "unsupported string escape reached codegen");
+                break;
+        }
+    }
+
+    return decoded;
 }
 
 } // namespace
@@ -190,7 +256,36 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerLiteralExpr(const ast::Liter
             return llvm::ConstantInt::getBool(llvmType->getContext(), text == "true");
         }
 
-        case ast::LiteralKind::String:
+        case ast::LiteralKind::String: {
+            if (!type.isStr()) {
+                return std::nullopt;
+            }
+
+            // Decode once, then build a private, internal-linkage,
+            // read-only global holding the EXACT decoded bytes (no
+            // heap allocation, no runtime ownership, no destructor - see
+            // Type::str()'s own comment). AddNull=false: the descriptor's
+            // length always comes from `decoded.size()` below, never from
+            // any trailing terminator a helper might add, so an embedded
+            // \0 byte (a supported escape) can never be confused with
+            // string termination.
+            const std::string decoded = decodeStringLiteralBytes(text);
+
+            llvm::Constant* dataConstant =
+                decoded.empty()
+                    ? static_cast<llvm::Constant*>(
+                          llvm::ConstantAggregateZero::get(llvm::ArrayType::get(llvm::Type::getInt8Ty(context_), 0)))
+                    : static_cast<llvm::Constant*>(llvm::ConstantDataArray::getString(
+                          context_, llvm::StringRef(decoded.data(), decoded.size()), /*AddNull=*/false));
+
+            auto* global = new llvm::GlobalVariable(*module_, dataConstant->getType(), /*isConstant=*/true,
+                                                      llvm::GlobalValue::PrivateLinkage, dataConstant, "kai.str");
+            global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+            llvm::Constant* length = llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), decoded.size());
+            return llvm::ConstantStruct::get(llvm::cast<llvm::StructType>(llvmType), {global, length});
+        }
+
         case ast::LiteralKind::Char:
             // Explicitly deferred - not part of this milestone's scope.
             return std::nullopt;
@@ -665,7 +760,24 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerPrintCall(const ast::CallExp
     llvm::Type* i64Type = llvm::Type::getInt64Ty(context_);
     llvm::Type* i32Type = llvm::Type::getInt32Ty(context_);
     llvm::Type* doubleType = llvm::Type::getDoubleTy(context_);
+    llvm::Type* ptrType = llvm::PointerType::get(context_, 0);
     llvm::Type* voidType = llvm::Type::getVoidTy(context_);
+
+    if (argumentType->isStr()) {
+        // Minimal String Literal Support milestone: Str is the one
+        // print-argument Type that is not a single scalar - extract the
+        // { ptr, i64 } descriptor's two fields (see lowerType()'s own
+        // comment) and call the length-explicit runtime entry point
+        // (kai_runtime.h's kai_print_str()) directly, never
+        // strlen/NUL-terminated printing, so an embedded \0 byte prints
+        // correctly instead of truncating (M8 spec #6).
+        llvm::Value* dataPointer = builder.CreateExtractValue(*argument, {0});
+        llvm::Value* byteLength = builder.CreateExtractValue(*argument, {1});
+        llvm::FunctionCallee printStrFn = module_->getOrInsertFunction(
+            "kai_print_str", llvm::FunctionType::get(voidType, {ptrType, i64Type}, /*isVarArg=*/false));
+        builder.CreateCall(printStrFn, {dataPointer, byteLength});
+        return std::optional<llvm::Value*>(nullptr);
+    }
 
     llvm::Value* runtimeArgument = nullptr;
     llvm::FunctionCallee runtimeFn;
@@ -687,9 +799,10 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerPrintCall(const ast::CallExp
         runtimeFn = module_->getOrInsertFunction("kai_print_f64",
                                                   llvm::FunctionType::get(voidType, {doubleType}, /*isVarArg=*/false));
     } else {
-        // Char/String/any other unsupported print argument Type -
-        // explicit failure, never a silently-skipped print (M6 spec §2:
-        // char/string printing is not required for this milestone).
+        // Char/any other unsupported print argument Type - explicit
+        // failure, never a silently-skipped print (M6 spec §2: char
+        // printing is not required for this milestone). Str is handled
+        // above, before this chain.
         return std::nullopt;
     }
 
