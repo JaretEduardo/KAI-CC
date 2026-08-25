@@ -564,14 +564,24 @@ described `str` as unable to exist as a standalone value, reachable only
 through `&str`; that description has been superseded by the definition in
 §15 below.
 
-**Current implementation status:** `str` already exists as a concrete
-internal semantic type, and string literals (`let x = "hello"`,
-`print("hello")`) already work end-to-end in the reference compiler. `str` is
-not yet a *spellable source-level type annotation* - `let x: str = "hello"`
-and `fn f(x: str)` are the proposed syntax this section describes, not yet
-implemented. `String` does not exist in the compiler at all yet; see
-"Current Implementation Status" in `CLAUDE.md` for the authoritative,
-up-to-date summary.
+**Current implementation status:**
+
+```text
+string literals              implemented
+inferred str locals          implemented
+print(str)                   implemented
+explicit `: str` annotation  not yet implemented
+str parameters/returns       not yet implemented
+String                       not implemented
+provenance/borrow checking   not implemented
+```
+
+`str` already exists as a concrete internal semantic type, and string
+literals (`let x = "hello"`, `print("hello")`) already work end-to-end in the
+reference compiler. `str` is not yet a *spellable source-level type
+annotation* - `let x: str = "hello"` and `fn f(x: str)` are the proposed
+syntax this section describes, not yet implemented. `String` does not exist
+in the compiler at all yet.
 
 ---
 

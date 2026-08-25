@@ -250,12 +250,20 @@ Initial output:
 A string literal's type is `str` - see TYPE_SYSTEM.md §13-17 for the full
 str/String design.
 
-Current implementation status: `let name = "KAI"` and `print(...)` shown
-above already work end-to-end in the reference compiler. The explicit `str`
-annotations and `str` parameters shown elsewhere in this document (§5, §6)
-are proposed syntax - `str` is not yet a spellable source-level type
-annotation. `String` is not implemented. See `CLAUDE.md`'s "Current
-implementation status" for the authoritative, up-to-date summary.
+Current implementation status:
+
+    string literals              implemented
+    inferred str locals          implemented
+    print(str)                   implemented
+    explicit `: str` annotation  not yet implemented
+    str parameters/returns       not yet implemented
+    String                       not implemented
+    provenance/borrow checking   not implemented
+
+`let name = "KAI"` and `print(...)` shown above already work end-to-end in
+the reference compiler. The explicit `str` annotations and `str` parameters
+shown elsewhere in this document (§5, §6) are proposed syntax - `str` is not
+yet a spellable source-level type annotation. `String` is not implemented.
 
 ---
 

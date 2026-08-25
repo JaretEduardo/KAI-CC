@@ -139,10 +139,11 @@ already is the non-owning, Copy view - it is not part of KAI 0.1 (see
 TYPE_SYSTEM.md §15).
 
 String literals already behave as immutable text of type `str` in the
-current compiler (see `CLAUDE.md`'s "Current implementation status" for the
-authoritative, up-to-date summary). Passing a `String` where `str` is
-expected is intended to be an implicit, non-allocating borrow once `String`
-exists.
+current compiler: `let x = "hello"`, inferred `str` locals, and `print(str)`
+are implemented; explicit `: str` annotations, `str` parameters/returns,
+`String`, and provenance/borrow checking are not yet implemented. Passing a
+`String` where `str` is expected is intended to be an implicit,
+non-allocating borrow once `String` exists.
 
 ---
 
