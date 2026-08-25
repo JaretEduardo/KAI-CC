@@ -8,16 +8,10 @@
 
 namespace kai::semantic {
 
-namespace {
-
-// A small, reusable JSON-string escape helper (M1 spec §19: do not
-// hand-concatenate unsafe/unescaped JSON strings). Escapes exactly what
-// the JSON spec requires: quote, backslash, and every control character
-// (0x00-0x1F) - either via a named two-character escape where JSON
-// defines one, or a `\u00XX` escape otherwise. Every other byte passes
-// through unchanged; this compiler's source text is not validated as
-// UTF-8 anywhere upstream, and passing bytes through unescaped is
-// exactly what valid UTF-8 JSON text requires anyway.
+// Public (declared in SemanticInspectionJson.hpp) - reused by
+// SemanticQueryJson.cpp (M2 spec §7). This compiler's source text is not
+// validated as UTF-8 anywhere upstream; passing non-ASCII bytes through
+// unescaped is exactly what valid UTF-8 JSON text requires anyway.
 void appendEscapedJsonString(std::string& out, std::string_view text) {
     out += '"';
     for (const unsigned char c : text) {
@@ -57,6 +51,7 @@ void appendEscapedJsonString(std::string& out, std::string_view text) {
     out += '"';
 }
 
+// Public - see this function's own declaration in SemanticInspectionJson.hpp.
 void appendPosition(std::string& out, const InspectionPosition& position) {
     out += "{\"line\":";
     out += std::to_string(position.line);
@@ -65,6 +60,7 @@ void appendPosition(std::string& out, const InspectionPosition& position) {
     out += '}';
 }
 
+// Public - see this function's own declaration in SemanticInspectionJson.hpp.
 void appendRange(std::string& out, const InspectionRange& range) {
     out += "{\"start\":";
     appendPosition(out, range.start);
@@ -72,6 +68,11 @@ void appendRange(std::string& out, const InspectionRange& range) {
     appendPosition(out, range.end);
     out += '}';
 }
+
+namespace {
+
+// Implementation details of appendSymbolJson() only - never needed
+// outside this file.
 
 void appendParameter(std::string& out, const SemanticParameterInfo& parameter) {
     out += "{\"name\":";
@@ -96,7 +97,11 @@ std::string_view symbolKindName(SemanticSymbolKind kind) {
     return "local";
 }
 
-void appendSymbol(std::string& out, const SemanticSymbolInfo& symbol) {
+} // namespace
+
+// Public - see this function's own declaration in SemanticInspectionJson.hpp
+// for why M2's definition/references JSON reuses this exact per-symbol shape.
+void appendSymbolJson(std::string& out, const SemanticSymbolInfo& symbol) {
     out += "{\"name\":";
     appendEscapedJsonString(out, symbol.name);
     out += ",\"kind\":";
@@ -126,8 +131,6 @@ void appendSymbol(std::string& out, const SemanticSymbolInfo& symbol) {
     out += '}';
 }
 
-} // namespace
-
 std::string writeSemanticInspectionJson(const SemanticInspectionResult& result) {
     std::string out;
     out += "{\"schemaVersion\":";
@@ -139,7 +142,7 @@ std::string writeSemanticInspectionJson(const SemanticInspectionResult& result) 
         if (i != 0) {
             out += ',';
         }
-        appendSymbol(out, result.symbols[i]);
+        appendSymbolJson(out, result.symbols[i]);
     }
     out += "]}";
     return out;

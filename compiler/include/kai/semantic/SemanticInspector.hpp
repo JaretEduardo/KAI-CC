@@ -33,6 +33,14 @@ struct InspectionRange {
     InspectionPosition end;
 };
 
+/// The ONE canonical SourceSpan -> InspectionRange conversion (M2 spec
+/// §7: reuse M1's "source line/column conversion" primitive rather than
+/// re-deriving it) - decodes both endpoints via
+/// `SourceManager::lineColumn()`. Shared by SemanticInspector and
+/// SemanticQuery so a span's tooling-facing position can never drift
+/// between the two.
+InspectionRange inspectionRangeOf(const SourceManager& sources, SourceSpan span);
+
 /// One function parameter's tooling summary, nested under its owning
 /// function's SemanticSymbolInfo::parameters (see SemanticSymbolInfo
 /// below for why a parameter ALSO gets its own top-level, flat
@@ -155,8 +163,6 @@ private:
                        SemanticInspectionResult& result) const;
     void collectStatement(const ast::Stmt& stmt, const std::string& enclosingFunction,
                            SemanticInspectionResult& result) const;
-
-    InspectionRange rangeOf(SourceSpan span) const;
 
     const SourceManager& sources_;
     const SemanticModel& model_;

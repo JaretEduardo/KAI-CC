@@ -4,9 +4,12 @@
 
 namespace kai::semantic {
 
-InspectionRange SemanticInspector::rangeOf(SourceSpan span) const {
-    const SourceManager::LineColumn start = sources_.lineColumn(span.begin());
-    const SourceManager::LineColumn end = sources_.lineColumn(span.end());
+// M2 spec §7: the SourceSpan -> InspectionRange conversion is now a
+// shared free function (declared in SemanticInspector.hpp) so
+// SemanticQuery.cpp reuses this exact logic rather than re-deriving it.
+InspectionRange inspectionRangeOf(const SourceManager& sources, SourceSpan span) {
+    const SourceManager::LineColumn start = sources.lineColumn(span.begin());
+    const SourceManager::LineColumn end = sources.lineColumn(span.end());
     return InspectionRange{
         InspectionPosition{start.line, start.column},
         InspectionPosition{end.line, end.column},
@@ -49,7 +52,7 @@ void SemanticInspector::collectFunction(const ast::FunctionDecl& fn, SemanticIns
     SemanticSymbolInfo functionInfo;
     functionInfo.name = name;
     functionInfo.kind = SemanticSymbolKind::Function;
-    functionInfo.definition = rangeOf(*fnSymbol.declaredAt);
+    functionInfo.definition = inspectionRangeOf(sources_, *fnSymbol.declaredAt);
     functionInfo.returnType = signature.returnType;
 
     // Parameter summary (nested, in declaration order) - see
@@ -67,7 +70,7 @@ void SemanticInspector::collectFunction(const ast::FunctionDecl& fn, SemanticIns
         assert(paramSymbol.declaredAt.has_value());
 
         const std::string paramName(sources_.text(param.name.span));
-        const InspectionRange paramDefinition = rangeOf(*paramSymbol.declaredAt);
+        const InspectionRange paramDefinition = inspectionRangeOf(sources_, *paramSymbol.declaredAt);
 
         functionInfo.parameters.push_back(SemanticParameterInfo{paramName, paramSymbol.type, paramDefinition});
 
@@ -119,7 +122,7 @@ void SemanticInspector::collectStatement(const ast::Stmt& stmt, const std::strin
             SemanticSymbolInfo local;
             local.name = std::string(sources_.text(varDecl.name().span));
             local.kind = SemanticSymbolKind::Local;
-            local.definition = rangeOf(*symbol.declaredAt);
+            local.definition = inspectionRangeOf(sources_, *symbol.declaredAt);
             local.type = symbol.type; // TypeChecker's own already-inferred-or-annotated type - never re-inferred here
             local.enclosingFunction = enclosingFunction;
             result.symbols.push_back(std::move(local));
@@ -161,7 +164,7 @@ void SemanticInspector::collectStatement(const ast::Stmt& stmt, const std::strin
             SemanticSymbolInfo local;
             local.name = std::string(sources_.text(forStmt.variable().span));
             local.kind = SemanticSymbolKind::Local;
-            local.definition = rangeOf(*symbol.declaredAt);
+            local.definition = inspectionRangeOf(sources_, *symbol.declaredAt);
             local.type = symbol.type;
             local.enclosingFunction = enclosingFunction;
             result.symbols.push_back(std::move(local));

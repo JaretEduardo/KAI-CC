@@ -71,6 +71,8 @@ add_library(kai_compiler STATIC
     compiler/src/semantic/SemanticTypeName.cpp
     compiler/src/semantic/SemanticInspector.cpp
     compiler/src/semantic/SemanticInspectionJson.cpp
+    compiler/src/semantic/SemanticQuery.cpp
+    compiler/src/semantic/SemanticQueryJson.cpp
     compiler/src/codegen/LLVMCodeGenerator.cpp
     compiler/src/codegen/LLVMExpressionLowering.cpp
     compiler/src/codegen/LLVMObjectEmitter.cpp
@@ -116,6 +118,7 @@ add_library(kaicc_cli STATIC
     compiler/src/cli/SemanticErrorFormat.cpp
     compiler/src/cli/CompileCommand.cpp
     compiler/src/cli/InspectCommand.cpp
+    compiler/src/cli/SemanticQueryCommand.cpp
 )
 
 target_include_directories(kaicc_cli

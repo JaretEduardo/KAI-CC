@@ -57,6 +57,11 @@ kai_add_test(semantic_control_flow_analyzer_tests semantic/ControlFlowAnalyzerTe
 # compiler-layer query with no CLI/JSON concerns of its own.
 kai_add_test(semantic_inspector_tests semantic/SemanticInspectorTests.cpp)
 
+# SEMANTIC INSPECTION MILESTONE 2: SemanticQuery tested independently of
+# the CLI, like every other kai_add_test() suite - it is a pure
+# compiler-layer query with no CLI/JSON concerns of its own.
+kai_add_test(semantic_query_tests semantic/SemanticQueryTests.cpp)
+
 kai_add_test(codegen_llvm_code_generator_tests codegen/LLVMCodeGeneratorTests.cpp)
 
 # LLVM CODEGEN MILESTONE 7: LLVMObjectEmitter tested independently of the
@@ -123,6 +128,31 @@ target_include_directories(inspect_command_tests
 kai_enable_warnings(inspect_command_tests)
 
 add_test(NAME inspect_command_tests COMMAND inspect_command_tests)
+
+# SEMANTIC INSPECTION MILESTONE 2: `kaicc definition|references <file>
+# --line N --column M --json` CLI/JSON integration tests. Links kaicc_cli
+# directly (for kai::cli::runSemanticQueryCommand - the SAME orchestration
+# `kaicc definition`/`kaicc references` themselves run) rather than
+# kai_add_test()'s default kai_compiler. Positive-integer --line/--column
+# argv validation lives in main.cpp itself (not in a reusable command
+# function) and is manually verified against the real built kaicc binary
+# instead - the same testing boundary M1's inspect_command_tests already
+# established for its own `--json`-required usage-error behavior.
+add_executable(semantic_query_command_tests cli/SemanticQueryCommandTests.cpp)
+
+target_link_libraries(semantic_query_command_tests
+    PRIVATE
+        kaicc_cli
+)
+
+target_include_directories(semantic_query_command_tests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+kai_enable_warnings(semantic_query_command_tests)
+
+add_test(NAME semantic_query_command_tests COMMAND semantic_query_command_tests)
 
 # kai_runtime-specific test: links kai_runtime directly (not kai_compiler)
 # to prove the tiny native runtime (LLVM CODEGEN MILESTONE 6) builds
