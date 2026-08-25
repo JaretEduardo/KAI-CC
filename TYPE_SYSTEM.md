@@ -187,7 +187,15 @@ f64
 
 bool
 char
+str
 ```
+
+`str` is included here even though it is not a primitive scalar: it is a
+small, fixed-size, non-owning text view (see §15) rather than an owned
+resource, so copying it is exactly as cheap and ownership-free as copying an
+integer. `String` (§14) is the future owned counterpart and is a `Move` type,
+not `Copy` - see §5 in MEMORY_MODEL.md for the general Copy/Move value
+categories this fits into.
 
 Example:
 
@@ -484,7 +492,7 @@ Functions that do not declare a return type implicitly return the unit type.
 Example:
 
 ```kai
-fn greet(name: &str) {
+fn greet(name: str) {
     print(name)
 }
 ```
@@ -492,7 +500,7 @@ fn greet(name: &str) {
 is conceptually equivalent to:
 
 ```kai
-fn greet(name: &str) -> () {
+fn greet(name: str) -> () {
     print(name)
 }
 ```
@@ -541,22 +549,37 @@ fn save() -> Result<(), IOError> {
 
 # 13. String Model
 
-KAI distinguishes between owned text and borrowed text.
-
-The initial model contains:
+KAI distinguishes between an owned, growable text buffer and a non-owning
+view over text:
 
 ```text
-String
-&str
+str       Copy, immutable, non-owning UTF-8 text view
+String    Move, owned, growable UTF-8 buffer (future - see §14)
 ```
 
-These concepts have different ownership semantics.
+`str` is a first-class, concrete, sized value type - not a reference, and not
+an unsized type the way some other languages' `str` is. It is the ordinary
+way to spell "a function reads text" (§15). Earlier drafts of this document
+described `str` as unable to exist as a standalone value, reachable only
+through `&str`; that description has been superseded by the definition in
+§15 below.
+
+**Current implementation status:** `str` already exists as a concrete
+internal semantic type, and string literals (`let x = "hello"`,
+`print("hello")`) already work end-to-end in the reference compiler. `str` is
+not yet a *spellable source-level type annotation* - `let x: str = "hello"`
+and `fn f(x: str)` are the proposed syntax this section describes, not yet
+implemented. `String` does not exist in the compiler at all yet; see
+"Current Implementation Status" in `CLAUDE.md` for the authoritative,
+up-to-date summary.
 
 ---
 
-# 14. String
+# 14. String (future)
 
-`String` represents owned UTF-8 text whose storage is controlled by the value.
+`String` represents owned, growable UTF-8 text whose storage is controlled by
+the value. `String` is **not implemented** by the current compiler - this
+section describes the intended future design.
 
 Example:
 
@@ -593,37 +616,32 @@ let second = first.clone()
 
 # 15. str
 
-`str` represents immutable UTF-8 text viewed through a borrow.
+`str` is the ordinary text-view type: an immutable, `Copy`, non-owning view
+over UTF-8 text, conceptually `{ ptr, len }`. Passing a `str` copies this
+small, fixed-size descriptor - never the text itself - and never allocates.
 
-Ordinary APIs should normally use:
-
-```text
-&str
-```
-
-when they only need to read text.
-
-Example:
+Ordinary APIs read text with bare `str`, not a reference:
 
 ```kai
-fn greet(name: &str) {
+fn greet(name: str) {
     print(name)
 }
 ```
 
 This means:
 
-* the function does not own the string
-* the function cannot modify the string
-* ownership remains with the caller
+* `greet` does not own the text `name` views
+* `greet` cannot modify the text
+* ownership of the underlying bytes remains wherever it already was (static
+  program storage for a literal; eventually a `String` or another owner)
 
-A standalone dynamically owned `str` value does not exist.
+A future `&str` (a reference to a `str` descriptor) is unnecessary for
+ordinary text borrowing, since `str` already is the non-owning, `Copy` view -
+it is not part of KAI 0.1. Whether a general reference to a `str` value is
+ever useful once KAI has a general reference/borrow design remains an open
+question (DESIGN_QUESTIONS.md).
 
-Owned dynamic text uses:
-
-```text
-String
-```
+Owned, growable text uses `String` (§14, future).
 
 ---
 
@@ -635,7 +653,7 @@ A string literal:
 "Hello"
 ```
 
-represents immutable program data.
+represents immutable program data, and has the concrete type `str`.
 
 Example:
 
@@ -643,50 +661,42 @@ Example:
 let message = "Hello"
 ```
 
-The compiler may internally store string literals in read-only static program memory.
-
-At the language level, a string literal behaves as immutable borrowed text.
-
-Conceptually:
-
-```text
-message: &str
-```
-
-No heap allocation should be required merely to use a string literal.
+The compiler stores string literals in read-only static program memory. A
+`str` obtained from a literal is valid for the entire program's lifetime -
+it never needs a validity check, since static program storage is never
+destroyed. This already holds in the current implementation, not only in the
+proposed design: no heap allocation is required merely to use a string
+literal today.
 
 ---
 
-# 17. Borrowing String
+# 17. Coercing String to str (future)
 
-An owned `String` may be borrowed as immutable text.
+(Depends on `String`, §14 - not yet implemented.)
 
-Example:
+An owned `String` is intended to be viewable as `str` for reading, as an
+implicit, non-allocating, ownership-preserving coercion:
 
 ```kai
 let name = String("KAI")
 
-greet(&name)
+greet(name)
 ```
 
 where:
 
 ```kai
-fn greet(name: &str) {
+fn greet(name: str) {
     print(name)
 }
 ```
 
-The exact coercion rules between:
-
-```text
-&String
-&str
-```
-
-will be finalized alongside the standard library.
-
-Such conversions must not transfer ownership or allocate memory.
+The exact coercion mechanism will be finalized alongside the standard
+library. Such a conversion must not transfer ownership or allocate memory,
+and a `str` obtained this way remains valid only as long as the `String` it
+was borrowed from is not moved or mutated - see MEMORY_MODEL.md §25 for the
+provenance categories governing when such a view may safely be returned or
+stored.
 
 ---
 
@@ -1190,7 +1200,7 @@ enum Result<T, E> {
 Example:
 
 ```kai
-fn load(path: &str) -> Result<String, IOError> {
+fn load(path: str) -> Result<String, IOError> {
     ...
 }
 ```
@@ -1509,7 +1519,7 @@ KAI will eventually require a type representing computations that never return n
 Possible examples:
 
 ```kai
-fn fatal(message: &str) -> Never {
+fn fatal(message: str) -> Never {
     panic(message)
 }
 ```
@@ -1675,7 +1685,7 @@ expected:
     i32
 
 found:
-    &str
+    str
 ```
 
 When possible, diagnostics should also identify whether an explicit conversion exists.
@@ -1796,7 +1806,7 @@ Initial language capabilities:
 Then incrementally:
 
 ```text
-String / &str
+str, String (future)
 arrays
 slices
 Buffer<T>
@@ -1970,10 +1980,10 @@ Recoverable errors
     -> Result<T, E>
 
 Owned text
-    -> String
+    -> String (future)
 
-Borrowed text
-    -> &str
+Text view (read-only)
+    -> str
 
 Fixed array
     -> [T; N]
@@ -1998,8 +2008,7 @@ User-defined structs
 The following decisions remain intentionally unresolved:
 
 * exact implementation of `String`
-* exact `String` to `&str` coercion rules
-* whether string literals have a dedicated internal type
+* exact `String` to `str` coercion rules
 * whether `usize` and `isize` enter KAI 0.1
 * exact runtime overflow implementation
 * syntax for explicit wrapping arithmetic

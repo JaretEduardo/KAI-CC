@@ -10,10 +10,17 @@
 ## Types
 
 - What is the default integer type?
-- What exactly is `str`?
-- Are strings immutable?
+- Are strings immutable? (`str` itself is always immutable; whether/how
+  `String` exposes in-place mutation is still open)
 - How are arrays represented?
 - Do we distinguish arrays from slices?
+- How should multi-input `str`-view return provenance be disambiguated, if
+  ever (e.g. `fn choose(a: str, b: str) -> str`)? See MEMORY_MODEL.md §25.
+- Will `str` views ever be storable (struct fields, collections)?
+- Exact `str` slicing rules (safe, UTF-8-boundary-preserving vs. raw/unchecked)?
+- Will KAI ever support mutable in-place string views?
+- Exact relationship between `str`/`String` and a future generic
+  `Buffer<T>`/slice-of-T view design?
 
 ## Memory
 
@@ -22,6 +29,9 @@
 - Are primitive values copied?
 - How are strings passed?
 - How are arrays passed?
+- Will explicit provenance/lifetime syntax ever be needed for cases local
+  inference cannot resolve? (Reserved future possibility, not planned for
+  KAI 0.1 - see MEMORY_MODEL.md §13.)
 
 ## Functions
 
@@ -60,3 +70,4 @@
 ✓ Floating literals default to f64.
 ✓ Implicit conversions are limited.
 ✓ 0..n uses an exclusive upper bound.
+✓ `str` is a Copy, non-owning, immutable UTF-8 text view (not a reference; bare `str`, not `&str`, for ordinary text parameters/locals). `String` is the future owned, growable, Move UTF-8 buffer. See TYPE_SYSTEM.md §13-17 and MEMORY_MODEL.md §25.

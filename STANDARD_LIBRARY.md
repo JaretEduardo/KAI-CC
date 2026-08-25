@@ -90,11 +90,14 @@ The prelude must remain intentionally small.
 
 ---
 
-## 4. String
+## 4. String (future)
 
-Owned UTF-8 text uses:
+Owned, growable UTF-8 text uses:
 
     String
+
+`String` is not implemented by the current compiler - this section describes
+the intended future design (see TYPE_SYSTEM.md §14).
 
 Example:
 
@@ -118,19 +121,28 @@ String uses Move semantics.
 
 ---
 
-## 5. Borrowed Strings
+## 5. Text Views (str)
 
-Read-only borrowed text uses:
+Read-only text uses the ordinary `str` type - a `Copy`, non-owning view, not
+a reference:
 
-    &str
+    str
 
 Example:
 
-    fn greet(name: &str) {
+    fn greet(name: str) {
         print(name)
     }
 
-String literals should behave as immutable borrowed text where practical.
+A future `&str` is unnecessary for ordinary text borrowing, since `str`
+already is the non-owning, Copy view - it is not part of KAI 0.1 (see
+TYPE_SYSTEM.md §15).
+
+String literals already behave as immutable text of type `str` in the
+current compiler (see `CLAUDE.md`'s "Current implementation status" for the
+authoritative, up-to-date summary). Passing a `String` where `str` is
+expected is intended to be an implicit, non-allocating borrow once `String`
+exists.
 
 ---
 
@@ -457,7 +469,7 @@ Standard library APIs should have:
 
 Example:
 
-    pub fn open(path: &str) -> Result<File, FileError>
+    pub fn open(path: str) -> Result<File, FileError>
 
 A coding agent can determine from the signature:
 
@@ -484,7 +496,7 @@ Output:
         File.open
 
     parameters:
-        path: &str
+        path: str
 
     returns:
         Result<File, FileError>
@@ -502,7 +514,7 @@ The first usable KAI implementation only requires:
     panic
     assert
 
-    String / &str
+    str, String (future)
     Buffer<T>
 
     Option<T>

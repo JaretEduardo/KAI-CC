@@ -301,7 +301,7 @@ Examples:
 Examples:
 
     &User
-    &str
+    &i32
     &mut Buffer
 
 ---

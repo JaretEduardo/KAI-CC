@@ -215,7 +215,7 @@ Example:
         i32
 
     found:
-        &str
+        str
 
 JSON diagnostics are planned but do not block the first native executable.
 
