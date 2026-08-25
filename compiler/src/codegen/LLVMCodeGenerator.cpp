@@ -168,20 +168,24 @@ bool LLVMCodeGenerator::defineFunction(const ast::FunctionDecl& fn, const Semant
         ++paramIndex;
     }
 
-    if (!generateBlock(fn.body(), *function, builder, model)) {
+    const StatementResult bodyResult = generateBlock(fn.body(), *function, builder, model);
+    if (bodyResult == StatementResult::Failed) {
         return false;
     }
 
-    // Function fallthrough policy (M4 spec §22/§23): `builder`'s current
-    // block is read fresh here - never assumed to still be `entry` - a
-    // short-circuit expression in the last statement may have left it
-    // somewhere else entirely.
-    llvm::BasicBlock* currentBlock = builder.GetInsertBlock();
-    if (currentBlock->getTerminator() == nullptr) {
+    // Function fallthrough policy (M4 spec §22/§23, extended M5 §16): if
+    // the body's last-lowered statement returned StatementResult::
+    // Terminated (e.g. an if/else whose every arm returns), every path
+    // already ends in an explicit `return` - nothing more to do. Only
+    // FallsThrough needs this policy at all, and `builder`'s current block
+    // is read fresh here - never assumed to still be `entry` - since a
+    // short-circuit expression or nested if/while in the last statement
+    // may have left it somewhere else entirely.
+    if (bodyResult == StatementResult::FallsThrough) {
         if (function->getReturnType()->isVoidTy()) {
             // Not inventing KAI semantics: a Unit function is already
-            // allowed to fall through by frontend semantics (M5 spec) -
-            // LLVM merely requires every defined block to terminate.
+            // allowed to fall through by frontend semantics - LLVM merely
+            // requires every defined block to terminate.
             builder.CreateRetVoid();
         } else {
             // Unreachable after a successful ControlFlowAnalyzer for a
@@ -194,60 +198,221 @@ bool LLVMCodeGenerator::defineFunction(const ast::FunctionDecl& fn, const Semant
     return true;
 }
 
-bool LLVMCodeGenerator::generateBlock(const ast::BlockStmt& block, llvm::Function& function,
-                                       llvm::IRBuilder<>& builder, const SemanticModel& model) {
+LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateBlock(const ast::BlockStmt& block,
+                                                                     llvm::Function& function,
+                                                                     llvm::IRBuilder<>& builder,
+                                                                     const SemanticModel& model) {
+    StatementResult result = StatementResult::FallsThrough;
     for (const auto& stmt : block.statements()) {
-        if (builder.GetInsertBlock()->getTerminator() != nullptr) {
-            // A prior ReturnStmt already terminated this block. The
-            // frontend still fully checked every statement that follows
-            // (M5's "no unreachable-code analysis" stance) - this pass
-            // simply stops LOWERING them here rather than append
-            // instructions after an LLVM terminator, which would be
-            // invalid IR.
+        result = generateStatement(*stmt, function, builder, model);
+        if (result == StatementResult::Failed) {
+            return StatementResult::Failed;
+        }
+        if (result == StatementResult::Terminated) {
+            // This path already ended in an LLVM terminator (a ReturnStmt,
+            // or an if/else whose every arm returns). The frontend still
+            // fully checked every statement that follows (ControlFlow-
+            // Analyzer's own "no unreachable-code analysis" stance) - this
+            // pass simply stops LOWERING them here rather than append
+            // instructions after a terminator, which would be invalid IR.
             break;
         }
-        if (!generateStatement(*stmt, function, builder, model)) {
-            return false;
-        }
     }
-    return true;
+    return result;
 }
 
 // No `default:` case: StmtKind is fully implemented today, mirroring
 // TypeChecker.cpp's/ControlFlowAnalyzer.cpp's own exhaustive switch over
-// it. If/While/For are explicit failures - statement-level control flow
-// does not exist yet (M5).
-bool LLVMCodeGenerator::generateStatement(const ast::Stmt& stmt, llvm::Function& function, llvm::IRBuilder<>& builder,
-                                           const SemanticModel& model) {
+// it. ForStmt is an explicit failure - iteration lowering does not exist
+// yet (M6+).
+LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateStatement(const ast::Stmt& stmt,
+                                                                         llvm::Function& function,
+                                                                         llvm::IRBuilder<>& builder,
+                                                                         const SemanticModel& model) {
     switch (stmt.kind()) {
         case ast::StmtKind::Block:
             // Recurses into the SAME BasicBlock/builder - no new block is
-            // created, since statement-level control flow does not exist
-            // yet. Note: KAI 0.1's current grammar has no standalone
-            // `{ ... }` statement production (parseStatement() only
-            // reaches parseBlock() via fn/if/while/for) - this case
-            // exists for StmtKind switch-exhaustiveness and forward
-            // compatibility, not because it is reachable from real
-            // source text today.
+            // created merely for lexical scoping. Note: KAI 0.1's current
+            // grammar has no standalone `{ ... }` statement production
+            // (parseStatement() only reaches parseBlock() via
+            // fn/if/while/for) - this case exists for StmtKind switch-
+            // exhaustiveness and forward compatibility, not because it is
+            // reachable from real source text today.
             return generateBlock(static_cast<const ast::BlockStmt&>(stmt), function, builder, model);
 
         case ast::StmtKind::VarDecl:
-            return generateVarDeclStmt(static_cast<const ast::VarDeclStmt&>(stmt), function, builder, model);
+            return generateVarDeclStmt(static_cast<const ast::VarDeclStmt&>(stmt), function, builder, model)
+                       ? StatementResult::FallsThrough
+                       : StatementResult::Failed;
 
         case ast::StmtKind::Expr:
-            return generateExprStmt(static_cast<const ast::ExprStmt&>(stmt), builder, model);
+            return generateExprStmt(static_cast<const ast::ExprStmt&>(stmt), builder, model)
+                       ? StatementResult::FallsThrough
+                       : StatementResult::Failed;
 
         case ast::StmtKind::Return:
-            return generateReturnStmt(static_cast<const ast::ReturnStmt&>(stmt), builder, model);
+            return generateReturnStmt(static_cast<const ast::ReturnStmt&>(stmt), builder, model)
+                       ? StatementResult::Terminated
+                       : StatementResult::Failed;
 
         case ast::StmtKind::If:
+            return generateIfStmt(static_cast<const ast::IfStmt&>(stmt), 0, function, builder, model);
+
         case ast::StmtKind::While:
+            return generateWhileStmt(static_cast<const ast::WhileStmt&>(stmt), function, builder, model);
+
         case ast::StmtKind::For:
-            // Statement-level control flow remains deferred to M5 - never
-            // silently skipped.
-            return false;
+            // Iteration lowering remains deferred to M6+ - never silently
+            // skipped.
+            return StatementResult::Failed;
     }
-    return false;
+    return StatementResult::Failed;
+}
+
+LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateIfStmt(const ast::IfStmt& stmt, std::size_t branchIndex,
+                                                                      llvm::Function& function,
+                                                                      llvm::IRBuilder<>& builder,
+                                                                      const SemanticModel& model) {
+    const ast::IfBranch& branch = stmt.branches()[branchIndex];
+    const bool isLastBranch = branchIndex + 1 == stmt.branches().size();
+    // An `else if` (branchIndex + 1 exists) or a final `else` both count
+    // as "this branch has an else" - the only difference is what lowers
+    // into that else block (see below).
+    const bool hasElse = !isLastBranch || stmt.elseClause().has_value();
+
+    const std::optional<llvm::Value*> condition = lowerExpr(*branch.condition, model, builder);
+    if (!condition.has_value() || *condition == nullptr) {
+        return StatementResult::Failed;
+    }
+    if (!(*condition)->getType()->isIntegerTy(1)) {
+        // Defensive only: the frontend already guarantees a Bool
+        // condition. Never truthiness/integer reinterpretation.
+        return StatementResult::Failed;
+    }
+    // lowerExpr() may have moved `builder` to a different block (a
+    // short-circuit `&&`/`||` condition creates its own blocks - see
+    // lowerLogicalExpr()) - the CondBr below must originate from wherever
+    // it ACTUALLY left `builder`, never the block current before lowering
+    // the condition.
+    llvm::BasicBlock* conditionEndBlock = builder.GetInsertBlock();
+
+    llvm::BasicBlock* thenBlock = llvm::BasicBlock::Create(context_, "if.then", &function);
+    llvm::BasicBlock* elseBlock = hasElse ? llvm::BasicBlock::Create(context_, "if.else", &function) : nullptr;
+    // Created eagerly and erased later if it turns out to be unreachable
+    // (both arms terminate) - simpler than deferring block creation until
+    // that's known, and an unreferenced, un-inserted-into block costs
+    // nothing to discard.
+    llvm::BasicBlock* mergeBlock = llvm::BasicBlock::Create(context_, "if.end", &function);
+
+    builder.SetInsertPoint(conditionEndBlock);
+    builder.CreateCondBr(*condition, thenBlock, hasElse ? elseBlock : mergeBlock);
+
+    builder.SetInsertPoint(thenBlock);
+    const StatementResult thenResult = generateBlock(*branch.body, function, builder, model);
+    if (thenResult == StatementResult::Failed) {
+        return StatementResult::Failed;
+    }
+    const bool thenFallsThrough = thenResult == StatementResult::FallsThrough;
+    if (thenFallsThrough) {
+        // Branch from the THEN body's ACTUAL final block (generateBlock()
+        // itself may have left `builder` somewhere other than `thenBlock`
+        // - a nested if/while, or a short-circuit expression, moves it).
+        builder.CreateBr(mergeBlock);
+    }
+
+    // No `else` at all: the false-condition edge (built above) already
+    // targets `mergeBlock` directly, so it is unconditionally reachable
+    // regardless of what the `then` arm does - a plain `if` with no
+    // `else` therefore always falls through (M5 spec §5), matching
+    // ControlFlowAnalyzer::analyzeIfStmt()'s own "no else -> FallsThrough,
+    // unconditionally" rule.
+    bool elseFallsThrough = !hasElse;
+    if (hasElse) {
+        builder.SetInsertPoint(elseBlock);
+        // `else if` lowers AS a nested if (recursing into the next
+        // branch) - `else` lowers its block directly. Both are just
+        // "what populates the else block" and compose identically with
+        // the merge/termination logic below; no source-spelling special
+        // case exists anywhere in this method.
+        const StatementResult elseResult = isLastBranch
+                                                ? generateBlock(*stmt.elseClause()->body, function, builder, model)
+                                                : generateIfStmt(stmt, branchIndex + 1, function, builder, model);
+        if (elseResult == StatementResult::Failed) {
+            return StatementResult::Failed;
+        }
+        elseFallsThrough = elseResult == StatementResult::FallsThrough;
+        if (elseFallsThrough) {
+            // Same reasoning as the `then` branch above: branch from
+            // whichever block the else-side lowering ACTUALLY left
+            // current, not `elseBlock` itself.
+            builder.CreateBr(mergeBlock);
+        }
+    }
+
+    if (!thenFallsThrough && !elseFallsThrough) {
+        // Both arms terminated (M5 spec §4/§6 case D): `mergeBlock` has no
+        // predecessors and is therefore unreachable - erase it rather
+        // than leave an empty, unterminated block for the verifier to
+        // reject, or fabricate an instruction merely to satisfy it.
+        // Propagate "no continuation on this path" to the caller exactly
+        // like ControlFlowAnalyzer::FlowResult::AlwaysReturns.
+        mergeBlock->eraseFromParent();
+        return StatementResult::Terminated;
+    }
+
+    builder.SetInsertPoint(mergeBlock);
+    return StatementResult::FallsThrough;
+}
+
+LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateWhileStmt(const ast::WhileStmt& stmt,
+                                                                         llvm::Function& function,
+                                                                         llvm::IRBuilder<>& builder,
+                                                                         const SemanticModel& model) {
+    llvm::BasicBlock* conditionBlock = llvm::BasicBlock::Create(context_, "while.cond", &function);
+    llvm::BasicBlock* bodyBlock = llvm::BasicBlock::Create(context_, "while.body", &function);
+    llvm::BasicBlock* exitBlock = llvm::BasicBlock::Create(context_, "while.end", &function);
+
+    // Enter the loop from wherever `builder` currently is (the
+    // preheader) - never assumed to be the function entry block.
+    builder.CreateBr(conditionBlock);
+
+    builder.SetInsertPoint(conditionBlock);
+    const std::optional<llvm::Value*> condition = lowerExpr(stmt.condition(), model, builder);
+    if (!condition.has_value() || *condition == nullptr) {
+        return StatementResult::Failed;
+    }
+    if (!(*condition)->getType()->isIntegerTy(1)) {
+        return StatementResult::Failed;
+    }
+    // Same reasoning as generateIfStmt(): a short-circuit `&&`/`||`
+    // condition may have moved `builder` away from `conditionBlock` - the
+    // CondBr must originate from wherever it ACTUALLY ended up.
+    llvm::BasicBlock* conditionEndBlock = builder.GetInsertBlock();
+    builder.SetInsertPoint(conditionEndBlock);
+    builder.CreateCondBr(*condition, bodyBlock, exitBlock);
+
+    builder.SetInsertPoint(bodyBlock);
+    const StatementResult bodyResult = generateBlock(stmt.body(), function, builder, model);
+    if (bodyResult == StatementResult::Failed) {
+        return StatementResult::Failed;
+    }
+    if (bodyResult == StatementResult::FallsThrough) {
+        // Back-edge from the body's ACTUAL final block, never assumed to
+        // still be `bodyBlock` itself.
+        builder.CreateBr(conditionBlock);
+    }
+    // Terminated: the body always returns on this path - no back-edge, no
+    // instruction after the terminator it already ended in.
+
+    builder.SetInsertPoint(exitBlock);
+    // A `while` loop can never be soundly proven to execute even once
+    // without constant-condition reasoning (which neither the frontend's
+    // ControlFlowAnalyzer nor this backend performs) - the condition's
+    // false edge always targets `exitBlock` directly, so WhileStmt as a
+    // whole ALWAYS falls through, regardless of the body's own result.
+    // Mirrors ControlFlowAnalyzer::analyzeStatement()'s own documented
+    // "conservatively FallsThrough, unconditionally" stance for While.
+    return StatementResult::FallsThrough;
 }
 
 bool LLVMCodeGenerator::generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llvm::Function& function,

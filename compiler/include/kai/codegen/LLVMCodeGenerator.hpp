@@ -23,10 +23,11 @@
 
 namespace kai::codegen {
 
-/// LLVM CODEGEN MILESTONE 1+2+3+4: Minimal LLVM Module + Function +
+/// LLVM CODEGEN MILESTONE 1+2+3+4+5: Minimal LLVM Module + Function +
 /// Integer Return (M1), Primitive Expression Lowering (M2), Local
 /// Variables + Identifier Loads + Assignment (M3), Parameters + Function
-/// Calls + Recursion + FINAL short-circuit &&/|| (M4).
+/// Calls + Recursion + FINAL short-circuit &&/|| (M4), If/Else/Else-If +
+/// While statement-level control flow (M5, ForStmt still deferred).
 ///
 /// LLVMCodeGenerator lowers an already-fully-checked AST into an
 /// llvm::Module:
@@ -71,11 +72,12 @@ namespace kai::codegen {
 ///   models - bound to entry-block storage exactly like an ordinary local
 ///   (see defineFunction()), so IdentifierExpr treats Local and Parameter
 ///   identically once bound.
-/// - a flat sequence of VarDeclStmt / ExprStmt / ReturnStmt / (trivially)
-///   nested BlockStmt statements, processed in source order - see
-///   generateBlock()/generateStatement(). IfStmt/WhileStmt/ForStmt remain
-///   explicit failures until statement-level control-flow lowering exists
-///   (M5).
+/// - a sequence of VarDeclStmt / ExprStmt / ReturnStmt / (trivially)
+///   nested BlockStmt / IfStmt (with any number of `else if` branches and
+///   an optional final `else`) / WhileStmt statements, in source order -
+///   see generateBlock()/generateStatement()/generateIfStmt()/
+///   generateWhileStmt(). ForStmt remains an explicit failure until
+///   iteration lowering exists (M6+).
 /// - expressions: integer/float/bool literals; parens; unary Negate/Not;
 ///   binary arithmetic/comparison/equality operators; SHORT-CIRCUIT `&&`/
 ///   `||` (see lowerLogicalExpr() - this is now final KAI language
@@ -84,25 +86,29 @@ namespace kai::codegen {
 ///   resolved, mutable Local; and direct (or transparently-parenthesized)
 ///   user-function calls, including recursive and forward calls - see
 ///   lowerExpr()/lowerCallExpr() for the exact per-ExprKind rules.
-/// - a function whose body's final reachable block has no terminator
-///   after lowering emits `ret void` if its return type is Unit (this is
+/// - a function whose body lowers to StatementResult::FallsThrough (its
+///   final reachable block has no terminator - see generateBlock()'s own
+///   StatementResult) emits `ret void` if its return type is Unit (this is
 ///   NOT inventing KAI semantics: Unit functions are already allowed to
 ///   fall through by frontend semantics - LLVM merely requires every
 ///   defined block to terminate); for a concrete non-Unit return type
 ///   this is instead a generation failure, since ControlFlowAnalyzer
 ///   already guarantees such a function's body always returns - reaching
 ///   this path means lowering itself failed to preserve that guarantee,
-///   never a case to synthesize a fabricated return value for.
+///   never a case to synthesize a fabricated return value for. A body
+///   that lowers to StatementResult::Terminated (every path already ends
+///   in an explicit `return`, possibly via if/else) needs no further
+///   action here at all.
 ///
 /// Any other function shape, statement kind, or expression kind causes
 /// generate() to fail explicitly (return false) rather than emit partial
 /// or malformed LLVM IR - see generate()'s own documentation. Builtin
-/// calls, non-direct/first-class-function-value calls, method calls,
-/// control flow (if/while/for), Range, a Unit-typed local variable (LLVM
-/// has no storable void value - see generateVarDeclStmt()), and every
-/// non-primitive-scalar semantic Type (references, arrays, str/String,
-/// structs, enums, generics, Result, Option, ...) are explicitly deferred
-/// to later LLVM codegen milestones (M5+).
+/// calls, non-direct/first-class-function-value calls, method calls, `for`
+/// iteration, Range, a Unit-typed local variable (LLVM has no storable
+/// void value - see generateVarDeclStmt()), and every non-primitive-scalar
+/// semantic Type (references, arrays, str/String, structs, enums,
+/// generics, Result, Option, ...) are explicitly deferred to later LLVM
+/// codegen milestones (M6+).
 class LLVMCodeGenerator {
 public:
     /// `sources` must outlive every generate() call - it is the only way
@@ -134,6 +140,35 @@ public:
     const llvm::Module& module() const;
 
 private:
+    /// A lowered statement's effect on the CURRENT LLVM BasicBlock, needed
+    /// starting M5 (IfStmt/WhileStmt) because "lowered successfully" is no
+    /// longer just one outcome (bool was sufficient through M4, where only
+    /// a ReturnStmt could ever terminate a block):
+    ///
+    ///   Failed:      codegen failed outright.
+    ///   FallsThrough: lowered successfully, and the block `builder` now
+    ///                 points at is a real, unterminated block execution
+    ///                 may continue into (the common case; also every
+    ///                 WhileStmt, which may run zero iterations - see
+    ///                 generateWhileStmt()).
+    ///   Terminated:   lowered successfully, but every path out of this
+    ///                 statement already ended in an LLVM terminator (e.g.
+    ///                 both arms of an if/else return) - there is no
+    ///                 continuation on this path, and the caller must not
+    ///                 append anything after it (mirrors
+    ///                 ControlFlowAnalyzer::FlowResult::AlwaysReturns -
+    ///                 see ControlFlowAnalyzer.cpp's own analyzeIfStmt()).
+    ///
+    /// Deliberately NOT a general CFG-framework type - just the smallest
+    /// enum that lets generateBlock()/defineFunction() distinguish "keep
+    /// lowering into this block" from "this path is done" without
+    /// fabricating an unreachable merge block to force a bool answer.
+    enum class StatementResult {
+        Failed,
+        FallsThrough,
+        Terminated,
+    };
+
     bool declareTopLevelDecl(const ast::Decl& decl, const semantic::SemanticModel& model);
     bool defineTopLevelDecl(const ast::Decl& decl, const semantic::SemanticModel& model);
 
@@ -157,24 +192,82 @@ private:
     bool defineFunction(const ast::FunctionDecl& fn, const semantic::SemanticModel& model);
 
     /// Lowers a flat statement sequence into the CURRENT LLVM BasicBlock
-    /// (`builder`'s insertion point, re-read fresh on every iteration -
-    /// never cached, since a short-circuit `&&`/`||` expression lowered
-    /// by an earlier statement in this same sequence may have moved it) -
-    /// a nested BlockStmt recurses into the SAME block/builder rather
-    /// than creating a new one, since M4 still has no STATEMENT-level
-    /// control flow to justify one (M5). Stops (without failing) the
-    /// moment the current block already has a terminator - i.e. a prior
-    /// ReturnStmt already ran - so no instruction is ever appended after
-    /// a terminator; this is not an unreachable-code diagnostic, just
-    /// where this pass chooses to stop lowering a flat block.
-    bool generateBlock(const ast::BlockStmt& block, llvm::Function& function, llvm::IRBuilder<>& builder,
-                        const semantic::SemanticModel& model);
+    /// (`builder`'s insertion point, re-read fresh via generateStatement()
+    /// on every iteration - never cached, since a short-circuit `&&`/`||`
+    /// expression, or a nested IfStmt/WhileStmt, lowered by an earlier
+    /// statement in this same sequence may have moved it) - a nested
+    /// BlockStmt recurses into the SAME block/builder rather than creating
+    /// a new one (KAI has no lexical-scope-only `{ }` statement - see
+    /// StmtKind::Block's own case in generateStatement()). Stops lowering
+    /// (without failing) the moment a statement returns
+    /// StatementResult::Terminated - e.g. a ReturnStmt, or an if/else
+    /// whose every arm returns - so no instruction is ever appended after
+    /// an LLVM terminator; this is not an unreachable-code diagnostic
+    /// (TypeChecker/ControlFlowAnalyzer already fully checked any
+    /// statements that follow), just where this pass stops lowering a
+    /// flat block. Returns whatever StatementResult the last-lowered
+    /// statement produced (FallsThrough if `block` is empty).
+    StatementResult generateBlock(const ast::BlockStmt& block, llvm::Function& function, llvm::IRBuilder<>& builder,
+                                   const semantic::SemanticModel& model);
 
-    /// Exhaustive over ast::StmtKind. If/While/For are explicit failures
-    /// (statement-level control flow is not yet lowerable) - never
-    /// silently skipped.
-    bool generateStatement(const ast::Stmt& stmt, llvm::Function& function, llvm::IRBuilder<>& builder,
-                            const semantic::SemanticModel& model);
+    /// Exhaustive over ast::StmtKind. ForStmt remains an explicit failure
+    /// (statement-level iteration is not yet lowerable - M6+) - never
+    /// silently skipped. VarDecl/Expr/Return wrap their existing bool
+    /// result into a StatementResult (VarDecl/Expr -> FallsThrough on
+    /// success, Return -> Terminated on success, either -> Failed on
+    /// failure); If/While compute their own StatementResult directly (see
+    /// generateIfStmt()/generateWhileStmt()).
+    StatementResult generateStatement(const ast::Stmt& stmt, llvm::Function& function, llvm::IRBuilder<>& builder,
+                                       const semantic::SemanticModel& model);
+
+    /// IfStmt lowering (M5), covering plain `if`, `if`/`else`, and
+    /// `else if` chains uniformly: `branches()[0]` is the initial `if`;
+    /// recurses into `branches()[index + 1]` for each `else if` (lowered
+    /// AS a nested if inside what would otherwise be the plain `else`
+    /// block - see this method's .cpp comment - never special-cased on
+    /// source spelling), and finally into `elseClause()->body()` (an
+    /// ordinary block) once `index` reaches the last branch. Condition is
+    /// lowered via lowerExpr() and its ACTUAL post-lowering insertion
+    /// block is what the CondBr is built from (a short-circuit `&&`/`||`
+    /// condition may itself have created blocks - see lowerLogicalExpr()
+    /// and this class's own header comment on builder insertion points).
+    /// A branch with no `else` at all always creates a reachable merge
+    /// block (the false-condition edge targets it directly), so a plain
+    /// `if` with no `else` always yields StatementResult::FallsThrough. An
+    /// `if`/`else` where both arms yield StatementResult::Terminated
+    /// creates NO merge block (erased immediately after being created,
+    /// rather than leaving it unterminated for the verifier to reject, or
+    /// fabricating a bogus instruction to satisfy it - M5 spec §4) and
+    /// this method returns StatementResult::Terminated instead, exactly
+    /// mirroring ControlFlowAnalyzer::analyzeIfStmt()'s own
+    /// FlowResult::AlwaysReturns rule (never re-implemented here as a
+    /// second independent completeness analysis - this is backend CFG
+    /// construction arriving at the same, already-frontend-guaranteed,
+    /// conclusion). Fails explicitly for a missing/non-real/non-i1
+    /// condition value.
+    StatementResult generateIfStmt(const ast::IfStmt& stmt, std::size_t branchIndex, llvm::Function& function,
+                                    llvm::IRBuilder<>& builder, const semantic::SemanticModel& model);
+
+    /// WhileStmt lowering (M5): condition/body/exit blocks per this
+    /// class's own header comment. The condition is lowered fresh on
+    /// every iteration (its own dedicated `while.cond` block, entered via
+    /// an unconditional branch from wherever `builder` starts, and via a
+    /// back-edge from the body when the body falls through) - never
+    /// hoisted or assumed loop-invariant. The CondBr is built from
+    /// `lowerExpr(condition)`'s ACTUAL post-lowering insertion block, same
+    /// reasoning as generateIfStmt(). If the body yields
+    /// StatementResult::Terminated (e.g. an unconditional `return` inside
+    /// the loop body), no back-edge is emitted - but the loop's own exit
+    /// block is still reachable (the condition's false edge always
+    /// targets it directly), matching ControlFlowAnalyzer's own
+    /// deliberately-conservative stance that a `while` loop can never be
+    /// proven to execute even once without constant-condition reasoning
+    /// (which neither the frontend nor this backend performs) - so
+    /// WhileStmt as a whole ALWAYS returns StatementResult::FallsThrough,
+    /// never Terminated, regardless of the body. Fails explicitly for a
+    /// missing/non-real/non-i1 condition value.
+    StatementResult generateWhileStmt(const ast::WhileStmt& stmt, llvm::Function& function, llvm::IRBuilder<>& builder,
+                                       const semantic::SemanticModel& model);
 
     /// Allocates entry-block storage for a `let`/`mut` local, lowers its
     /// initializer, and records `SymbolId -> AllocaInst*` in `locals_`.

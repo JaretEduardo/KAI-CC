@@ -1044,19 +1044,11 @@ void testUnitLocalFailsCleanly() {
     KAI_CHECK(!result.generationSucceeded);
 }
 
-void testIfStmtStillFailsCleanly() {
-    SourceManager sm;
-    LLVMCodeGenerator codegen(sm);
-    Generated result =
-        compileToLLVM(sm, codegen, "fn main() -> i64 {\n    if true {\n        return 1\n    }\n    return 2\n}");
-
-    KAI_CHECK(result.parsed.has_value());
-    if (!result.parsed) {
-        return;
-    }
-    KAI_CHECK(result.model.errors().empty());
-    KAI_CHECK(!result.generationSucceeded);
-}
+// `testIfStmtStillFailsCleanly` (M3-era: asserted `if` unconditionally
+// failed codegen) is REMOVED, not retargeted - its exact premise is
+// superseded by M5, which makes IfStmt lowering succeed. See the IF/
+// CONDITION/WHILE/NESTING/RECURSION/SHADOWING test groups below for its
+// M5 replacement coverage.
 
 // --- M4: Parameters + Function Calls + Recursion + FINAL &&/|| ---
 
@@ -1552,6 +1544,683 @@ void testParametersLocalsAssignmentCallIntegration() {
     KAI_CHECK(result.generationSucceeded);
 }
 
+// --- M5: If/Else/Else-If + While statement-level control flow ---
+
+// IF
+
+// `if` with no `else`: the false-condition edge always reaches the merge
+// block directly, so the statement always falls through (M5 spec §5).
+void testIfNoElseFallsThrough() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn abs_like(x: i64) -> i64 {\n"
+                                      "    if x < 0 {\n"
+                                      "        return -x\n"
+                                      "    }\n"
+                                      "\n"
+                                      "    return x\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* fn = module.getFunction("abs_like");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    int condBrCount = 0;
+    int retCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        if (const auto* br = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator())) {
+            condBrCount += br->isConditional() ? 1 : 0;
+        }
+        retCount += llvm::isa<llvm::ReturnInst>(block.getTerminator()) ? 1 : 0;
+    }
+    KAI_CHECK(condBrCount == 1);
+    KAI_CHECK(retCount == 2); // return -x, and the trailing return x
+}
+
+// `if`/`else` where both arms merely assign (fall through): resolved
+// entirely through existing alloca/load/store, no PHI for `x` itself.
+void testIfElseBothFallThroughViaAssignments() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn choose(cond: bool) -> i64 {\n"
+                                      "    mut x: i64 = 0\n"
+                                      "\n"
+                                      "    if cond {\n"
+                                      "        x = 10\n"
+                                      "    } else {\n"
+                                      "        x = 20\n"
+                                      "    }\n"
+                                      "\n"
+                                      "    return x\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* fn = module.getFunction("choose");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    int phiCount = 0;
+    int storeCount = 0;
+    int retCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            phiCount += llvm::isa<llvm::PHINode>(inst) ? 1 : 0;
+            storeCount += llvm::isa<llvm::StoreInst>(inst) ? 1 : 0;
+        }
+        retCount += llvm::isa<llvm::ReturnInst>(block.getTerminator()) ? 1 : 0;
+    }
+    KAI_CHECK(phiCount == 0); // no SSA merging for `x` - alloca/load/store only
+    KAI_CHECK(storeCount == 4); // param cond binding, mut x = 0, x = 10, x = 20
+    KAI_CHECK(retCount == 1); // a single trailing `return x`, reached via the merge block
+
+    std::string ir;
+    llvm::raw_string_ostream irStream(ir);
+    module.print(irStream, nullptr);
+    std::cerr << "--- LLVMCodeGeneratorTests: representative if/else IR ---\n" << ir;
+}
+
+// then returns, false path falls through past the if (same shape as
+// testIfNoElseFallsThrough, kept separate since it is one of M5's
+// explicitly-required end-state programs and directly names §16's
+// "return through if with no else" requirement).
+void testIfThenReturnsFalseContinues() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn f(cond: bool) -> i64 {\n    if cond {\n        return 1\n    }\n\n    return 2\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+}
+
+// Both if/else branches return: no merge block should exist at all (M5
+// spec §4/§6 case D) - and the function needs no extra trailing `return`.
+void testIfElseBothBranchesReturn() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn choose(cond: bool) -> i64 {\n    if cond {\n        return 1\n    } else {\n        return 2\n    }\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* fn = module.getFunction("choose");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    // Exactly `entry`, `if.then`, `if.else` - no `if.end` merge block
+    // survives, since both arms terminate and it would be unreachable.
+    std::size_t blockCount = 0;
+    int retCount = 0;
+    bool anyBlockUnterminated = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        ++blockCount;
+        if (block.getTerminator() == nullptr) {
+            anyBlockUnterminated = true;
+        }
+        retCount += llvm::isa<llvm::ReturnInst>(block.getTerminator()) ? 1 : 0;
+    }
+    KAI_CHECK(blockCount == 3);
+    KAI_CHECK(!anyBlockUnterminated);
+    KAI_CHECK(retCount == 2);
+}
+
+// `if a { } else if b { } else { }` - else-if lowered as a nested if
+// inside what would otherwise be the plain else block.
+void testElseIfChain() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn classify(a: bool, b: bool) -> i64 {\n"
+                                      "    if a {\n"
+                                      "        return 1\n"
+                                      "    } else if b {\n"
+                                      "        return 2\n"
+                                      "    } else {\n"
+                                      "        return 3\n"
+                                      "    }\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* fn = module.getFunction("classify");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    int condBrCount = 0;
+    int retCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        if (const auto* br = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator())) {
+            condBrCount += br->isConditional() ? 1 : 0;
+        }
+        retCount += llvm::isa<llvm::ReturnInst>(block.getTerminator()) ? 1 : 0;
+    }
+    // Every branch (all three) terminates, so no merge block anywhere in
+    // the chain survives.
+    KAI_CHECK(condBrCount == 2); // `a`'s test, and the nested `b`'s test
+    KAI_CHECK(retCount == 3);
+}
+
+// CONDITION
+
+void testIfConditionParameterBool() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn f(flag: bool) -> i64 {\n    if flag {\n        return 1\n    }\n\n    return 0\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+}
+
+void testIfConditionComparison() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn f(x: i64) -> i64 {\n    if x < 0 {\n        return -1\n    }\n\n    return 1\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+}
+
+// M5 spec §9: a short-circuit condition inside an `if` must branch from
+// the ACTUAL block lowerExpr(condition) leaves current, not the block
+// that existed before lowering it.
+void testIfConditionShortCircuitCall() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn rhs() -> bool {\n    return true\n}\n"
+                                      "fn test(a: bool) -> i64 {\n"
+                                      "    if a && rhs() {\n        return 1\n    }\n\n    return 0\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* fn = module.getFunction("test");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    int phiCount = 0;
+    int callCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            phiCount += llvm::isa<llvm::PHINode>(inst) ? 1 : 0;
+            callCount += llvm::isa<llvm::CallInst>(inst) ? 1 : 0;
+        }
+    }
+    KAI_CHECK(phiCount == 1); // the `&&` PHI, feeding the if's own CondBr
+    KAI_CHECK(callCount == 1); // rhs() called at most once
+}
+
+// WHILE
+
+void testWhileMutableCounterLoop() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() -> i64 {\n"
+                                      "    mut x: i64 = 0\n"
+                                      "\n"
+                                      "    while x < 10 {\n"
+                                      "        x = x + 1\n"
+                                      "    }\n"
+                                      "\n"
+                                      "    return x\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* fn = module.getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    // Structural CFG check (M5 spec §19): a condition block ending in a
+    // conditional branch with two distinct successors, a body block
+    // ending in an unconditional branch BACK to the condition block (the
+    // back-edge), and an exit block. Never relies on exact block names,
+    // since LLVM may rename/uniquify them.
+    const llvm::BasicBlock* conditionBlock = nullptr;
+    for (const llvm::BasicBlock& block : *fn) {
+        if (const auto* br = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator())) {
+            if (br->isConditional()) {
+                conditionBlock = &block;
+                break;
+            }
+        }
+    }
+    KAI_CHECK(conditionBlock != nullptr);
+    if (conditionBlock == nullptr) {
+        return;
+    }
+
+    bool sawBackEdge = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        if (const auto* br = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator())) {
+            if (!br->isConditional() && br->getSuccessor(0) == conditionBlock) {
+                sawBackEdge = true;
+            }
+        }
+    }
+    KAI_CHECK(sawBackEdge);
+
+    int condBrCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        if (const auto* br = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator())) {
+            condBrCount += br->isConditional() ? 1 : 0;
+        }
+    }
+    KAI_CHECK(condBrCount == 1);
+
+    std::string ir;
+    llvm::raw_string_ostream irStream(ir);
+    module.print(irStream, nullptr);
+    std::cerr << "--- LLVMCodeGeneratorTests: representative while IR ---\n" << ir;
+}
+
+void testWhileBodyAssignment() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn f() -> i64 {\n"
+                                      "    mut x: i64 = 0\n"
+                                      "    mut y: i64 = 0\n"
+                                      "\n"
+                                      "    while x < 5 {\n"
+                                      "        y = y + x\n"
+                                      "        x = x + 1\n"
+                                      "    }\n"
+                                      "\n"
+                                      "    return y\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// The body always returns (M5 spec §12): no `ret` followed by a
+// back-edge `br` in the same block - but the loop's own exit block must
+// still be reachable, since the condition may be false on entry.
+void testWhileBodyReturn() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn f(x: i64) -> i64 {\n"
+                                      "    while x < 10 {\n        return 42\n    }\n\n    return 0\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* fn = module.getFunction("f");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    // Every block's terminator is either a return or a (unconditional or
+    // conditional) branch - never an instruction after a `ret`.
+    for (const llvm::BasicBlock& block : *fn) {
+        const llvm::Instruction* terminator = block.getTerminator();
+        KAI_CHECK(terminator != nullptr);
+        KAI_CHECK(&block.back() == terminator);
+    }
+
+    int retCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        retCount += llvm::isa<llvm::ReturnInst>(block.getTerminator()) ? 1 : 0;
+    }
+    KAI_CHECK(retCount == 2); // `return 42` inside the loop, `return 0` after it
+}
+
+// M5 spec §11: a short-circuit while condition must branch from the
+// ACTUAL block lowerExpr(condition) leaves current.
+void testWhileShortCircuitCondition() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn predicate() -> bool {\n    return true\n}\n"
+                                      "fn f(a: bool) -> i64 {\n"
+                                      "    mut x: i64 = 0\n"
+                                      "\n"
+                                      "    while a && predicate() {\n"
+                                      "        x = x + 1\n"
+                                      "    }\n"
+                                      "\n"
+                                      "    return x\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* fn = codegen.module().getFunction("f");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    int phiCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            phiCount += llvm::isa<llvm::PHINode>(inst) ? 1 : 0;
+        }
+    }
+    KAI_CHECK(phiCount == 1);
+}
+
+// NESTING
+
+void testIfInsideWhile() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn f() -> i64 {\n"
+                                      "    mut x: i64 = 0\n"
+                                      "\n"
+                                      "    while x < 10 {\n"
+                                      "        if x == 5 {\n"
+                                      "            x = x + 2\n"
+                                      "        } else {\n"
+                                      "            x = x + 1\n"
+                                      "        }\n"
+                                      "    }\n"
+                                      "\n"
+                                      "    return x\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+void testWhileInsideIf() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn f(outer: bool) -> i64 {\n"
+                                      "    mut x: i64 = 0\n"
+                                      "\n"
+                                      "    if outer {\n"
+                                      "        while x < 10 {\n"
+                                      "            x = x + 1\n"
+                                      "        }\n"
+                                      "    }\n"
+                                      "\n"
+                                      "    return x\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// RECURSION
+
+// M5 spec §17: factorial(n) as a standalone recursive-integration proof.
+void testFactorialIntegration() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn factorial(n: i64) -> i64 {\n"
+                                      "    if n <= 1 {\n"
+                                      "        return 1\n"
+                                      "    } else {\n"
+                                      "        return n * factorial(n - 1)\n"
+                                      "    }\n"
+                                      "}\n"
+                                      "fn main() -> i64 {\n    return factorial(5)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* factorial = module.getFunction("factorial");
+    KAI_CHECK(factorial != nullptr);
+    if (factorial == nullptr) {
+        return;
+    }
+
+    int condBrCount = 0;
+    int retCount = 0;
+    bool sawRecursiveCall = false;
+    for (const llvm::BasicBlock& block : *factorial) {
+        if (const auto* br = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator())) {
+            condBrCount += br->isConditional() ? 1 : 0;
+        }
+        retCount += llvm::isa<llvm::ReturnInst>(block.getTerminator()) ? 1 : 0;
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                sawRecursiveCall |= call->getCalledFunction() == factorial;
+            }
+        }
+    }
+    KAI_CHECK(condBrCount == 1);
+    KAI_CHECK(retCount == 2); // `return 1`, and `return n * factorial(n - 1)`
+    KAI_CHECK(sawRecursiveCall);
+
+    std::string ir;
+    llvm::raw_string_ostream irStream(ir);
+    module.print(irStream, nullptr);
+    std::cerr << "--- LLVMCodeGeneratorTests: representative factorial IR ---\n" << ir;
+}
+
+// M5 spec §18: optional fibonacci integration, included since it was
+// trivial once factorial worked.
+void testFibonacciIntegration() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn fib(n: i64) -> i64 {\n"
+                                      "    if n <= 1 {\n        return n\n    }\n"
+                                      "\n    return fib(n - 1) + fib(n - 2)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// SHADOWING
+
+// M5 spec §15: a branch-scoped `let x` must get its own SymbolId/alloca,
+// distinct from the outer `x` - the final `return x` must load the OUTER
+// slot, never the inner one (which is never observed outside its branch).
+void testShadowingInsideIfBranch() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn f(cond: bool) -> i64 {\n"
+                                      "    let x: i64 = 10\n"
+                                      "\n"
+                                      "    if cond {\n"
+                                      "        let x: i64 = 20\n"
+                                      "        let y: i64 = x\n"
+                                      "    }\n"
+                                      "\n"
+                                      "    return x\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    std::string verifierErrors;
+    llvm::raw_string_ostream errorStream(verifierErrors);
+    KAI_CHECK(!llvm::verifyModule(module, &errorStream));
+
+    const llvm::Function* fn = module.getFunction("f");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    // Four distinct allocas: the `cond` parameter, outer `x`, inner `x`,
+    // inner `y` - never one `x` slot reused across the two lexical
+    // scopes.
+    int allocaCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            allocaCount += llvm::isa<llvm::AllocaInst>(inst) ? 1 : 0;
+        }
+    }
+    KAI_CHECK(allocaCount == 4);
+
+    // Identify the outer `x` slot structurally, by its OWN initializer
+    // (`let x: i64 = 10`) rather than by position - createEntryBlockAlloca()
+    // always inserts at the entry block's current start (M4/M5 comment on
+    // createEntryBlockAlloca()), so the inner branch's `let`s (lowered
+    // later, but still targeting the entry block) end up positioned
+    // BEFORE the outer `x` alloca, not after it.
+    const llvm::AllocaInst* outerX = nullptr;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+                if (const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(store->getValueOperand())) {
+                    if (constant->getSExtValue() == 10) {
+                        outerX = llvm::dyn_cast<llvm::AllocaInst>(store->getPointerOperand());
+                    }
+                }
+            }
+        }
+    }
+    KAI_CHECK(outerX != nullptr);
+
+    // The final `return x` loads from the outer slot, never the inner one
+    // (which is only ever observed, if at all, inside its own branch).
+    for (const llvm::BasicBlock& block : *fn) {
+        if (const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator())) {
+            if (const auto* load = llvm::dyn_cast_or_null<llvm::LoadInst>(ret->getReturnValue())) {
+                KAI_CHECK(load->getPointerOperand() == outerX);
+            }
+        }
+    }
+}
+
+// FAILURE
+
+void testForStmtStillFailsCleanly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn f() -> i64 {\n    mut x: i64 = 0\n    for i in 0..10 {\n        x = i\n    }\n\n    return x\n}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+}
+
 } // namespace
 
 int main() {
@@ -1604,7 +2273,6 @@ int main() {
     testSignedComparisonWithLocal();
 
     testUnitLocalFailsCleanly();
-    testIfStmtStillFailsCleanly();
 
     testOneParameterLoaded();
     testTwoParametersArithmetic();
@@ -1633,6 +2301,31 @@ int main() {
     testBuiltinCallStillFailsCleanly();
 
     testParametersLocalsAssignmentCallIntegration();
+
+    testIfNoElseFallsThrough();
+    testIfElseBothFallThroughViaAssignments();
+    testIfThenReturnsFalseContinues();
+    testIfElseBothBranchesReturn();
+    testElseIfChain();
+
+    testIfConditionParameterBool();
+    testIfConditionComparison();
+    testIfConditionShortCircuitCall();
+
+    testWhileMutableCounterLoop();
+    testWhileBodyAssignment();
+    testWhileBodyReturn();
+    testWhileShortCircuitCondition();
+
+    testIfInsideWhile();
+    testWhileInsideIf();
+
+    testFactorialIntegration();
+    testFibonacciIntegration();
+
+    testShadowingInsideIfBranch();
+
+    testForStmtStillFailsCleanly();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }
