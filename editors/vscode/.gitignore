@@ -1,0 +1,19 @@
+# Compiled extension JS (built via `npm run compile`) - source of truth is src/*.ts.
+out/
+
+# npm dependencies.
+node_modules/
+
+# Staged compiler/runtime artifacts (see scripts/stage-compiler.mjs) - copied from
+# the CMake build tree, never hand-authored, never committed. Note: the root
+# .gitignore already ignores `*.a` anywhere in the repo (covers lib/kai/libkai_runtime.a);
+# `bin/` is listed explicitly here since the staged `kaicc` binary has no extension
+# for a repo-wide *.exe/*.out-style pattern to catch.
+/bin/
+/lib/
+
+# Packaged VSIX output.
+*.vsix
+
+# TypeScript incremental build info.
+*.tsbuildinfo

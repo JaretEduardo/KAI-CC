@@ -1,0 +1,28 @@
+# Controls what @vscode/vsce packages into the .vsix - INDEPENDENT of
+# .gitignore (vsce is known to also consult .gitignore by default, which
+# would otherwise accidentally exclude the staged bin/lib artifacts below -
+# the explicit "!" negations make sure those ship regardless).
+
+# TypeScript source - only the compiled out/*.js is needed at runtime.
+src/**
+tsconfig.json
+*.tsbuildinfo
+
+# Dev-only packaging/test scripts and their own tests - not used by the
+# installed extension itself.
+scripts/**
+out/test/**
+
+# npm tooling/metadata not needed inside the installed extension.
+node_modules/**
+package-lock.json
+.gitignore
+.vscodeignore
+
+# Source maps (debugging convenience only - keep the package lean).
+out/**/*.map
+
+# Never exclude the staged native compiler/runtime - these MUST ship
+# despite being .gitignore'd (they are build artifacts, not source).
+!bin/**
+!lib/**
