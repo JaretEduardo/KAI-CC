@@ -2,6 +2,7 @@
 
 #include "kai/ast/SourceFile.hpp"
 #include "kai/cli/AstPrinter.hpp"
+#include "kai/cli/SemanticErrorFormat.hpp"
 #include "kai/codegen/LLVMCodeGenerator.hpp"
 #include "kai/codegen/LLVMObjectEmitter.hpp"
 #include "kai/codegen/NativeLinker.hpp"
@@ -14,59 +15,10 @@
 #include <llvm/IR/Module.h>
 
 #include <optional>
-#include <sstream>
 #include <string>
 #include <system_error>
 
 namespace kai::cli {
-
-namespace {
-
-// Minimal, single-line SemanticError formatting - CLI-only text, the same
-// "temporary, not a Diagnostic" spirit as AstPrinter.cpp's own
-// formatParseError() (M7 spec §18: use existing diagnostics
-// infrastructure as-is, do not redesign it here). No message string
-// exists on SemanticError itself (see SemanticModel.hpp's own class
-// comment) - this only renders the structured kind/location it does
-// carry.
-const char* semanticErrorKindName(semantic::SemanticErrorKind kind) {
-    switch (kind) {
-        case semantic::SemanticErrorKind::DuplicateSymbol:
-            return "duplicate symbol";
-        case semantic::SemanticErrorKind::UnknownIdentifier:
-            return "unknown identifier";
-        case semantic::SemanticErrorKind::UnknownType:
-            return "unknown type";
-        case semantic::SemanticErrorKind::TypeMismatch:
-            return "type mismatch";
-        case semantic::SemanticErrorKind::LiteralOutOfRange:
-            return "literal out of range";
-        case semantic::SemanticErrorKind::InvalidUnaryOperand:
-            return "invalid unary operand";
-        case semantic::SemanticErrorKind::InvalidBinaryOperands:
-            return "invalid binary operands";
-        case semantic::SemanticErrorKind::InvalidArgumentCount:
-            return "invalid argument count";
-        case semantic::SemanticErrorKind::NotCallable:
-            return "not callable";
-        case semantic::SemanticErrorKind::InvalidAssignmentTarget:
-            return "invalid assignment target";
-        case semantic::SemanticErrorKind::AssignmentToImmutableBinding:
-            return "assignment to immutable binding";
-        case semantic::SemanticErrorKind::MissingReturn:
-            return "missing return";
-    }
-    return "semantic error";
-}
-
-std::string formatSemanticError(const SourceManager& sources, const semantic::SemanticError& error) {
-    const SourceManager::LineColumn where = sources.lineColumn(error.primarySpan.begin());
-    std::ostringstream message;
-    message << "kaicc: error at " << where.line << ':' << where.column << ": " << semanticErrorKindName(error.kind);
-    return message.str();
-}
-
-} // namespace
 
 int runCompileCommand(SourceManager& sources, const std::filesystem::path& inputPath,
                        const std::filesystem::path& outputPath, std::ostream& err) {
