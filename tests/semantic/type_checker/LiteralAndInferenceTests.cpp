@@ -576,9 +576,16 @@ void testUnknownIdentifierCascade() {
     }
 }
 
-// --- String deferral ---
+// --- String literal typing (Minimal String Literal Support milestone) ---
+//
+// A string literal's Type is now the concrete Type::str() rather than
+// Type::unresolved() - these two tests were originally named/asserted
+// around the old "deferral" behavior; both are updated here (not left
+// silently passing against a claim that is no longer true) rather than
+// deleted, since the underlying scenarios (unannotated inference,
+// annotated-mismatch policy) remain exactly as relevant as before.
 
-void testStringLiteralUnannotatedDeferral() {
+void testStringLiteralUnannotatedInfersStr() {
     SourceManager sm;
     Checked result = analyzeAndCheck(sm, "fn f() {\n    let x = \"hello\"\n}");
     KAI_CHECK(result.parsed.has_value());
@@ -592,37 +599,51 @@ void testStringLiteralUnannotatedDeferral() {
     const auto xId = result.model.declarationSymbol(declX.name());
     KAI_CHECK(xId.has_value());
     if (xId) {
-        KAI_CHECK(result.model.symbol(*xId).type.isUnresolved());
+        KAI_CHECK(result.model.symbol(*xId).type == Type::str());
     }
 
     const auto stringType = result.model.typeOf(declX.initializer());
     KAI_CHECK(stringType.has_value());
     if (stringType) {
-        KAI_CHECK(stringType->isUnresolved());
+        KAI_CHECK(*stringType == Type::str());
     }
 }
 
-void testStringLiteralAnnotatedDeferralNoMismatch() {
+void testStringLiteralAnnotatedI32MismatchIsDetected() {
     SourceManager sm;
     Checked result = analyzeAndCheck(sm, "fn f() {\n    let x: i32 = \"hello\"\n}");
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
         return;
     }
-    KAI_CHECK(result.model.errors().empty());
+
+    // Str is now a concrete, non-Unresolved Type, so checkVarDecl()'s
+    // ordinary initializer-vs-annotation comparison correctly fires a
+    // real TypeMismatch here - no string-specific check was added; this
+    // is the same general mechanism every other concrete-type mismatch
+    // already goes through.
+    KAI_CHECK(result.model.errors().size() == 1);
+    if (result.model.errors().size() == 1) {
+        const kai::semantic::SemanticError& error = result.model.errors()[0];
+        KAI_CHECK(error.kind == SemanticErrorKind::TypeMismatch);
+        KAI_CHECK(error.expectedType.has_value() && *error.expectedType == Type::i32());
+        KAI_CHECK(error.actualType.has_value() && *error.actualType == Type::str());
+    }
 
     const auto& fn = static_cast<const FunctionDecl&>(*result.parsed->declarations()[0]);
     const auto& declX = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
     const auto xId = result.model.declarationSymbol(declX.name());
     KAI_CHECK(xId.has_value());
     if (xId) {
+        // checkVarDecl(): the Symbol's declared type is never changed by
+        // a mismatched initializer - it stays exactly as declared.
         KAI_CHECK(result.model.symbol(*xId).type == Type::i32());
     }
 
     const auto stringType = result.model.typeOf(declX.initializer());
     KAI_CHECK(stringType.has_value());
     if (stringType) {
-        KAI_CHECK(stringType->isUnresolved());
+        KAI_CHECK(*stringType == Type::str());
     }
 }
 
@@ -799,8 +820,8 @@ int main() {
     testUnannotatedIdentifierInference();
     testUnknownIdentifierCascade();
 
-    testStringLiteralUnannotatedDeferral();
-    testStringLiteralAnnotatedDeferralNoMismatch();
+    testStringLiteralUnannotatedInfersStr();
+    testStringLiteralAnnotatedI32MismatchIsDetected();
 
     testDeferredMemberCalleeCallExprStillRecordsUnresolved();
     testDeferredOuterDoesNotPropagateChildError();

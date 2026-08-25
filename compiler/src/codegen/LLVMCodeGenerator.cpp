@@ -8,6 +8,7 @@
 
 #include "kai/codegen/LLVMCodeGenerator.hpp"
 
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
@@ -542,6 +543,16 @@ llvm::Type* LLVMCodeGenerator::lowerType(Type type) {
             return llvm::Type::getDoubleTy(context_);
         case TypeKind::Bool:
             return llvm::Type::getInt1Ty(context_);
+        case TypeKind::Str:
+            // Minimal String Literal Support milestone: an immutable
+            // { ptr, i64 } pointer+length descriptor (see Type::str()'s
+            // own comment) - opaque LLVM 22 pointer to the byte data
+            // (never element-typed), plus the decoded byte length. This
+            // is a plain LLVM struct value: alloca/store/load through the
+            // existing generic local-variable machinery works unmodified
+            // once this case exists (see generateVarDeclStmt()).
+            return llvm::StructType::get(context_,
+                                          {llvm::PointerType::get(context_, 0), llvm::Type::getInt64Ty(context_)});
         case TypeKind::Unresolved:
         case TypeKind::Error:
         case TypeKind::Char:

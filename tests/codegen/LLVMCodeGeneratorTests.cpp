@@ -2476,11 +2476,15 @@ void testMultiplePrintsReuseRuntimeDeclaration() {
     KAI_CHECK(callCount == 3);
 }
 
-// A string argument: KAI's Type vocabulary has no TypeKind::String yet
-// (see Type.hpp), so a string literal's own semantic Type is
-// Type::unresolved() - lowerPrintCall()'s own argument-Type check rejects
-// it explicitly (M6 spec §9), never reaching the runtime-ABI dispatch.
-void testPrintUnsupportedStringArgumentFailsCleanly() {
+// Minimal String Literal Support milestone: KAI's Type vocabulary now has
+// TypeKind::Str (see Type.hpp), so a string literal's own semantic Type
+// is the concrete Type::str() - lowerPrintCall() now recognizes it and
+// dispatches to kai_print_str() instead of failing. Focused codegen
+// coverage for the Str descriptor/global/runtime-call shape itself lives
+// in tests/codegen/StringLiteralCodegenTests.cpp; this one test is kept
+// here (renamed, not deleted) since it is the direct correction of what
+// this exact scenario used to assert before this milestone.
+void testPrintStringArgumentSucceeds() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
     Generated result = compileToLLVM(sm, codegen, "fn main() {\n    print(\"hi\")\n}");
@@ -2490,7 +2494,12 @@ void testPrintUnsupportedStringArgumentFailsCleanly() {
         return;
     }
     KAI_CHECK(result.model.errors().empty());
-    KAI_CHECK(!result.generationSucceeded);
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    KAI_CHECK(codegen.module().getFunction("kai_print_str") != nullptr);
 }
 
 // A user-declared `print` must shadow the builtin entirely (M6 spec §7) -
@@ -2653,7 +2662,7 @@ int main() {
     testPrintFloatLiteral();
     testPrintF32VariableExtendsToDouble();
     testMultiplePrintsReuseRuntimeDeclaration();
-    testPrintUnsupportedStringArgumentFailsCleanly();
+    testPrintStringArgumentSucceeds();
     testUserDefinedPrintShadowsBuiltin();
 
     return kai::test::failureCount == 0 ? 0 : 1;

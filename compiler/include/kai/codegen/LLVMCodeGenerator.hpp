@@ -119,9 +119,14 @@ namespace kai::codegen {
 /// function-value calls, method calls, `for` iteration, Range, a
 /// Unit-typed local variable (LLVM has no storable void value - see
 /// generateVarDeclStmt()), and every non-primitive-scalar semantic Type
-/// (references, arrays, str/String, structs, enums, generics, Result,
-/// Option, ...) are explicitly deferred to later LLVM codegen milestones
-/// (M7+).
+/// (references, arrays, structs, enums, generics, Result, Option, ...)
+/// are explicitly deferred to later LLVM codegen milestones (M7+). As of
+/// the Minimal String Literal Support milestone, Str (see Type::str()'s
+/// own comment) is ALSO a lowerable scalar-like Type - a string literal,
+/// an inferred `let`/`mut` local backed by one, and `print(x)` where `x`
+/// is Str all lower successfully - but this is deliberately narrow: `str`
+/// remains unspellable as a source type annotation, and `String`/`&str`/
+/// concatenation/formatting/string methods remain entirely unmodeled.
 class LLVMCodeGenerator {
 public:
     /// `sources` must outlive every generate() call - it is the only way
@@ -472,7 +477,8 @@ private:
     ///   unsigned integer -> zero-extend to i64,  call `kai_print_u64`
     ///   Bool              -> zero-extend to i32,  call `kai_print_bool`
     ///   F32/F64           -> extend to double,    call `kai_print_f64`
-    ///   anything else (Char, String, ...)         -> explicit failure
+    ///   Str               -> extract {ptr,len},   call `kai_print_str`
+    ///   anything else (Char, ...)                 -> explicit failure
     ///
     /// Each runtime function is declared into the CURRENT module via
     /// `module_->getOrInsertFunction()` - this both creates the

@@ -38,6 +38,12 @@ std::string_view typeName(Type type) noexcept {
             return "bool";
         case TypeKind::Char:
             return "char";
+        case TypeKind::Str:
+            // Minimal String Literal Support milestone: renders as the
+            // internal Str type's canonical name, not a claim that a
+            // spellable `str` annotation exists yet (see Type::str()'s
+            // own comment).
+            return "str";
     }
     // Unreachable while TypeKind's enumerators match the switch above
     // exactly - kept only so -Wreturn-type doesn't warn.

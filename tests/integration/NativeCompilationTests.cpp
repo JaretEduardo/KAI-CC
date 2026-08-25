@@ -279,6 +279,102 @@ void testNativeLinkerProducesRunnableExecutable() {
     std::filesystem::remove(outputPath, ignored);
 }
 
+// MINIMAL STRING LITERAL SUPPORT (M8 spec §21): the exact required user-
+// visible capability - print("Hello, KAI!") end-to-end.
+void testPrintStringLiteralEndToEnd() {
+    const CompileAndRunResult result =
+        compileAndRun("kai_e2e_string_hello.kai", "fn main() {\n    print(\"Hello, KAI!\")\n}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText == "Hello, KAI!\n");
+}
+
+// M8 REQUIRED consistency case (spec §1): once a string literal has a
+// concrete Type, `let message = "..."` then `print(message)` must also
+// work end-to-end through the real alloca/store/load local machinery -
+// no string-specific storage path was added.
+void testPrintInferredStringLocalEndToEnd() {
+    const std::string source = "fn main() {\n    let message = \"Welcome to KAI\"\n    print(message)\n}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_string_local.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText == "Welcome to KAI\n");
+}
+
+// M8 REQUIRED (spec §15): escape decoding - \n \" \\ \t all produce their
+// actual decoded bytes in the printed output, never the source backslash
+// sequence. Raw string literals (R"KAI(...)KAI") are used here so the
+// KAI source text's own backslashes appear literally, with no C++-layer
+// double-escaping to keep track of.
+void testStringEscapeDecodingEndToEnd() {
+    const std::string source = R"KAI(fn main() {
+    print("a\nb")
+    print("quote: \"")
+    print("slash: \\")
+    print("tab:\t")
+}
+)KAI";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_string_escapes.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+
+    const std::string expected = std::string("a\nb\n") + "quote: \"\n" + "slash: \\\n" + "tab:\t\n";
+    KAI_CHECK(result.stdoutText == expected);
+}
+
+// M8 REQUIRED regression (spec §14): print("a\0b") must produce the EXACT
+// bytes 61 00 62 0a, never truncated at the embedded NUL. This comparison
+// is byte-exact, never a C-string/strlen-based one: `stdoutText` comes
+// from runAndCaptureStdout() reading the captured file through
+// std::ifstream/std::ostringstream, so an embedded '\0' survives intact
+// in the std::string, and `== std::string("a\0b\n", 4)` compares all 4
+// bytes rather than stopping at the '\0'.
+void testEmbeddedNulExactBytesEndToEnd() {
+    const std::string source = R"KAI(fn main() {
+    print("a\0b")
+}
+)KAI";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_string_nul.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText.size() == 4);
+    KAI_CHECK(result.stdoutText == std::string("a\0b\n", 4));
+}
+
+// M8 REQUIRED (spec §16): a non-ASCII UTF-8 literal prints its exact
+// bytes. This is a byte-preservation proof only - no Unicode
+// normalization or codepoint iteration is implemented or implied. `✓`
+// (CHECK MARK) is used in both the KAI source and the expected value so
+// both sides go through the same compiler UTF-8 encoding, independent of
+// this source file's own on-disk encoding.
+void testUtf8ExactBytesEndToEnd() {
+    const std::string source = "fn main() {\n    print(\"KAI ✓\")\n}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_string_utf8.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText == "KAI ✓\n");
+}
+
 } // namespace
 
 int main() {
@@ -290,6 +386,12 @@ int main() {
     testCompileFailsCleanlyWithNoMain();
 
     testNativeLinkerProducesRunnableExecutable();
+
+    testPrintStringLiteralEndToEnd();
+    testPrintInferredStringLocalEndToEnd();
+    testStringEscapeDecodingEndToEnd();
+    testEmbeddedNulExactBytesEndToEnd();
+    testUtf8ExactBytesEndToEnd();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }
