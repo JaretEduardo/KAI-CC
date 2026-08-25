@@ -1,0 +1,23 @@
+{
+  "_comment": "Documentation template for benchmarks/ai-native/v1 result.json files - not a JSON Schema validator, just an annotated example of the schemaVersion 1 shape. Copy this into runs/task-<NN>-<condition>/result.json and fill it in by hand after a trial.",
+  "schemaVersion": 1,
+  "benchmark": "kai-ai-native-v1",
+  "task": "task-01",
+  "condition": "semantic",
+  "startTime": "2026-08-25T14:00:00Z",
+  "endTime": "2026-08-25T14:12:30Z",
+  "success": true,
+  "validationPass": true,
+  "metrics": {
+    "compilerInvocations": 3,
+    "failedCompilerInvocations": 1,
+    "textualSearches": 2,
+    "semanticQueries": 4,
+    "sourceReads": 2,
+    "sourceLinesRead": 180,
+    "inputTokens": null,
+    "outputTokens": null,
+    "totalTokens": null
+  },
+  "notes": "Free-text notes about anything unusual in this trial (agent got confused, needed a retry, etc). Optional token fields must be null (not fabricated) when not available from the model UI."
+}
