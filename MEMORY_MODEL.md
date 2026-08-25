@@ -446,6 +446,14 @@ Borrow lifetimes should normally be inferred by the compiler.
 
 KAI 0.1 will deliberately restrict reference usage to keep lifetime analysis simple.
 
+This restriction applies to KAI 0.1 as currently scoped, not as a permanent
+promise: explicit lifetime or provenance syntax remains a reserved future
+design possibility if real programs demonstrate cases local inference cannot
+resolve (for example, a function with more than one view-shaped input
+returning a view - see §25's provenance discussion, and §39's open
+questions). KAI should prefer local, restricted provenance inference over a
+general lifetime system for as long as it remains sufficient.
+
 ---
 
 ## 14. References Inside Structs
@@ -754,15 +762,18 @@ The exact standard library API for `Buffer<T>` is still under design.
 
 ## 25. Strings
 
-String semantics are not completely finalized.
-
-Initial direction:
+KAI distinguishes two text-related types:
 
 ```text
-str
+str      Copy, immutable, non-owning UTF-8 text view
+String   Move, owned, growable UTF-8 buffer (future - see §24's Buffer<T>
+         for the closest existing analogue; not yet implemented)
 ```
 
-represents immutable UTF-8 text.
+`str`'s runtime shape is conceptually `{ ptr, len }`: a small, fixed-size
+descriptor, not a reference and not an unsized type. Passing a `str` by value
+copies this descriptor, never the text itself, and never allocates. `len` is
+a byte length, never a codepoint or grapheme count.
 
 String literals:
 
@@ -770,23 +781,104 @@ String literals:
 let language = "KAI"
 ```
 
-should not require explicit manual memory management.
+have the concrete type `str`, are backed by static program storage, and
+require no explicit manual memory management - this already holds in the
+current compiler, not only as a future goal.
 
-Future versions may distinguish between:
+`String` will be the owned counterpart, heap-backed with Move semantics and
+deterministic scope-based destruction (§17), directly analogous to
+`Buffer<T>` (§24). Passing a `String` where `str` is expected is intended to
+be an implicit, non-allocating borrow of the `String`'s own buffer once
+`String` exists - see the provenance rules below for why such a view cannot
+always be returned safely.
 
-```text
-str
-String
+### Provenance categories (conceptual design target - not yet implemented)
+
+Because `str` is non-owning, KAI needs a way to reject a `str` that outlives
+the data it points at, without requiring the user-visible lifetime syntax
+§13 rules out for ordinary KAI 0.1 programs. The intended model classifies
+every `str` value into exactly one of three categories:
+
+* **`Static`** - backed by program literal storage. Never expires; safe to
+  return or hold indefinitely without restriction.
+* **`ExternallyOwned`** - a view whose backing data is owned by something
+  outside the current function activation, e.g. a `str` value received as a
+  parameter, or (once designed) a future borrowed-owner parameter shape. Safe
+  to propagate, including returning it, because the callee never controls
+  when that data is destroyed - that responsibility always belonged to the
+  caller (or beyond).
+* **`LocallyOwned`** - a view into something the *current function*
+  owns - including a **by-value `String` parameter** (ownership was moved in,
+  so the callee destroys it on return, exactly like a local) or a `String`
+  local created inside the function. A view into a `LocallyOwned` value must
+  never be returned or stored past the function's own scope, since the
+  backing data is destroyed when that scope ends.
+
+This is a deliberately restricted, single-function-local analysis, not a
+general lifetime-inference system - and it introduces no new syntax. It is a
+**design target for a future compiler milestone**: the current compiler has
+no `String` type and no provenance checker of any kind. Every `str` value the
+current compiler can produce today is `Static`, because a literal is
+currently the only way to construct one - see "Implementation Boundary"
+below.
+
+Worked examples of the intended return rule:
+
+```kai
+// SAFE - Static provenance, no owner to outlive
+fn static_name() -> str {
+    return "KAI"
+}
+
+// SAFE - single ExternallyOwned(s) input; the return is exactly that input
+fn identity(s: str) -> str {
+    return s
+}
+
+// DEFERRED/REJECTED - two str-shaped inputs; which one the return's
+// provenance ties to is ambiguous with no disambiguation mechanism designed
+// yet (§39)
+fn choose(a: str, b: str) -> str {
+    return a
+}
+
+// UNSAFE/REJECTED - `s` is owned BY THE CALLEE (pass-by-value transfers
+// ownership in) and is destroyed when this function returns; a str view
+// into it would dangle
+fn bad(s: String) -> str {
+    return s.as_str()
+}
 ```
 
-where:
+### UTF-8 invariant
 
-```text
-str     -> immutable borrowed/string-view representation
-String  -> owned dynamic string
-```
+Target invariant: every `str` value's bytes are valid UTF-8. **Current
+implementation gap:** the lexer preserves ordinary source bytes and decodes
+the supported escapes (`\n \r \t \\ \" \0`) exactly, but does not yet perform
+full UTF-8 validation - this must be enforced explicitly (most naturally
+wherever a `str`/`String` value is constructed from raw bytes) before the
+invariant becomes normative; it is not already guaranteed today. A `\0`
+(NUL) byte is itself ordinary, valid UTF-8 and does not violate this
+invariant on its own.
 
-This distinction is not required for the first compiler milestone.
+### Slicing (future)
+
+A future *safe* operation that slices a `str` and returns `str` must preserve
+UTF-8 validity - it must never silently produce a `str` whose bytes split a
+multi-byte codepoint at an invalid boundary. Raw, unchecked byte access
+(which may cross such a boundary) may exist as a separate, explicitly-marked
+operation that does not claim to produce a valid `str`. Exact slicing syntax
+and failure behavior remain future work (§39).
+
+### Implementation boundary
+
+Until `String` and any borrowed-owner parameter shape exist, no `str` value
+constructible by the current language can be anything other than `Static`.
+This means a future compiler milestone can safely make `str` a spellable
+type annotation, parameter type, and return type (for the `Static` cases
+above) **without implementing the general provenance checker described in
+this section** - the checker only becomes necessary once `String` (or
+another owned/borrowable text source) exists at all.
 
 ---
 
@@ -1163,12 +1255,19 @@ KAI's memory model should provide:
 
 The following decisions remain intentionally unresolved:
 
-* exact semantics of `str`
-* whether KAI will have a separate owned `String` type
+* how multi-input `str`-view return provenance should be disambiguated, if
+  ever (see §25's `choose` example)
+* whether `str` views may ever be stored (struct fields, collections)
+* whether explicit provenance/lifetime syntax will ever be needed for cases
+  local inference cannot resolve (§13)
+* exact `str` slicing rules (safe UTF-8-boundary-preserving vs. raw/unchecked)
+* whether mutable in-place string views will ever exist
+* exact relationship between `str`/`String` and a future generic
+  `Buffer<T>`/slice-of-T view design
 * whether user-defined structs automatically become `Copy`
 * how cloning will integrate with future traits
 * whether partial moves from structs will be allowed
-* exact borrow lifetime inference rules
+* exact borrow lifetime inference rules for non-string references
 * whether references may be returned in later versions
 * custom destructor syntax
 * allocator APIs
