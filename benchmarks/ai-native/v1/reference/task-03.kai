@@ -1,0 +1,228 @@
+// Order pricing and risk-scoring pipeline.
+//
+// A small checkout-style computation: given raw order inputs (unit price,
+// quantity, membership status, region, shipping speed), compute a final
+// order total, then separately derive a risk score used for reporting.
+//
+// This program is a fixture for the KAI AI-native semantic tooling
+// benchmark (benchmarks/ai-native/v1) - see that directory's README for
+// how it is used. It intentionally stays within the current KAI 0.1 MVP
+// backend subset: primitive i64/bool values, let/mut, arithmetic,
+// comparisons, if/else, while is not needed here, functions, parameters,
+// calls, and primitive print.
+
+fn clamp_i64(value: i64, min: i64, max: i64) -> i64 {
+    if value < min {
+        return min
+    }
+    if value > max {
+        return max
+    }
+    return value
+}
+
+fn max_i64(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn apply_percentage(amount: i64, basis_points: i64) -> i64 {
+    return (amount * basis_points) / 10000
+}
+
+fn calculate_subtotal(unit_price: i64, quantity: i64) -> i64 {
+    return unit_price * quantity
+}
+
+fn calculate_member_discount(subtotal: i64, is_member: bool) -> i64 {
+    if is_member {
+        return apply_percentage(subtotal, 500)
+    }
+    return 0
+}
+
+fn calculate_volume_discount(subtotal: i64, quantity: i64) -> i64 {
+    return apply_percentage(subtotal, quantity * 500)
+}
+
+fn calculate_discount(subtotal: i64, is_member: bool, quantity: i64) -> i64 {
+    let value = calculate_member_discount(subtotal, is_member)
+    let member_result = clamp_i64(value, 0, subtotal)
+
+    if quantity >= 10 {
+        let value = calculate_volume_discount(subtotal, quantity)
+        let volume_result = clamp_i64(value, 0, subtotal)
+        return max_i64(member_result, volume_result)
+    }
+
+    return member_result
+}
+
+fn is_valid_region(region_code: i64) -> bool {
+    if region_code == 1 {
+        return true
+    }
+    if region_code == 2 {
+        return true
+    }
+    if region_code == 3 {
+        return true
+    }
+    return false
+}
+
+fn region_tax_rate(region_code: i64) -> i64 {
+    if region_code == 1 {
+        return 700
+    }
+    if region_code == 2 {
+        return 500
+    }
+    if region_code == 3 {
+        return 900
+    }
+    return 0
+}
+
+fn calculate_tax(amount: i64, region_code: i64) -> i64 {
+    if is_valid_region(region_code) {
+        return apply_percentage(amount, region_tax_rate(region_code))
+    }
+    return 0
+}
+
+fn calculate_shipping_base(quantity: i64) -> i64 {
+    return 500 + quantity * 50
+}
+
+fn calculate_shipping_surcharge(is_express: bool) -> i64 {
+    if is_express {
+        return 1200
+    }
+    return 0
+}
+
+fn calculate_shipping(quantity: i64, is_express: bool) -> i64 {
+    return calculate_shipping_base(quantity) + calculate_shipping_surcharge(is_express)
+}
+
+fn calculate_total(subtotal: i64, discount: i64, tax: i64, shipping: i64) -> i64 {
+    return subtotal - discount + tax + shipping
+}
+
+fn validate_total(total: i64) -> bool {
+    return total > 0
+}
+
+fn risk_score_for_order(quantity: i64, total: i64) -> i64 {
+    return quantity + total / 1000
+}
+
+fn compute_risk_penalty(score: i64) -> i64 {
+    if score > 40 {
+        return score - 40
+    }
+    return 0
+}
+
+fn order_risk_summary(quantity: i64, total: i64) -> i64 {
+    let raw_score = risk_score_for_order(quantity, total)
+    let penalty = compute_risk_penalty(raw_score)
+    return raw_score - penalty
+}
+
+fn evaluate_batch_risk(quantity: i64, total: i64) -> i64 {
+    let raw_score = risk_score_for_order(quantity, total)
+    let penalty = compute_risk_penalty(raw_score)
+    return raw_score - penalty
+}
+
+fn estimate_shipping_cost(quantity: i64, is_express: bool) -> i64 {
+    return calculate_shipping(quantity, is_express)
+}
+
+fn validate_shipping_within_budget(quantity: i64, is_express: bool, budget: i64) -> bool {
+    return calculate_shipping(quantity, is_express) <= budget
+}
+
+fn is_high_value_order(total: i64) -> bool {
+    return total >= 5000
+}
+
+fn describe_order_flag(total: i64, risk: i64) -> i64 {
+    mut flag: i64 = 0
+
+    if is_high_value_order(total) {
+        flag = flag + 1
+    }
+
+    if risk > 20 {
+        flag = flag + 2
+    }
+
+    return flag
+}
+
+fn process_order(unit_price: i64, quantity: i64, is_member: bool, region_code: i64, is_express: bool) -> i64 {
+    let subtotal = calculate_subtotal(unit_price, quantity)
+    let discount = calculate_discount(subtotal, is_member, quantity)
+    let taxable = subtotal - discount
+    let tax = calculate_tax(taxable, region_code)
+    let shipping = calculate_shipping(quantity, is_express)
+    let total = calculate_total(subtotal, discount, tax, shipping)
+    return total
+}
+
+fn average_two(a: i64, b: i64) -> i64 {
+    return (a + b) / 2
+}
+
+fn summarize_two_orders(total_a: i64, total_b: i64) -> i64 {
+    return average_two(total_a, total_b)
+}
+
+fn main() {
+    let order1_total = process_order(2000, 3, false, 1, false)
+    print(order1_total)
+
+    let order2_total = process_order(1500, 12, true, 2, true)
+    print(order2_total)
+
+    let order3_total = process_order(5000, 1, false, 3, false)
+    print(order3_total)
+
+    let order4_total = process_order(800, 25, true, 1, true)
+    print(order4_total)
+
+    let combined = summarize_two_orders(order1_total, order2_total)
+    print(combined)
+
+    let shipping_quote = estimate_shipping_cost(12, true)
+    print(shipping_quote)
+
+    let within_budget = validate_shipping_within_budget(12, true, 3000)
+    print(within_budget)
+
+    let risk_a = order_risk_summary(50, order2_total)
+    print(risk_a)
+
+    let risk_b = evaluate_batch_risk(50, order4_total)
+    print(risk_b)
+
+    let flag1 = describe_order_flag(order3_total, risk_a)
+    print(flag1)
+
+    let flag2 = describe_order_flag(order4_total, risk_b)
+    print(flag2)
+
+    let valid1 = validate_total(order1_total)
+    print(valid1)
+
+    let region_ok = is_valid_region(2)
+    print(region_ok)
+
+    let region_bad = is_valid_region(9)
+    print(region_bad)
+}
