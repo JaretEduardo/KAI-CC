@@ -2,7 +2,8 @@
 
 **KAI-CC** is the reference compiler for **KAI**, an experimental AI-native systems programming language.
 
-> KAI is currently in the language design and early compiler development stage.
+> KAI has a working MVP compiler (frontend + LLVM-based native codegen) verified on Fedora Linux x86_64; the
+> language design itself is still evolving. See "Current Status" below.
 
 ---
 
@@ -105,17 +106,19 @@ Future versions may introduce MIR, KAI IR, additional backends, and a self-hoste
 
 ## Current Status
 
-KAI is currently in **Phase 0: Language Foundation**.
+KAI-CC now has a working end-to-end MVP compiler (LLVM Codegen Milestone 7): it compiles a real subset of KAI
+source all the way to a native executable on **Fedora Linux x86_64**, via:
 
-Current work:
+    kaicc <file.kai> -o <output>
 
-- defining the language philosophy
-- designing KAI 0.1 syntax
-- designing compiler architecture
-- defining diagnostics
-- planning the initial compiler pipeline
+Implemented: the full frontend (lexer, parser, semantic analysis, type checking, control-flow checking), LLVM
+code generation for primitive values/arithmetic/comparisons/locals/functions/calls/recursion/`if`/`while`, a
+minimal `print` builtin, and native object emission + linking into a real executable.
 
-No stable KAI compiler exists yet.
+Not yet implemented: `for` loops, arrays/strings/structs/enums/generics, ownership/borrowing, optimization, a
+higher-level `kai` CLI wrapper, and non-Linux/non-x86_64 native support.
+
+See `CLAUDE.md` and `ROADMAP.md` for the exact current implementation status.
 
 ---
 

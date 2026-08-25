@@ -64,6 +64,33 @@ These will be introduced after the frontend is stable.
 
 ---
 
+### Current Implementation Status (as of LLVM Codegen Milestone 7)
+
+The ACTUAL current pipeline (see `compiler/include/kai/codegen/LLVMCodeGenerator.hpp`'s own class comment) is:
+
+    Source -> Lexer -> Parser/AST -> SemanticAnalyzer -> TypeChecker -> ControlFlowAnalyzer ->
+    LLVMCodeGenerator -> LLVM IR -> native-entry adaptation -> LLVMObjectEmitter -> native Object File ->
+    NativeLinker -> Native Binary
+
+This skips the HIR stage shown in the diagram above: `LLVMCodeGenerator` lowers AST + SemanticModel directly to
+LLVM IR for the MVP. This is a deliberate, deadline-driven decision, not an abandonment of HIR - HIR remains
+planned (see §8) once the frontend/backend MVP is stable, consistent with this section's own "introduced after
+the frontend is stable" framing.
+
+Currently implemented and native-executable-verified on Fedora Linux x86_64 only (no cross-compilation, no
+Windows/macOS support yet): primitive integer/Bool/f32/f64 values and arithmetic/comparison/logical
+expressions (`&&`/`||` are FINAL short-circuit, not eager), local variables, mutability/assignment, function
+parameters/calls/forward-calls/recursion, `if`/`else`/`else if`, `while`, Unit functions, a minimal `print`
+builtin for those primitive types (lowered to the tiny static C runtime described in §12,
+`runtime/kai_runtime.c`), native object emission (`LLVMObjectEmitter`), and static runtime linking into a real
+executable (`NativeLinker`, invoking the host C compiler driver) via `kaicc <file.kai> -o <output>`.
+
+Still unimplemented: `for` loop codegen, arrays/slices, strings/`Char` as backend-lowerable values, references,
+ownership/borrowing, structs/enums/generics, `panic`/`assert` lowering, optimization passes, HIR, an LSP, and
+the higher-level `kai` CLI wrapper described in §14 (only `kaicc` itself exists today).
+
+---
+
 ## 3. Future Pipeline
 
 Long-term direction:
@@ -420,7 +447,8 @@ Initial toolchain:
 - Git
 - GitHub Actions
 
-Testing framework has not yet been selected.
+Testing framework: no external framework - a tiny in-repo CHECK macro (`tests/support/check.hpp`), registered
+as CTest suites (see the `kai_add_test(...)` CMake helper under `tests/`).
 
 ---
 
