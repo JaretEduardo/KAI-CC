@@ -68,6 +68,9 @@ add_library(kai_compiler STATIC
     compiler/src/semantic/SemanticAnalyzer.cpp
     compiler/src/semantic/TypeChecker.cpp
     compiler/src/semantic/ControlFlowAnalyzer.cpp
+    compiler/src/semantic/SemanticTypeName.cpp
+    compiler/src/semantic/SemanticInspector.cpp
+    compiler/src/semantic/SemanticInspectionJson.cpp
     compiler/src/codegen/LLVMCodeGenerator.cpp
     compiler/src/codegen/LLVMExpressionLowering.cpp
     compiler/src/codegen/LLVMObjectEmitter.cpp
@@ -110,7 +113,9 @@ kai_enable_warnings(kai_compiler)
 add_library(kaicc_cli STATIC
     compiler/src/cli/TokenPrinter.cpp
     compiler/src/cli/AstPrinter.cpp
+    compiler/src/cli/SemanticErrorFormat.cpp
     compiler/src/cli/CompileCommand.cpp
+    compiler/src/cli/InspectCommand.cpp
 )
 
 target_include_directories(kaicc_cli

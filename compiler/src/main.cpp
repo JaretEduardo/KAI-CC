@@ -1,5 +1,6 @@
 #include "kai/cli/AstPrinter.hpp"
 #include "kai/cli/CompileCommand.hpp"
+#include "kai/cli/InspectCommand.hpp"
 #include "kai/cli/TokenPrinter.hpp"
 #include "kai/source/SourceManager.hpp"
 
@@ -22,6 +23,7 @@ void printUsage() {
     std::cout << "  kaicc --tokens <file.kai>\n";
     std::cout << "  kaicc --ast <file.kai>\n";
     std::cout << "  kaicc <file.kai> -o <output>\n";
+    std::cout << "  kaicc inspect <file.kai> --json\n";
     std::cout << "Try 'kaicc --version'\n";
 }
 
@@ -65,6 +67,22 @@ int main(int argc, char* argv[]) {
 
         kai::SourceManager sources;
         return kai::cli::runAstCommand(sources, argv[2], std::cout, std::cerr);
+    }
+
+    // SEMANTIC INSPECTION MILESTONE 1: `kaicc inspect <input.kai> --json`
+    // - a distinct mode from ordinary compilation (see InspectCommand.hpp):
+    // no LLVM/object/link stage runs. `--json` is REQUIRED for M1 (spec
+    // §18) - this keeps the semantic-tooling surface explicit rather than
+    // silently defaulting to some future human-readable format.
+    if (firstArg == "inspect") {
+        if (argc != 4 || std::string_view(argv[3]) != "--json") {
+            std::cerr << "kaicc: error: expected 'kaicc inspect <file.kai> --json'\n";
+            std::cerr << "Usage: kaicc inspect <file.kai> --json\n";
+            return 1;
+        }
+
+        kai::SourceManager sources;
+        return kai::cli::runInspectCommand(sources, argv[2], std::cout, std::cerr);
     }
 
     if (firstArg.starts_with("--")) {
