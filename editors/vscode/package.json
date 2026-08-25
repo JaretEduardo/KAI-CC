@@ -1,8 +1,8 @@
 {
     "name": "kai-language",
     "displayName": "KAI Language Support",
-    "description": "Syntax highlighting and basic editing configuration for the KAI programming language.",
-    "version": "0.1.0",
+    "description": "Syntax highlighting, basic editing configuration, and compiler integration (Build/Run Current File) for the KAI programming language.",
+    "version": "0.2.0",
     "publisher": "kai-lang",
     "repository": {
         "type": "git",
@@ -15,6 +15,7 @@
     "categories": [
         "Programming Languages"
     ],
+    "main": "./out/extension.js",
     "contributes": {
         "languages": [
             {
@@ -41,6 +42,43 @@
                 "language": "kai",
                 "path": "./snippets/kai.json"
             }
-        ]
+        ],
+        "commands": [
+            {
+                "command": "kai.buildCurrentFile",
+                "title": "Build Current File",
+                "category": "KAI"
+            },
+            {
+                "command": "kai.runCurrentFile",
+                "title": "Run Current File",
+                "category": "KAI"
+            }
+        ],
+        "configuration": {
+            "title": "KAI",
+            "properties": {
+                "kai.compilerPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional override path to a kaicc executable. Leave empty to use the compiler bundled with this extension (Linux x64 only for now)."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "compile": "tsc -p ./",
+        "watch": "tsc -p ./ --watch",
+        "pretest": "npm run compile",
+        "test": "node ./out/test/paths.test.js && node ./out/test/process.test.js && node ./scripts/stage-compiler.test.mjs",
+        "stage-compiler": "node ./scripts/stage-compiler.mjs",
+        "vscode:prepublish": "npm run compile",
+        "package": "npm run compile && npm run stage-compiler && npx @vscode/vsce package"
+    },
+    "devDependencies": {
+        "@types/node": "^20.14.0",
+        "@types/vscode": "^1.80.0",
+        "@vscode/vsce": "^3.2.1",
+        "typescript": "^5.5.4"
     }
 }
