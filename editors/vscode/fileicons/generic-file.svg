@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- Minimal fallback icon for the "KAI File Icons" theme's `file`
+       default (§ narrow-scope theme - see fileicons/kai-icon-theme.json):
+       a plain document shape with a folded corner, used for every file
+       that ISN'T .kai, so this theme doesn't leave other files blank. -->
+  <path d="M7 2 H19 L25 8 V30 H7 Z" fill="none" stroke="#C7CCE0" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M19 2 V8 H25 Z" fill="#C7CCE0"/>
+</svg>

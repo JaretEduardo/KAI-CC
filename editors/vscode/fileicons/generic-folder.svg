@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- Minimal fallback icon for the "KAI File Icons" theme's `folder`/
+       `folderExpanded` defaults - a plain flat folder tab shape, used for
+       every folder so this narrow-scope theme doesn't leave folders
+       blank (see fileicons/kai-icon-theme.json). -->
+  <path d="M3 8 H12 L15 11 H29 V26 H3 Z" fill="#E3B341"/>
+</svg>

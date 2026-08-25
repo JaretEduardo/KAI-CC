@@ -22,6 +22,12 @@ package-lock.json
 # Source maps (debugging convenience only - keep the package lean).
 out/**/*.map
 
+# Master SVG source for assets/icon.png (VS Code MILESTONE 4) - only the
+# rasterized PNG is actually referenced (package.json's "icon" field
+# requires PNG, not SVG); the SVG is design source, kept in git for
+# regeneration but not needed inside the installed extension.
+assets/icon.svg
+
 # Never exclude the staged native compiler/runtime - these MUST ship
 # despite being .gitignore'd (they are build artifacts, not source).
 !bin/**

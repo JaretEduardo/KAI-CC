@@ -1,9 +1,10 @@
 {
     "name": "kai-language",
     "displayName": "KAI Language Support",
-    "description": "Syntax highlighting, basic editing configuration, Basic IntelliSense, and compiler integration (Build/Run Current File) for the KAI programming language.",
-    "version": "0.3.0",
+    "description": "Syntax highlighting, basic editing configuration, Basic IntelliSense, KAI file icons, and compiler integration (Build/Run Current File) for the KAI programming language.",
+    "version": "0.4.0",
     "publisher": "kai-lang",
+    "icon": "assets/icon.png",
     "repository": {
         "type": "git",
         "url": "https://github.com/JaretEduardo/KAI-CC.git",
@@ -46,6 +47,13 @@
                 "path": "./snippets/kai.json"
             }
         ],
+        "iconThemes": [
+            {
+                "id": "kai-file-icons",
+                "label": "KAI File Icons",
+                "path": "./fileicons/kai-icon-theme.json"
+            }
+        ],
         "commands": [
             {
                 "command": "kai.buildCurrentFile",
@@ -55,6 +63,11 @@
             {
                 "command": "kai.runCurrentFile",
                 "title": "Run Current File",
+                "category": "KAI"
+            },
+            {
+                "command": "kai.useKaiFileIcons",
+                "title": "Use KAI File Icons",
                 "category": "KAI"
             }
         ],
@@ -73,7 +86,7 @@
         "compile": "tsc -p ./",
         "watch": "tsc -p ./ --watch",
         "pretest": "npm run compile",
-        "test": "node ./out/test/paths.test.js && node ./out/test/process.test.js && node ./out/test/completionData.test.js && node ./out/test/snippets.test.js && node ./scripts/stage-compiler.test.mjs",
+        "test": "node ./out/test/paths.test.js && node ./out/test/process.test.js && node ./out/test/completionData.test.js && node ./out/test/snippets.test.js && node ./out/test/iconThemeConfig.test.js && node ./scripts/stage-compiler.test.mjs",
         "stage-compiler": "node ./scripts/stage-compiler.mjs",
         "vscode:prepublish": "npm run compile",
         "package": "npm run compile && npm run stage-compiler && npx @vscode/vsce package"

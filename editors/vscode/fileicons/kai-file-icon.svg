@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- .kai file icon (KAI File Icons theme) - the same "K" monogram as
+       assets/icon.svg (the extension's own icon), for consistent
+       branding between the Extensions view and the Explorer. Shipped as
+       SVG directly - VS Code renders icon-theme icons natively, so this
+       one (unlike assets/icon.svg) is never locally rasterized. -->
+  <rect width="256" height="256" rx="56" fill="#10122A"/>
+  <rect x="88" y="64" width="32" height="128" fill="#4FD1C5"/>
+  <polygon points="120,128 120,104 208,64 184,64" fill="#4FD1C5"/>
+  <polygon points="120,128 120,152 208,192 184,192" fill="#4FD1C5"/>
+</svg>

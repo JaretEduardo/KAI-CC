@@ -1,0 +1,22 @@
+{
+    "iconDefinitions": {
+        "_file": {
+            "iconPath": "./generic-file.svg"
+        },
+        "_folder": {
+            "iconPath": "./generic-folder.svg"
+        },
+        "_kaiFile": {
+            "iconPath": "./kai-file-icon.svg"
+        }
+    },
+    "file": "_file",
+    "folder": "_folder",
+    "folderExpanded": "_folder",
+    "fileExtensions": {
+        "kai": "_kaiFile"
+    },
+    "languageIds": {
+        "kai": "_kaiFile"
+    }
+}

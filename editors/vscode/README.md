@@ -5,8 +5,14 @@ AI-native, statically-typed, compiled systems programming language. This
 extension lives inside the KAI-CC repository so the extension and compiler
 version together.
 
-## Current functionality (Milestone 3)
+## Current functionality (Milestone 4)
 
+- **A proper extension icon** - shown in the Extensions view, search
+  results, and the Marketplace listing (see "Branding" below).
+- **KAI file icons** - `.kai` files get a distinct icon via a small
+  bundled icon theme, once selected (see "File icons" below - this is a
+  genuine VS Code limitation, not a bug: only one file icon theme can be
+  active at a time).
 - **Syntax highlighting** for `.kai` files: keywords (`fn`, `let`, `mut`,
   `return`, `if`, `else`, `while`, `for`, `in`, `struct`, `enum`, `use`,
   `pub`, `as`), booleans (`true`/`false`), primitive types (`i8`-`i64`,
@@ -24,11 +30,47 @@ version together.
 - **`KAI: Run Current File`** - builds (same as above), then runs the
   produced executable, showing its output.
 
-The first three items are purely declarative (TextMate grammar + JSON
-configuration). Basic IntelliSense and the two commands are backed by real
+Syntax highlighting/language configuration/snippets are purely declarative
+(TextMate grammar + JSON configuration). Basic IntelliSense, the icon
+theme command/prompt, and the two compiler commands are backed by real
 TypeScript extension code (`src/`); the commands bundle and invoke the
 actual native `kaicc` compiler built by this repository's CMake build -
 see "Bundled compiler" below.
+
+## Branding
+
+The extension ships its own icon (`assets/icon.png`, generated from
+`assets/icon.svg`) - a simple, original geometric "K" monogram, wired
+through `package.json`'s standard `"icon"` field. This is what appears in
+the Extensions view, extension search results, and (once published) the
+Marketplace listing.
+
+## File icons
+
+`.kai` files get a distinct icon (the same "K" monogram as the extension's
+own icon, for consistent branding) via a small bundled **KAI File Icons**
+icon theme (`fileicons/kai-icon-theme.json`, contributed through
+`contributes.iconThemes`). The theme is deliberately narrow: it defines
+the KAI file icon plus a plain generic fallback for every other file/
+folder, rather than trying to be a full-featured icon theme.
+
+**Important VS Code limitation**: only one file icon theme can be active
+in a workbench at a time. If you already use another icon theme (e.g.
+Material Icon Theme, Seti), installing this extension does **not**
+automatically show KAI file icons - you first need to switch to
+**KAI File Icons** yourself. Two ways to do that:
+
+- Run **KAI: Use KAI File Icons** from the Command Palette - this
+  switches your active icon theme directly, with no picker needed.
+- Or use VS Code's own `Preferences: File Icon Theme` picker and choose
+  "KAI File Icons" from the list.
+
+The extension never switches this for you automatically, and never
+prompts you to - KAI File Icons is a narrow theme (see above), and
+switching to it replaces whatever richer icon theme you already have,
+falling every non-KAI file/folder back to a plain generic icon. That is a
+global, disruptive change worth making deliberately, not something to
+suggest on activation.
 
 ## Basic IntelliSense
 
@@ -69,6 +111,7 @@ compiler process).
 | --- | --- | --- |
 | KAI: Build Current File | `kai.buildCurrentFile` | Saves the active `.kai` file if dirty, compiles it with `kaicc <file> -o <output>`, reports success/failure. |
 | KAI: Run Current File | `kai.runCurrentFile` | Runs Build Current File, then executes the produced native binary and shows its output/exit code. |
+| KAI: Use KAI File Icons | `kai.useKaiFileIcons` | Switches the active workbench icon theme to KAI File Icons directly (no picker). |
 
 Both commands require an active editor showing a saved (filesystem-backed)
 `.kai` file; they do nothing (with a clear error message) for an untitled
@@ -149,8 +192,10 @@ your VS Code settings to point directly at a locally built `build/bin/kaicc`.
 
 Run the extension's own unit tests (plain Node, no VS Code needed - pure
 path/policy logic in `src/paths.ts`, process-spawning in `src/process.ts`,
-IntelliSense metadata/context logic in `src/completionData.ts`, the
-`snippets/kai.json` content, and the staging script):
+IntelliSense metadata/context logic in `src/completionData.ts`, static
+consistency checks over `package.json`'s icon/iconThemes wiring and
+`fileicons/kai-icon-theme.json`, the `snippets/kai.json` content, and the
+staging script):
 
 ```sh
 npm test
