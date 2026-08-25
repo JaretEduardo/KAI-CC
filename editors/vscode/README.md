@@ -5,7 +5,7 @@ AI-native, statically-typed, compiled systems programming language. This
 extension lives inside the KAI-CC repository so the extension and compiler
 version together.
 
-## Current functionality (Milestone 2)
+## Current functionality (Milestone 3)
 
 - **Syntax highlighting** for `.kai` files: keywords (`fn`, `let`, `mut`,
   `return`, `if`, `else`, `while`, `for`, `in`, `struct`, `enum`, `use`,
@@ -15,16 +15,53 @@ version together.
   comments, function names, and current operators/punctuation.
 - **Language configuration**: line comments, bracket/auto-closing/
   surrounding pairs, and basic indentation on `{`/`}`.
-- **Snippets**: `fn`, `main`, `if`, `ifelse`, `while`, `for`.
+- **Snippets**: `fn`, `main`, `if`, `ifelse`, `while`, `for`, `let`, `mut`.
+- **Basic IntelliSense**: as you type, suggests KAI keywords, primitive
+  types, and the `print` builtin - see below for exactly what this does
+  and does not cover.
 - **`KAI: Build Current File`** - compiles the active `.kai` file with the
   real `kaicc` compiler into a native executable.
 - **`KAI: Run Current File`** - builds (same as above), then runs the
   produced executable, showing its output.
 
 The first three items are purely declarative (TextMate grammar + JSON
-configuration). The two commands are backed by real TypeScript extension
-code (`src/`) that bundles and invokes the actual native `kaicc` compiler
-built by this repository's CMake build - see "Bundled compiler" below.
+configuration). Basic IntelliSense and the two commands are backed by real
+TypeScript extension code (`src/`); the commands bundle and invoke the
+actual native `kaicc` compiler built by this repository's CMake build -
+see "Bundled compiler" below.
+
+## Basic IntelliSense
+
+As you type in a `.kai` file, VS Code will suggest:
+
+- **Keywords** - every current KAI keyword (`fn`, `let`, `mut`, `return`,
+  `if`, `else`, `while`, `for`, `in`, `struct`, `enum`, `use`, `pub`, `as`,
+  `true`, `false`), each with a short description.
+- **Primitive types** - `i8`-`i64`, `u8`-`u64`, `f32`, `f64`, `bool`,
+  `char`. Right after typing a type-annotation colon or `->` (e.g.
+  `let age: |` or `fn f() -> |`), these are ranked above keywords so the
+  most useful suggestions appear first.
+- **`print`** - inserts `print(value)` with `value` ready to fill in. This
+  is the one builtin with real native support today (see the M6/M7
+  milestones); `panic`/`assert` exist in the language's reserved-name
+  list but have no working implementation yet, so they are intentionally
+  left out of autocomplete rather than suggesting something that would
+  fail if actually run.
+
+**What this deliberately does NOT do** (this is basic, keyword-level
+IntelliSense, not a Language Server):
+
+- No suggestions for your own variables or functions (e.g. a variable you
+  named `counter` will not be suggested when you type `cou`).
+- No hover information, go-to-definition, rename, or find-references.
+- No signature help derived from a function's actual parameters.
+- No semantic error checking/diagnostics as you type.
+
+That level of tooling requires the compiler to expose a queryable semantic
+model to the editor, which is planned post-MVP (see
+`COMPILER_ARCHITECTURE.md` §9) - this milestone intentionally stays inside
+the ordinary VS Code extension API (no language server, no background
+compiler process).
 
 ## Commands
 
@@ -112,7 +149,8 @@ your VS Code settings to point directly at a locally built `build/bin/kaicc`.
 
 Run the extension's own unit tests (plain Node, no VS Code needed - pure
 path/policy logic in `src/paths.ts`, process-spawning in `src/process.ts`,
-and the staging script):
+IntelliSense metadata/context logic in `src/completionData.ts`, the
+`snippets/kai.json` content, and the staging script):
 
 ```sh
 npm test

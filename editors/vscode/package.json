@@ -1,8 +1,8 @@
 {
     "name": "kai-language",
     "displayName": "KAI Language Support",
-    "description": "Syntax highlighting, basic editing configuration, and compiler integration (Build/Run Current File) for the KAI programming language.",
-    "version": "0.2.0",
+    "description": "Syntax highlighting, basic editing configuration, Basic IntelliSense, and compiler integration (Build/Run Current File) for the KAI programming language.",
+    "version": "0.3.0",
     "publisher": "kai-lang",
     "repository": {
         "type": "git",
@@ -16,6 +16,9 @@
         "Programming Languages"
     ],
     "main": "./out/extension.js",
+    "activationEvents": [
+        "onLanguage:kai"
+    ],
     "contributes": {
         "languages": [
             {
@@ -70,7 +73,7 @@
         "compile": "tsc -p ./",
         "watch": "tsc -p ./ --watch",
         "pretest": "npm run compile",
-        "test": "node ./out/test/paths.test.js && node ./out/test/process.test.js && node ./scripts/stage-compiler.test.mjs",
+        "test": "node ./out/test/paths.test.js && node ./out/test/process.test.js && node ./out/test/completionData.test.js && node ./out/test/snippets.test.js && node ./scripts/stage-compiler.test.mjs",
         "stage-compiler": "node ./scripts/stage-compiler.mjs",
         "vscode:prepublish": "npm run compile",
         "package": "npm run compile && npm run stage-compiler && npx @vscode/vsce package"
