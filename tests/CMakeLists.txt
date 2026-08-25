@@ -54,6 +54,47 @@ kai_add_test(semantic_control_flow_analyzer_tests semantic/ControlFlowAnalyzerTe
 
 kai_add_test(codegen_llvm_code_generator_tests codegen/LLVMCodeGeneratorTests.cpp)
 
+# LLVM CODEGEN MILESTONE 7: LLVMObjectEmitter tested independently of the
+# CLI (M7 spec §21) - links kai_compiler directly like every other
+# kai_add_test() suite, no extra native-linker/kaicc-path wiring needed
+# since it only exercises native-entry adaptation + raw object emission.
+kai_add_test(llvm_object_emitter_tests codegen/LLVMObjectEmitterTests.cpp)
+
+# LLVM CODEGEN MILESTONE 7: the real end-to-end pipeline
+# (source -> ... -> native executable -> actual process execution). Links
+# kaicc_cli directly (for kai::cli::runCompileCommand - the SAME
+# orchestration `kaicc` itself runs, never a reimplementation) rather than
+# kai_add_test()'s default kai_compiler. Needs the ACTUAL, already-built
+# kaicc/kai_runtime output paths - see NativeLinker.hpp's relocatable,
+# executable-relative runtime-library discovery - passed in as compile
+# definitions rather than re-deriving CMake's own output-directory choices
+# a second time inside the test source; add_dependencies() ensures both
+# exist on disk by the time this test target is built, not just by the
+# time `ctest` happens to run.
+add_executable(native_compilation_tests integration/NativeCompilationTests.cpp)
+
+target_link_libraries(native_compilation_tests
+    PRIVATE
+        kaicc_cli
+)
+
+target_include_directories(native_compilation_tests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_compile_definitions(native_compilation_tests
+    PRIVATE
+        KAI_TEST_KAICC_EXECUTABLE="$<TARGET_FILE:kaicc>"
+        KAI_TEST_RUNTIME_LIBRARY="$<TARGET_FILE:kai_runtime>"
+)
+
+add_dependencies(native_compilation_tests kaicc kai_runtime)
+
+kai_enable_warnings(native_compilation_tests)
+
+add_test(NAME native_compilation_tests COMMAND native_compilation_tests)
+
 # kai_runtime-specific test: links kai_runtime directly (not kai_compiler)
 # to prove the tiny native runtime (LLVM CODEGEN MILESTONE 6) builds
 # cleanly and exports the exact C ABI symbols generated code will

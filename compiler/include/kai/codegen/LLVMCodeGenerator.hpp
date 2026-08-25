@@ -152,6 +152,17 @@ public:
     /// Precondition: the most recent generate() call returned true.
     const llvm::Module& module() const;
 
+    /// Non-const overload (M7): the M7 native-executable pipeline
+    /// mutates the generated module IN PLACE after generate() succeeds -
+    /// native-entry ABI adaptation (see
+    /// LLVMObjectEmitter::adaptNativeEntryPoint()) and target-triple/
+    /// DataLayout assignment (see LLVMObjectEmitter::emit()) - before
+    /// object emission. Same precondition as the const overload; existing
+    /// callers that only ever read the module (every codegen test, and
+    /// anything binding the result to `const llvm::Module&`) are
+    /// unaffected by this addition.
+    llvm::Module& module();
+
 private:
     /// A lowered statement's effect on the CURRENT LLVM BasicBlock, needed
     /// starting M5 (IfStmt/WhileStmt) because "lowered successfully" is no

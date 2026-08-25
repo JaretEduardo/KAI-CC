@@ -1,4 +1,5 @@
 #include "kai/cli/AstPrinter.hpp"
+#include "kai/cli/CompileCommand.hpp"
 #include "kai/cli/TokenPrinter.hpp"
 #include "kai/source/SourceManager.hpp"
 
@@ -17,26 +18,32 @@ void printUsage() {
     std::cout << "KAI-CC compiler\n";
     std::cout << "Usage:\n";
     std::cout << "  kaicc --version\n";
+    std::cout << "  kaicc --help\n";
     std::cout << "  kaicc --tokens <file.kai>\n";
     std::cout << "  kaicc --ast <file.kai>\n";
-    std::cout << "  kaicc <file.kai>\n";
+    std::cout << "  kaicc <file.kai> -o <output>\n";
     std::cout << "Try 'kaicc --version'\n";
 }
 
 } // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc == 2 && std::string_view(argv[1]) == "--version") {
-        printVersion();
-        return 0;
-    }
-
     if (argc == 1) {
         printUsage();
         return 0;
     }
 
     const std::string_view firstArg(argv[1]);
+
+    if (firstArg == "--version") {
+        printVersion();
+        return 0;
+    }
+
+    if (firstArg == "--help") {
+        printUsage();
+        return 0;
+    }
 
     if (firstArg == "--tokens") {
         if (argc != 3) {
@@ -66,10 +73,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // A source file was given, but full compilation is not implemented yet
-    // (KAI-CC is still Phase 0/1 frontend work). Use `--tokens` to inspect
-    // how a file lexes in the meantime.
-    std::cerr << "kaicc: error: compilation is not implemented yet\n";
+    // LLVM CODEGEN MILESTONE 7: `kaicc <input.kai> -o <output>` - the real
+    // end-to-end native compilation pipeline (see CompileCommand.hpp).
+    // Every other shape (missing `-o`, extra arguments) is a usage error,
+    // never a silent fallback to some other mode.
+    if (argc == 4 && std::string_view(argv[2]) == "-o") {
+        kai::SourceManager sources;
+        return kai::cli::runCompileCommand(sources, argv[1], argv[3], std::cerr);
+    }
+
+    std::cerr << "kaicc: error: expected 'kaicc <file.kai> -o <output>'\n";
     std::cerr << "Usage: kaicc [options] <file.kai>\n";
     return 1;
 }

@@ -72,6 +72,11 @@ const llvm::Module& LLVMCodeGenerator::module() const {
     return *module_;
 }
 
+llvm::Module& LLVMCodeGenerator::module() {
+    assert(module_ != nullptr);
+    return *module_;
+}
+
 // No `default:` case: DeclKind is fully implemented today, mirroring
 // SemanticAnalyzer.cpp's/TypeChecker.cpp's/ControlFlowAnalyzer.cpp's own
 // exhaustive switch over it.

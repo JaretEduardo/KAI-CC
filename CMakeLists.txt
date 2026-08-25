@@ -42,9 +42,16 @@ message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} (${LLVM_DIR})")
 # split it before handing it to target_compile_definitions().
 separate_arguments(KAI_LLVM_DEFINITIONS NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 
-# Only the one LLVM component this milestone actually needs - not every
-# LLVM library.
-llvm_map_components_to_libnames(KAI_LLVM_LIBS core)
+# LLVM CODEGEN MILESTONE 7 needs more than bare IR construction (`core`):
+# native object emission (LLVMObjectEmitter) and process-spawning link
+# invocation (NativeLinker) pull in the host-native target backend and
+# LLVM's own object/MC/support layers. `native`/`nativecodegen` are
+# LLVM's own "whichever backend this build was configured for" meta-
+# components (see llvm-config --components) - this deliberately avoids
+# hard-coding e.g. `X86CodeGen`, and avoids linking every architecture
+# LLVM can target, while still resolving to the real target-specific
+# libraries this host actually needs.
+llvm_map_components_to_libnames(KAI_LLVM_LIBS core native nativecodegen mc object support target)
 
 # Shared compiler infrastructure library.
 #
@@ -63,6 +70,8 @@ add_library(kai_compiler STATIC
     compiler/src/semantic/ControlFlowAnalyzer.cpp
     compiler/src/codegen/LLVMCodeGenerator.cpp
     compiler/src/codegen/LLVMExpressionLowering.cpp
+    compiler/src/codegen/LLVMObjectEmitter.cpp
+    compiler/src/codegen/NativeLinker.cpp
 )
 
 # Public compiler headers
@@ -101,6 +110,7 @@ kai_enable_warnings(kai_compiler)
 add_library(kaicc_cli STATIC
     compiler/src/cli/TokenPrinter.cpp
     compiler/src/cli/AstPrinter.cpp
+    compiler/src/cli/CompileCommand.cpp
 )
 
 target_include_directories(kaicc_cli
@@ -133,8 +143,8 @@ kai_enable_warnings(kaicc)
 # doc comment for how generated modules reference it). Deliberately its
 # own target, separate from kai_compiler/kaicc: the compiler process
 # itself never calls into this library - it only emits `declare`/`call`
-# references to these symbols by name. M7 is expected to link this
-# runtime's object code into the final native executable.
+# references to these symbols by name. M7 links this runtime's object
+# code into every generated native executable (see NativeLinker).
 add_library(kai_runtime STATIC
     runtime/kai_runtime.c
 )
@@ -145,6 +155,20 @@ target_include_directories(kai_runtime
 )
 
 kai_enable_warnings(kai_runtime)
+
+# LLVM CODEGEN MILESTONE 7: arrange build outputs to already look like the
+# eventual packaged/installed shape (`bin/kaicc` + `lib/kai/
+# libkai_runtime.a`), rather than CMake's default flat build directory -
+# this is exactly the layout NativeLinker::findDefaultRuntimeLibrary()
+# looks for relative to kaicc's OWN running executable path, so the same
+# relocatable lookup already works unmodified in this build tree, with no
+# separate build-tree-only fallback needed (see NativeLinker.hpp).
+set_target_properties(kaicc PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+set_target_properties(kai_runtime PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib/kai
+)
 
 # Tests
 enable_testing()
