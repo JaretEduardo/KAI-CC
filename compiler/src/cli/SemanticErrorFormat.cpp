@@ -1,5 +1,7 @@
 #include "kai/cli/SemanticErrorFormat.hpp"
 
+#include "kai/semantic/SemanticTypeName.hpp"
+
 #include <sstream>
 
 namespace kai::cli {
@@ -47,6 +49,21 @@ std::string formatSemanticError(const SourceManager& sources, const semantic::Se
     const SourceManager::LineColumn where = sources.lineColumn(error.primarySpan.begin());
     std::ostringstream message;
     message << "kaicc: error at " << where.line << ':' << where.column << ": " << semanticErrorKindName(error.kind);
+
+    // RELEASE HARDENING M2: SemanticError already carries expectedType/
+    // actualType for these two kinds (SemanticModel.hpp) - previously
+    // computed and then silently discarded here. Only append detail when
+    // the structured information is actually present (never fabricated),
+    // and reuse semantic::typeName() - the ONE canonical Type renderer -
+    // rather than duplicating type-name formatting here.
+    if (error.kind == semantic::SemanticErrorKind::TypeMismatch && error.expectedType.has_value() &&
+        error.actualType.has_value()) {
+        message << ": expected " << semantic::typeName(*error.expectedType) << ", got "
+                 << semantic::typeName(*error.actualType);
+    } else if (error.kind == semantic::SemanticErrorKind::LiteralOutOfRange && error.expectedType.has_value()) {
+        message << ": does not fit in " << semantic::typeName(*error.expectedType);
+    }
+
     return message.str();
 }
 

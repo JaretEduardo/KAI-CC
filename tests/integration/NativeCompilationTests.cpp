@@ -198,6 +198,87 @@ void testCompileFailsCleanlyWithNoMain() {
     std::filesystem::remove(sourcePath, ignored);
 }
 
+// RELEASE HARDENING M2.1: SemanticErrorFormat.cpp's TypeMismatch detail
+// (M2) - tested through the real CLI/CompileCommand layer (runCompileCommand()),
+// never merely the SemanticErrorKind enum, so a regression in the actual
+// formatter/output layer would be caught.
+void testTypeMismatchDiagnosticIncludesExpectedAndActualTypes() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_type_mismatch.kai", "fn main() {\n    let x: str = 42\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode =
+        kai::cli::runCompileCommand(sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_tm.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("type mismatch: expected str, got i32") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// RELEASE HARDENING M2.1: SemanticErrorFormat.cpp's LiteralOutOfRange
+// detail (M2).
+void testLiteralOutOfRangeDiagnosticIncludesTargetType() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_literal_range.kai", "fn main() {\n    let x: i8 = 200\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode =
+        kai::cli::runCompileCommand(sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_lor.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("literal out of range: does not fit in i8") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// RELEASE HARDENING M2.1: the `for` statement must produce the specific,
+// actionable message CompileCommand.cpp now surfaces from
+// LLVMCodeGenerator::unsupportedConstruct() (M2) - REQUIRED regression:
+// proves the generic "LLVM IR generation failed" text is no longer what a
+// user sees for this exact, already-identified-as-deferred construct.
+void testUnsupportedForStatementDiagnosticIsActionable() {
+    const std::filesystem::path sourcePath = writeTempSource(
+        "kai_e2e_unsupported_for.kai", "fn main() {\n    for i in 0..3 {\n        print(i)\n    }\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode =
+        kai::cli::runCompileCommand(sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_for.out", err);
+
+    KAI_CHECK(exitCode == 6);
+    KAI_CHECK(err.str().find("code generation is not yet supported for 'for' statements") != std::string::npos);
+    KAI_CHECK(err.str().find("LLVM IR generation failed") == std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// RELEASE HARDENING M2.1: an unsupported (array/slice) parameter type
+// must ALSO get its own specific message (M2's second
+// recordUnsupportedConstruct() call site, in declareFunction()'s
+// parameter-type loop) - not the generic fallback.
+void testUnsupportedParameterTypeDiagnosticIsActionable() {
+    const std::filesystem::path sourcePath = writeTempSource(
+        "kai_e2e_unsupported_param.kai",
+        "fn sum(values: [i32]) -> i32 {\n    return 0\n}\nfn main() {\n    print(0)\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_param.out", err);
+
+    KAI_CHECK(exitCode == 6);
+    KAI_CHECK(err.str().find("code generation is not yet supported for this parameter's type") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
 // NATIVE LINKER (M7 spec §22): emit an object, link it with kai_runtime
 // via NativeLinker directly, confirm the executable exists AND runs.
 
@@ -490,6 +571,11 @@ int main() {
 
     testCompileFailsCleanlyOnSemanticError();
     testCompileFailsCleanlyWithNoMain();
+
+    testTypeMismatchDiagnosticIncludesExpectedAndActualTypes();
+    testLiteralOutOfRangeDiagnosticIncludesTargetType();
+    testUnsupportedForStatementDiagnosticIsActionable();
+    testUnsupportedParameterTypeDiagnosticIsActionable();
 
     testNativeLinkerProducesRunnableExecutable();
 

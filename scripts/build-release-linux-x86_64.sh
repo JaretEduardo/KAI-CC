@@ -13,6 +13,23 @@
 # Produces:
 #   dist/kai-linux-x86_64/bin/kaicc
 #   dist/kai-linux-x86_64/lib/kai/libkai_runtime.a
+#   dist/kai-linux-x86_64/lib/kai/libz3.so.4 (only when LLVM was built
+#     with Z3 support - see CMakeLists.txt's own comment)
+#   dist/kai-linux-x86_64/examples/*.kai (curated, known-good examples
+#     only - see examples/README.md; compiled AND run against the
+#     just-installed release kaicc below, so a future example that stops
+#     matching its documented output fails this script loudly instead of
+#     silently shipping broken)
+#   dist/kai-linux-x86_64/README.md (RELEASE HARDENING M2.1: so a
+#     downloaded tarball is self-describing on its own)
+#   dist/kai-linux-x86_64/THIRD_PARTY_NOTICES.md +
+#     dist/kai-linux-x86_64/third_party/licenses/{LLVM-LICENSE.txt,
+#     Z3-COPYRIGHT.txt} (RELEASE HARDENING M2.1: the release statically
+#     links LLVM and bundles libz3.so.4 - see THIRD_PARTY_NOTICES.md
+#     itself - so the factual third-party notices ship alongside the
+#     binaries they describe, never left behind in the source repo only).
+#     This script FAILS if any of these required files is missing from
+#     the produced artifact - never a silent partial release.
 #   dist/kai-linux-x86_64.tar.gz
 #
 # Uses a container-local build directory (build-release/, bind-mounted
@@ -70,6 +87,7 @@ mkdir -p "${DIST_DIR}"
 
 "${ENGINE}" run --rm \
     "${RUN_USER_ARGS[@]}" \
+    -e ARTIFACT_NAME="${ARTIFACT_NAME}" \
     -v "${REPO_ROOT}:/workspace/kai-cc:Z" \
     -v "${DIST_DIR}:/workspace/dist:Z" \
     -w /workspace/kai-cc \
@@ -79,9 +97,71 @@ mkdir -p "${DIST_DIR}"
         cmake -B build-release -S . -G Ninja
         cmake --build build-release
         ctest --test-dir build-release --output-on-failure
-        rm -rf "/workspace/dist/'"${ARTIFACT_NAME}"'"
-        cmake --install build-release --prefix "/workspace/dist/'"${ARTIFACT_NAME}"'"
+
+        DEST="/workspace/dist/${ARTIFACT_NAME}"
+        rm -rf "${DEST}"
+        cmake --install build-release --prefix "${DEST}"
+
+        # RELEASE HARDENING M2: only known-good, end-to-end-verified
+        # examples ship in the release tree - see examples/README.md for
+        # the full status of every tracked example.kai and why the others
+        # are excluded here. Each one is compiled AND RUN against the
+        # release kaicc just installed above (never the build tree), with
+        # its exact expected stdout asserted, so a future change that
+        # silently breaks one of these fails this script instead of
+        # shipping a broken example.
+        mkdir -p "${DEST}/examples"
+
+        check_release_example() {
+            local name="$1"
+            local expected="$2"
+            cp "examples/${name}" "${DEST}/examples/${name}"
+            local actual
+            actual="$("${DEST}/bin/kaicc" "examples/${name}" -o /tmp/release_example_check.out && /tmp/release_example_check.out)"
+            if [ "${actual}" != "${expected}" ]; then
+                echo "error: release example ${name} did not produce the expected stdout" >&2
+                printf "  expected: %s\n" "${expected}" >&2
+                printf "  actual:   %s\n" "${actual}" >&2
+                exit 1
+            fi
+            echo "  ${name}: OK"
+        }
+
+        echo "Verifying curated release examples..."
+        check_release_example "hello.kai" "$(printf "Hello from KAI")"
+        check_release_example "functions.kai" "$(printf "Hello\nKAI\n42\n84")"
+        check_release_example "conditions.kai" "$(printf "adult\npositive\nnegative\nzero")"
+        check_release_example "variables.kai" "$(printf "KAI\n0.1\n2026\n1")"
+        rm -f /tmp/release_example_check.out
+
+        # RELEASE HARDENING M2.1: root README + factual third-party
+        # notices ship in every release artifact - see the header comment
+        # at the top of this script. Copied verbatim, never renamed or
+        # paraphrased.
+        cp README.md "${DEST}/README.md"
+        cp THIRD_PARTY_NOTICES.md "${DEST}/THIRD_PARTY_NOTICES.md"
+        mkdir -p "${DEST}/third_party/licenses"
+        cp third_party/licenses/LLVM-LICENSE.txt "${DEST}/third_party/licenses/LLVM-LICENSE.txt"
+        cp third_party/licenses/Z3-COPYRIGHT.txt "${DEST}/third_party/licenses/Z3-COPYRIGHT.txt"
     '
+
+echo "==> Verifying required release documentation/notice files are present"
+# RELEASE HARDENING M2.1: never ship a silent partial release - fail loudly
+# if any factual third-party notice or the root README didn't make it into
+# the staged artifact.
+REQUIRED_FILES=(
+    "README.md"
+    "THIRD_PARTY_NOTICES.md"
+    "third_party/licenses/LLVM-LICENSE.txt"
+    "third_party/licenses/Z3-COPYRIGHT.txt"
+)
+for f in "${REQUIRED_FILES[@]}"; do
+    if [ ! -f "${DIST_DIR}/${ARTIFACT_NAME}/${f}" ]; then
+        echo "error: required release file missing: ${f}" >&2
+        exit 1
+    fi
+    echo "  ${f}: present"
+done
 
 echo "==> Portable artifact staged at dist/${ARTIFACT_NAME}/"
 find "${DIST_DIR}/${ARTIFACT_NAME}" -type f

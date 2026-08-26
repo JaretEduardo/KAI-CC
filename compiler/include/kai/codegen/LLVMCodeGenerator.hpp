@@ -18,6 +18,7 @@
 
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -151,6 +152,25 @@ public:
     /// generated or unverified module by calling module() after a failed
     /// generate() - see module()'s precondition below.
     bool generate(const ast::SourceFile& file, const semantic::SemanticModel& model);
+
+    /// RELEASE HARDENING M2: a small, deliberately narrow diagnostic-UX
+    /// addition - NOT a general diagnostic framework. Set exactly once,
+    /// at the specific site an explicitly-deferred (never silently
+    /// skipped) AST construct causes generate() to fail - e.g.
+    /// StmtKind::For (see generateStatement()'s own case). Left
+    /// std::nullopt for every other failure path, including a genuine
+    /// llvm::verifyModule() failure and any defensive/internal check -
+    /// this is intentional: a caller (CompileCommand) uses its presence
+    /// to show a specific, actionable message ("code generation is not
+    /// yet supported for 'for' statements") instead of the generic "LLVM
+    /// IR generation failed", but must NEVER attribute a real verifier
+    /// failure to "an unsupported construct". Cleared at the start of
+    /// every generate() call - never stale from a previous call.
+    struct UnsupportedConstruct {
+        std::string description;
+        SourceSpan span;
+    };
+    const std::optional<UnsupportedConstruct>& unsupportedConstruct() const noexcept { return unsupportedConstruct_; }
 
     /// The module produced by the most recent successful generate() call.
     ///
@@ -532,11 +552,18 @@ private:
     /// which is exactly what makes forward and recursive calls work.
     llvm::Function* findFunction(semantic::SymbolId id) const;
 
+    /// See unsupportedConstruct()'s own doc comment. Sets the member only
+    /// on the FIRST call per generate() (later/nested deferred-construct
+    /// failures during the same generate() call never overwrite the
+    /// first, most relevant one).
+    void recordUnsupportedConstruct(std::string description, SourceSpan span);
+
     const SourceManager& sources_;
     llvm::LLVMContext context_;
     std::unique_ptr<llvm::Module> module_;
     std::vector<std::pair<semantic::SymbolId, llvm::AllocaInst*>> locals_;
     std::vector<std::pair<semantic::SymbolId, llvm::Function*>> functions_;
+    std::optional<UnsupportedConstruct> unsupportedConstruct_;
 };
 
 } // namespace kai::codegen
