@@ -23,13 +23,12 @@
 //     symbols and would fail cleanly if actually called, so they are
 //     deliberately NOT advertised as usable MVP functions here.
 //
-// `str` is deliberately excluded from primitive-type completion: it is
-// highlighted by the TextMate grammar (because example programs use
-// string literals) and is a real *lexical* literal kind, but KAI's
-// semantic Type vocabulary has no TypeKind::String at all yet (a string
-// literal's own semantic Type is Type::unresolved() - see TypeChecker.cpp
-// and the M6 report), so presenting `str` as an ordinary, fully-supported
-// primitive type alongside `i64`/`bool`/etc. would mislead a beginner.
+// `str` is now included in primitive-type completion (Spellable str +
+// Parameters/Returns MVP): KAI's semantic Type vocabulary has
+// TypeKind::Str, `str` is a spellable source-level type annotation
+// (SemanticAnalyzer.cpp's lookupPrimitiveTypeName() recognizes it), and
+// `str` locals/parameters/returns compile end-to-end. `String` and `&str`
+// remain unimplemented and are intentionally NOT added here.
 
 export interface CompletionMetadata {
     readonly label: string;
@@ -56,7 +55,7 @@ export const KEYWORDS: readonly CompletionMetadata[] = [
     { label: 'false', detail: 'Boolean literal: false' },
 ];
 
-/** Current primitive type spellings (semantic::TypeKind), excluding internal-only kinds and `str` (see file header). */
+/** Current primitive type spellings (semantic::TypeKind), excluding internal-only kinds (Unresolved/Error/Unit). */
 export const PRIMITIVE_TYPES: readonly CompletionMetadata[] = [
     { label: 'i8', detail: '8-bit signed integer' },
     { label: 'i16', detail: '16-bit signed integer' },
@@ -70,6 +69,7 @@ export const PRIMITIVE_TYPES: readonly CompletionMetadata[] = [
     { label: 'f64', detail: '64-bit floating-point number' },
     { label: 'bool', detail: 'Boolean value: true or false' },
     { label: 'char', detail: 'Single character value' },
+    { label: 'str', detail: 'Immutable, non-owning UTF-8 text view' },
 ];
 
 export interface BuiltinCompletionMetadata extends CompletionMetadata {

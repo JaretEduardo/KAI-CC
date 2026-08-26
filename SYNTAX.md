@@ -255,15 +255,15 @@ Current implementation status:
     string literals              implemented
     inferred str locals          implemented
     print(str)                   implemented
-    explicit `: str` annotation  not yet implemented
-    str parameters/returns       not yet implemented
+    explicit `: str` annotation  implemented
+    str parameters/returns       implemented
     String                       not implemented
     provenance/borrow checking   not implemented
 
-`let name = "KAI"` and `print(...)` shown above already work end-to-end in
-the reference compiler. The explicit `str` annotations and `str` parameters
-shown elsewhere in this document (§5, §6) are proposed syntax - `str` is not
-yet a spellable source-level type annotation. `String` is not implemented.
+`let name = "KAI"` and `print(...)` shown above, and the explicit `str`
+annotations/parameters/returns shown elsewhere in this document (§5, §6),
+all already work end-to-end in the reference compiler. `String` is not
+implemented.
 
 ---
 

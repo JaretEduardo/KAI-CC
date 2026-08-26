@@ -375,6 +375,112 @@ void testUtf8ExactBytesEndToEnd() {
     KAI_CHECK(result.stdoutText == "KAI ✓\n");
 }
 
+// SPELLABLE STR + PARAMETERS/RETURNS MVP (M9 spec §27): a str parameter.
+void testStrParameterEndToEnd() {
+    const std::string source = "fn greet(name: str) {\n    print(name)\n}\nfn main() {\n    greet(\"Hello, KAI!\")\n}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_str_param.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText == "Hello, KAI!\n");
+}
+
+// M9 spec §27: a function returning a static str literal.
+void testStrReturnEndToEnd() {
+    const std::string source = "fn language() -> str {\n    return \"KAI\"\n}\nfn main() {\n    print(language())\n}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_str_return.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText == "KAI\n");
+}
+
+// M9 spec §27: single-str-parameter passthrough return.
+void testStrEchoEndToEnd() {
+    const std::string source =
+        "fn echo(value: str) -> str {\n    return value\n}\nfn main() {\n    print(echo(\"hello\"))\n}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_str_echo.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText == "hello\n");
+}
+
+// M9 spec §27: explicit `str` local annotation.
+void testExplicitStrLocalEndToEnd() {
+    const std::string source = "fn main() {\n    let message: str = \"typed\"\n    print(message)\n}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_str_explicit_local.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText == "typed\n");
+}
+
+// M9 spec §27: forwarding a str parameter through at least two functions.
+void testStrForwardingThroughTwoFunctionsEndToEnd() {
+    const std::string source = "fn inner(value: str) {\n    print(value)\n}\n"
+                                "fn outer(value: str) {\n    inner(value)\n}\n"
+                                "fn main() {\n    outer(\"forwarded\")\n}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_str_forwarding.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText == "forwarded\n");
+}
+
+// M9 REQUIRED regression (spec §27.6): embedded NUL through a function
+// boundary (parameter -> return -> print) must preserve exact bytes -
+// never truncated by a strlen-based path anywhere along the call chain.
+void testStrEmbeddedNulThroughFunctionBoundaryEndToEnd() {
+    const std::string source = R"KAI(fn echo(value: str) -> str {
+    return value
+}
+
+fn main() {
+    print(echo("a\0b"))
+}
+)KAI";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_str_nul_boundary.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText.size() == 4);
+    KAI_CHECK(result.stdoutText == std::string("a\0b\n", 4));
+}
+
+// M9 REQUIRED regression (spec §27.7): UTF-8 bytes through a function
+// boundary must be preserved exactly.
+void testStrUtf8ThroughFunctionBoundaryEndToEnd() {
+    const std::string source = "fn echo(value: str) -> str {\n    return value\n}\n"
+                                "fn main() {\n    print(echo(\"KAI ✓\"))\n}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_str_utf8_boundary.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK(result.stdoutText == "KAI ✓\n");
+}
+
 } // namespace
 
 int main() {
@@ -392,6 +498,14 @@ int main() {
     testStringEscapeDecodingEndToEnd();
     testEmbeddedNulExactBytesEndToEnd();
     testUtf8ExactBytesEndToEnd();
+
+    testStrParameterEndToEnd();
+    testStrReturnEndToEnd();
+    testStrEchoEndToEnd();
+    testExplicitStrLocalEndToEnd();
+    testStrForwardingThroughTwoFunctionsEndToEnd();
+    testStrEmbeddedNulThroughFunctionBoundaryEndToEnd();
+    testStrUtf8ThroughFunctionBoundaryEndToEnd();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }

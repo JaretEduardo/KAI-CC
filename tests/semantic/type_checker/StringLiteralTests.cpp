@@ -6,10 +6,14 @@
 //
 // What this file deliberately does NOT test (out of scope for this
 // milestone - see Type::str()'s own comment):
-//   - `str` as a spellable type annotation (still UnknownType - asserted
-//     below as a required regression, not a feature)
 //   - String/&str/reference semantics/ownership/borrowing
 //   - concatenation/formatting/string methods/indexing
+//
+// `str` as a spellable type annotation was out of scope for THIS milestone
+// but has since been implemented (Spellable str + Parameters/Returns MVP) -
+// see SpellableStrTests.cpp in this same directory for that coverage;
+// testExplicitStrAnnotationStillUnknownType() below was updated in place
+// rather than left asserting a claim that stopped being true.
 
 #include "semantic/type_checker/TypeCheckerTestSupport.hpp"
 
@@ -58,32 +62,28 @@ void testInferredLocalFromStringLiteralHasStrType() {
     }
 }
 
-// REQUIRED regression (M8 spec #18): `str` remains intentionally
-// unspellable as a source type annotation. SemanticAnalyzer's
-// lookupPrimitiveTypeName() was NOT changed to recognize it - this must
-// still resolve exactly like any other unknown named type (Result,
-// Buffer, ...): UnknownType, Type::error(), never Type::str().
-void testExplicitStrAnnotationStillUnknownType() {
+// UPDATED (Spellable str + Parameters/Returns MVP): `str` is now a
+// spellable source-level type annotation - SemanticAnalyzer's
+// lookupPrimitiveTypeName() recognizes it (see SemanticAnalyzer.cpp). This
+// test previously asserted the opposite (UnknownType); it is corrected
+// here rather than left asserting a claim the compiler no longer makes.
+// See SpellableStrTests.cpp for the fuller parameter/return/String/&str
+// coverage this milestone added.
+void testExplicitStrAnnotationNowResolves() {
     SourceManager sm;
     Checked result = analyzeAndCheck(sm, "fn f() {\n    let x: str = \"hello\"\n}");
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
         return;
     }
-
-    KAI_CHECK(result.model.errors().size() == 1);
-    if (result.model.errors().size() == 1) {
-        const auto& error = result.model.errors()[0];
-        KAI_CHECK(error.kind == SemanticErrorKind::UnknownType);
-        KAI_CHECK(sm.text(error.primarySpan) == "str");
-    }
+    KAI_CHECK(result.model.errors().empty());
 
     const auto& fn = static_cast<const FunctionDecl&>(*result.parsed->declarations()[0]);
     const auto& declX = static_cast<const VarDeclStmt&>(*fn.body().statements()[0]);
     const auto id = result.model.declarationSymbol(declX.name());
     KAI_CHECK(id.has_value());
     if (id) {
-        KAI_CHECK(result.model.symbol(*id).type == Type::error());
+        KAI_CHECK(result.model.symbol(*id).type == Type::str());
     }
 }
 
@@ -128,7 +128,7 @@ void testStringEqualityRemainsInvalid() {
 int main() {
     testStringLiteralHasStrType();
     testInferredLocalFromStringLiteralHasStrType();
-    testExplicitStrAnnotationStillUnknownType();
+    testExplicitStrAnnotationNowResolves();
     testStringConcatenationOperatorRemainsInvalid();
     testStringEqualityRemainsInvalid();
 
