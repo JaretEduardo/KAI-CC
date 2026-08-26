@@ -37,6 +37,7 @@ const EXPECTED_PRIMITIVE_TYPES = [
     'f64',
     'bool',
     'char',
+    'str',
 ];
 
 function labelsOf(entries: readonly { label: string }[]): string[] {
@@ -57,11 +58,12 @@ function testPrimitiveTypeSetMatchesCurrentTypeKindExactly(): void {
     assert.deepStrictEqual([...labels].sort(), [...EXPECTED_PRIMITIVE_TYPES].sort());
 }
 
-function testStrIsNeverExposedAsAPrimitiveType(): void {
-    // `str` is highlighted by the TextMate grammar but has no
-    // TypeKind::String backend representation yet (see completionData.ts's
-    // own header comment) - it must never appear here.
-    assert.ok(!labelsOf(PRIMITIVE_TYPES).includes('str'));
+function testStrIsExposedAsAPrimitiveType(): void {
+    // Spellable str + Parameters/Returns MVP: `str` is a spellable
+    // source-level type annotation with a real TypeKind::Str backend
+    // representation now (see completionData.ts's own header comment) -
+    // it must appear here like any other primitive.
+    assert.ok(labelsOf(PRIMITIVE_TYPES).includes('str'));
 }
 
 function testInternalOnlyTypeKindsAreNeverExposed(): void {
@@ -110,7 +112,7 @@ function testOrdinaryExpressionContextIsNotTypeOnly(): void {
 function main(): void {
     testKeywordSetMatchesCurrentLexerExactly();
     testPrimitiveTypeSetMatchesCurrentTypeKindExactly();
-    testStrIsNeverExposedAsAPrimitiveType();
+    testStrIsExposedAsAPrimitiveType();
     testInternalOnlyTypeKindsAreNeverExposed();
     testOnlyPrintIsOfferedAsABuiltin();
     testPrintInsertsAUsefulSnippet();

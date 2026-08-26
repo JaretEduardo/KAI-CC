@@ -35,6 +35,8 @@ const char* semanticErrorKindName(semantic::SemanticErrorKind kind) {
             return "assignment to immutable binding";
         case semantic::SemanticErrorKind::MissingReturn:
             return "missing return";
+        case semantic::SemanticErrorKind::UnsupportedStrReturn:
+            return "unsupported str return";
     }
     return "semantic error";
 }

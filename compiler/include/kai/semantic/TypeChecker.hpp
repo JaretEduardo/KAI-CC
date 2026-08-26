@@ -9,6 +9,7 @@
 #include "kai/source/SourceLocation.hpp"
 #include "kai/source/SourceManager.hpp"
 
+#include <cstddef>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -107,6 +108,14 @@ private:
     struct ReturnContext {
         Type returnType;
         std::optional<SourceSpan> annotationSpan;
+
+        /// Spellable str + Parameters/Returns MVP (M9): the number of
+        /// `str`-typed parameters the enclosing function declares.
+        /// Consulted ONLY by checkReturnStmt()'s temporary
+        /// UnsupportedStrReturn rule (see its own comment) - a narrow,
+        /// signature-shape fact, never a general provenance/lifetime
+        /// analysis. Meaningless (and unused) when returnType is not Str.
+        std::size_t strParameterCount = 0;
     };
 
     void checkTopLevelDeclaration(const ast::Decl& decl, SemanticModel& model) const;
@@ -170,6 +179,18 @@ private:
     /// produces a diagnostic (spec #13/#14/#18/#19); a concrete mismatch
     /// reuses TypeMismatch, with `relatedSpan = returnContext.annotationSpan`
     /// (spec #9).
+    ///
+    /// Spellable str + Parameters/Returns MVP (M9): when the declared
+    /// return type is Str and the check above passed, ALSO applies one
+    /// narrow, temporary restriction: a non-literal `str` return (i.e.
+    /// anything other than a string literal expression) is rejected with
+    /// UnsupportedStrReturn when the enclosing function has more than one
+    /// `str` parameter (`returnContext.strParameterCount > 1`). This is a
+    /// pure signature-shape + one-expression-kind check - never dataflow/
+    /// provenance tracking of WHICH parameter a value came from - kept
+    /// only until a real return-provenance analysis exists (see
+    /// MEMORY_MODEL.md §25's Static/ExternallyOwned/LocallyOwned design,
+    /// intentionally NOT implemented here).
     void checkReturnStmt(const ast::ReturnStmt& returnStmt, const ReturnContext& returnContext,
                           SemanticModel& model) const;
 

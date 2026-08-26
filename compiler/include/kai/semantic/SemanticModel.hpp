@@ -29,6 +29,15 @@ enum class SemanticErrorKind : std::uint8_t {
     InvalidAssignmentTarget,
     AssignmentToImmutableBinding,
     MissingReturn,
+
+    /// Spellable str + parameters/returns MVP (M9): a `str`-returning
+    /// function has more than one `str`-typed parameter, AND the returned
+    /// expression is not itself a string literal. This is a temporary,
+    /// conservative implementation-boundary restriction - NOT a general
+    /// provenance/borrow-checking result - kept only until KAI has an
+    /// owned `String`/borrowed-view mechanism and a real return-provenance
+    /// analysis can replace it (see TypeChecker.cpp's checkReturnStmt()).
+    UnsupportedStrReturn,
 };
 
 /// A minimal, message-free description of a semantic failure - the

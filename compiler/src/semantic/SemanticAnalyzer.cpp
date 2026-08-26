@@ -10,12 +10,21 @@ namespace kai::semantic {
 
 namespace {
 
-// Exact GRAMMAR.md §12 primitive_type list. Deliberately not a
-// generic Type::primitive(TypeKind) lookup: Type's constructor is
-// private with no such entry point (see Type.hpp) specifically so
-// Error/Unresolved can never be constructed by anything other than
-// their own named factories - this table calls each factory by name
-// instead of routing through a shared TypeKind-keyed path.
+// GRAMMAR.md §12's primitive_type list, plus `str` (Spellable str +
+// Parameters/Returns MVP, M9): `str` is deliberately NOT in GRAMMAR.md's
+// primitive_type production (it parses as an ordinary named_type
+// identifier, exactly like `String`/`User` - see NamedTypeSyntax's own
+// comment) - it is recognized HERE, at the semantic layer, the same way
+// every other primitive spelling is, via Type::str() (Type.hpp). `String`
+// and `&str` are deliberately NOT added: `String` remains future/
+// unimplemented, and `&str` is unnecessary under the approved str design
+// (str is already a Copy, non-owning view - see TYPE_SYSTEM.md §15).
+//
+// Deliberately not a generic Type::primitive(TypeKind) lookup: Type's
+// constructor is private with no such entry point (see Type.hpp)
+// specifically so Error/Unresolved can never be constructed by anything
+// other than their own named factories - this table calls each factory by
+// name instead of routing through a shared TypeKind-keyed path.
 std::optional<Type> lookupPrimitiveTypeName(std::string_view name) {
     if (name == "i8") return Type::i8();
     if (name == "i16") return Type::i16();
@@ -29,6 +38,7 @@ std::optional<Type> lookupPrimitiveTypeName(std::string_view name) {
     if (name == "f64") return Type::f64();
     if (name == "bool") return Type::boolean();
     if (name == "char") return Type::character();
+    if (name == "str") return Type::str();
     return std::nullopt;
 }
 
@@ -166,10 +176,12 @@ Type SemanticAnalyzer::resolveNamedTypeSyntax(const ast::NamedTypeSyntax& type, 
         return *primitive;
     }
 
-    // str/String/Result/Option/Buffer and any other non-primitive name
-    // are all uniformly UnknownType in this phase - no special-casing,
-    // per the approved design (no user-defined types exist yet to
-    // recognize).
+    // `str` is now recognized above (lookupPrimitiveTypeName). Every
+    // other non-primitive name - String/Result/Option/Buffer/&str and any
+    // other user-defined-looking name - is uniformly UnknownType in this
+    // phase, no special-casing: no user-defined types exist yet to
+    // recognize, and `String` is deliberately not added here (still
+    // future/unimplemented - see TYPE_SYSTEM.md §14).
     model.addError(SemanticError{SemanticErrorKind::UnknownType, type.name().span, std::nullopt});
     return Type::error();
 }

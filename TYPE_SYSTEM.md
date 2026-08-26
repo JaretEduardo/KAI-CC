@@ -570,18 +570,18 @@ through `&str`; that description has been superseded by the definition in
 string literals              implemented
 inferred str locals          implemented
 print(str)                   implemented
-explicit `: str` annotation  not yet implemented
-str parameters/returns       not yet implemented
+explicit `: str` annotation  implemented
+str parameters/returns       implemented
 String                       not implemented
 provenance/borrow checking   not implemented
 ```
 
-`str` already exists as a concrete internal semantic type, and string
-literals (`let x = "hello"`, `print("hello")`) already work end-to-end in the
-reference compiler. `str` is not yet a *spellable source-level type
-annotation* - `let x: str = "hello"` and `fn f(x: str)` are the proposed
-syntax this section describes, not yet implemented. `String` does not exist
-in the compiler at all yet.
+`str` is a spellable source-level type annotation - `let x: str = "hello"`,
+`fn f(x: str)`, and `fn f() -> str` all compile end-to-end in the reference
+compiler (Spellable str + Parameters/Returns MVP). A temporary, narrow
+return-safety restriction applies to functions with more than one `str`
+parameter (see §15). `String` does not exist in the compiler at all yet, and
+no general return-provenance/borrow checker exists.
 
 ---
 
@@ -652,6 +652,12 @@ ever useful once KAI has a general reference/borrow design remains an open
 question (DESIGN_QUESTIONS.md).
 
 Owned, growable text uses `String` (§14, future).
+
+`str` is a valid function return type (`fn language() -> str { return "KAI" }`,
+`fn identity(value: str) -> str { return value }`). A function with more than
+one `str` parameter may only return a `str` that is itself a literal - a
+temporary, narrow implementation-boundary restriction (not a general
+provenance rule) documented in full in MEMORY_MODEL.md §25.
 
 ---
 

@@ -233,6 +233,18 @@ const ast::IdentifierExpr* unwrapAssignmentTargetIdentifier(const ast::Expr& exp
     return nullptr;
 }
 
+// Spellable str + Parameters/Returns MVP (M9): structural-only Paren
+// unwrap, mirroring unwrapAssignmentTargetIdentifier/
+// unwrapDirectCalleeIdentifier above - used only by checkReturnStmt()'s
+// temporary UnsupportedStrReturn rule to see through `return ("literal")`
+// to the literal itself.
+const ast::Expr& unwrapParenExpr(const ast::Expr& expr) {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return unwrapParenExpr(static_cast<const ast::ParenExpr&>(expr).inner());
+    }
+    return expr;
+}
+
 } // namespace
 
 TypeChecker::TypeChecker(const SourceManager& sources) noexcept : sources_(sources) {}
@@ -267,9 +279,20 @@ void TypeChecker::checkFunctionBody(const ast::FunctionDecl& fn, SemanticModel& 
     // actually needed for the rest of this function's traversal. The
     // annotation span (spec #9) comes from the AST's own TypeSyntax*, not
     // from the Symbol - nullopt for an implicit Unit return.
+    // Spellable str + Parameters/Returns MVP (M9): a pure signature-shape
+    // count, computed once here from the already-resolved
+    // FunctionSignature - never re-derived per return statement, and
+    // meaningless when the return type isn't Str (checkReturnStmt() only
+    // consults it in that case).
+    std::size_t strParameterCount = 0;
+    for (const Type paramType : model.symbol(*fnId).signature->parameterTypes) {
+        strParameterCount += paramType.isStr() ? 1 : 0;
+    }
+
     const ReturnContext returnContext{
         model.symbol(*fnId).signature->returnType,
         fn.returnType() != nullptr ? std::optional<SourceSpan>(fn.returnType()->span()) : std::nullopt,
+        strParameterCount,
     };
 
     checkBlock(fn.body(), returnContext, model);
@@ -401,6 +424,29 @@ void TypeChecker::checkReturnStmt(const ast::ReturnStmt& returnStmt, const Retur
             returnContext.annotationSpan,
             declaredReturnType,
             actualType,
+        });
+        return;
+    }
+
+    // Spellable str + Parameters/Returns MVP (M9): the type-check above
+    // passed (actualType == declaredReturnType == Str). Every currently
+    // constructible `str` value ultimately originates from static literal
+    // storage (there is no String, no heap-backed owner, no borrowed-view
+    // mechanism yet), so returning ANY well-typed `str` is safe today -
+    // EXCEPT that once more than one `str` parameter exists, a
+    // non-literal return's true provenance is ambiguous without a real
+    // provenance analysis (which this milestone deliberately does not
+    // build). Reject only that narrow, ambiguous shape; a literal return
+    // is always allowed regardless of parameter count, since it can never
+    // depend on any parameter's value.
+    if (declaredReturnType.isStr() && returnContext.strParameterCount > 1 && returnStmt.value() != nullptr &&
+        unwrapParenExpr(*returnStmt.value()).kind() != ast::ExprKind::Literal) {
+        model.addError(SemanticError{
+            SemanticErrorKind::UnsupportedStrReturn,
+            returnStmt.value()->span(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
         });
     }
 }

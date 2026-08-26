@@ -52,6 +52,10 @@ kai_add_test(semantic_type_checker_control_tests semantic/type_checker/Condition
 # MINIMAL STRING LITERAL SUPPORT: Type::str() TypeChecker coverage, split
 # out like every other type_checker/*.cpp milestone file.
 kai_add_test(semantic_type_checker_string_literal_tests semantic/type_checker/StringLiteralTests.cpp)
+# SPELLABLE STR + PARAMETERS/RETURNS MVP: `str` becomes a spellable source
+# type annotation - semantic-resolution + TypeChecker coverage together
+# (M9 spec §24/§25), split out like every other type_checker/*.cpp milestone.
+kai_add_test(semantic_type_checker_spellable_str_tests semantic/type_checker/SpellableStrTests.cpp)
 
 kai_add_test(semantic_control_flow_analyzer_tests semantic/ControlFlowAnalyzerTests.cpp)
 
@@ -75,6 +79,11 @@ kai_add_test(codegen_llvm_code_generator_tests codegen/LLVMCodeGeneratorTests.cp
 # call codegen coverage, kept out of the already-giant
 # LLVMCodeGeneratorTests.cpp (M8 spec §8/§21).
 kai_add_test(string_literal_codegen_tests codegen/StringLiteralCodegenTests.cpp)
+
+# SPELLABLE STR + PARAMETERS/RETURNS MVP: parameter/return/call/forwarding/
+# recursion/type-identity codegen coverage for `str`, kept out of the
+# already-giant LLVMCodeGeneratorTests.cpp (M9 spec §9/§26).
+kai_add_test(spellable_str_codegen_tests codegen/SpellableStrCodegenTests.cpp)
 
 # LLVM CODEGEN MILESTONE 7: LLVMObjectEmitter tested independently of the
 # CLI (M7 spec §21) - links kai_compiler directly like every other
