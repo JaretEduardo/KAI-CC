@@ -21,10 +21,14 @@ kaicc <file.kai> -o <output>
 ```
 
 Compiles `<file.kai>` all the way to a native executable at `<output>`.
-This requires a working host C compiler driver (`cc`, `clang`, or `gcc`)
-to be available on `PATH` - `kaicc` uses it only for the final native link
-step (see the root `README.md`'s "Portable Linux release" section). It
-does **not** require LLVM to be installed on the machine running `kaicc`.
+This requires a working host C toolchain to be available: a
+`cc`/`clang`/`gcc`-compatible compiler driver on `PATH` - `kaicc` uses it
+only for the final native link step - plus the platform's normal libc
+development/startup files and linker support, since a bare compiler
+driver package is not always sufficient by itself (see the root
+`README.md`'s "Portable Linux release" section for a confirmed example).
+It does **not** require LLVM to be installed on the machine running
+`kaicc`.
 
 ## Semantic queries
 

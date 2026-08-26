@@ -10,6 +10,30 @@ project(
 # probing (e.g. LibEdit) uses try_compile() with a .c file; KAI-CC itself
 # has no C sources.
 
+# Pre-release/prerelease-suffix versioning: CMake's own project(VERSION ...)
+# must stay strictly numeric-dotted (see above), so a semver prerelease
+# identifier like "alpha.1" cannot live there. This is the one other place
+# the full compiler version is assembled - kaicc --version and everything
+# else derive from PROJECT_VERSION + this suffix via the generated
+# kai/Version.hpp below, so there is exactly one canonical version string,
+# never duplicated as a literal in source. Set to an empty string for a
+# final, non-prerelease build.
+set(KAI_CC_PRERELEASE_SUFFIX "alpha.1" CACHE STRING
+    "KAI-CC prerelease suffix appended to PROJECT_VERSION (empty for a final release)")
+
+if(KAI_CC_PRERELEASE_SUFFIX)
+    set(KAI_CC_VERSION_STRING "${PROJECT_VERSION}-${KAI_CC_PRERELEASE_SUFFIX}")
+else()
+    set(KAI_CC_VERSION_STRING "${PROJECT_VERSION}")
+endif()
+message(STATUS "KAI-CC version: ${KAI_CC_VERSION_STRING}")
+
+configure_file(
+    ${PROJECT_SOURCE_DIR}/compiler/include/kai/Version.hpp.in
+    ${CMAKE_BINARY_DIR}/generated/kai/Version.hpp
+    @ONLY
+)
+
 # C++23
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -139,6 +163,11 @@ kai_enable_warnings(kaicc_cli)
 # Main compiler executable
 add_executable(kaicc
     compiler/src/main.cpp
+)
+
+target_include_directories(kaicc
+    PRIVATE
+        ${CMAKE_BINARY_DIR}/generated
 )
 
 target_link_libraries(kaicc

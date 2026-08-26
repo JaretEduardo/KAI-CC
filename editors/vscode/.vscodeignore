@@ -32,3 +32,11 @@ assets/icon.svg
 # despite being .gitignore'd (they are build artifacts, not source).
 !bin/**
 !lib/**
+
+# v0.1.0-alpha.1: never exclude the staged legal material either (project
+# LICENSE, THIRD_PARTY_NOTICES.md, third-party license texts) - it too is
+# .gitignore'd here (staged, not hand-authored in this directory) but must
+# ship in the VSIX, since the bundled kaicc/LLVM/Z3 binary content requires it.
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!third_party/**

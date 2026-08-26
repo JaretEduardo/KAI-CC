@@ -3,9 +3,9 @@
 **KAI** is an experimental, statically-typed, compiled systems programming language explored with AI-assisted
 software development in mind from the start. **KAI-CC** is its reference compiler.
 
-> **Status: early / pre-release.** KAI-CC currently targets **Linux x86_64 only**. It compiles a real (but
-> still small) subset of KAI source directly to a native executable via LLVM. Syntax, semantics, and tooling
-> may change significantly. Do not use KAI for production software.
+> **Status: alpha / pre-release (v0.1.0-alpha.1).** KAI-CC currently targets **Linux x86_64 only**. It
+> compiles a real (but still small) subset of KAI source directly to a native executable via LLVM. Syntax,
+> semantics, and tooling may change significantly. Do not use KAI for production software.
 
 ---
 
@@ -129,7 +129,9 @@ Required:
 - Ninja (or another CMake-supported generator)
 - a C++23 compiler
 - LLVM 22 development packages
-- a working host C compiler driver (`cc`, `clang`, or `gcc`) for the final native link step
+- a working host C toolchain for the final native link step: a `cc`/`clang`/`gcc`-compatible compiler
+  driver, plus the platform's normal libc development/startup files and linker support (a bare compiler
+  driver package is not always sufficient by itself - see "Portable Linux release" below)
 
 Package names vary by distribution; the following is what this repository is actually developed and tested
 against (**Fedora-specific** - not a claim that other distributions use the same names):
@@ -181,9 +183,13 @@ kai-linux-x86_64/
 
 **End users do not need LLVM installed** - `kaicc` statically links the LLVM components it needs.
 `libz3.so.4` is bundled for the same reason (an upstream LLVM packaging dependency KAI-CC itself never calls
-into - see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)). End users **do** need a host C compiler driver
-(`cc`/`clang`/`gcc`) on `PATH`, since `kaicc` shells out to it for the final native link of every program it
-compiles.
+into - see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)). Native compilation still requires a working
+host C toolchain: a `cc`/`clang`/`gcc`-compatible compiler driver on `PATH`, since `kaicc` shells out to it
+for the final native link of every program it compiles, **plus** the platform's normal libc
+development/startup files and linker support - a bare compiler driver package is not always enough by itself.
+For example, a minimal Ubuntu 22.04 install needs both `gcc` and `libc6-dev` (installing `gcc` alone,
+without its recommended packages, was confirmed to fail linking with a missing `Scrt1.o`/`crti.o` error);
+most desktop Linux installs and `build-essential`-style metapackages already include everything needed.
 
 This artifact is built from an Ubuntu 22.04 baseline and has been tested running on both Ubuntu 22.04 and a
 current Fedora host. This is **not** a claim of universal Linux compatibility - only what has actually been
@@ -232,8 +238,7 @@ Platform: **Linux x86_64 only**. No Windows or macOS support exists or is claime
 
 ## License
 
-**License: not yet selected.** This repository does not currently grant any license to use, copy, modify, or
-redistribute its own source code; that decision has not been made yet.
+KAI-CC is licensed under the **Apache License, Version 2.0** - see [`LICENSE`](LICENSE) for the full text.
 
 Binary releases incorporate third-party software (LLVM, Z3) under their own separate licenses - see
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

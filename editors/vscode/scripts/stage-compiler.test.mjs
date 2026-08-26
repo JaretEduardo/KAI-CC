@@ -14,6 +14,20 @@ function makeTempDir(prefix) {
     return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
+// v0.1.0-alpha.1: stageCompiler() now also requires LICENSE/
+// THIRD_PARTY_NOTICES.md/third_party/licenses/* to exist under whichever
+// root it stages from (releaseRoot, or repoRoot when releaseRoot is
+// omitted) - every pre-existing test's fake root needs these too, or the
+// new legal-file check would fail them for an unrelated reason.
+function setupLegalFiles(root, { licenseContent = 'fake-license', noticesContent = 'fake-notices' } = {}) {
+    fs.writeFileSync(path.join(root, 'LICENSE'), licenseContent);
+    fs.writeFileSync(path.join(root, 'THIRD_PARTY_NOTICES.md'), noticesContent);
+    const licenseDir = path.join(root, 'third_party', 'licenses');
+    fs.mkdirSync(licenseDir, { recursive: true });
+    fs.writeFileSync(path.join(licenseDir, 'LLVM-LICENSE.txt'), 'fake-llvm-license');
+    fs.writeFileSync(path.join(licenseDir, 'Z3-LICENSE.txt'), 'fake-z3-license');
+}
+
 function testStagesBothFilesToExpectedPaths() {
     const repoRoot = makeTempDir('kai-stage-test-repo-');
     const extensionRoot = makeTempDir('kai-stage-test-ext-');
@@ -28,6 +42,7 @@ function testStagesBothFilesToExpectedPaths() {
         fs.writeFileSync(path.join(buildBin, 'kaicc'), fakeKaiccContent);
         fs.chmodSync(path.join(buildBin, 'kaicc'), 0o755);
         fs.writeFileSync(path.join(buildLib, 'libkai_runtime.a'), 'fake-archive-contents');
+        setupLegalFiles(repoRoot);
 
         const result = stageCompiler({ repoRoot, extensionRoot });
 
@@ -88,6 +103,7 @@ function testStagesFromReleaseRootWhenProvided() {
         fs.mkdirSync(buildLib, { recursive: true });
         fs.writeFileSync(path.join(buildBin, 'kaicc'), 'this-is-the-LOCAL-build-and-must-not-be-staged');
         fs.writeFileSync(path.join(buildLib, 'libkai_runtime.a'), 'local-build-archive');
+        setupLegalFiles(repoRoot, { licenseContent: 'this-is-the-REPO-license-and-must-not-be-staged' });
 
         const releaseBin = path.join(releaseRoot, 'bin');
         const releaseLib = path.join(releaseRoot, 'lib', 'kai');
@@ -97,12 +113,30 @@ function testStagesFromReleaseRootWhenProvided() {
         fs.writeFileSync(path.join(releaseBin, 'kaicc'), portableKaiccContent);
         fs.chmodSync(path.join(releaseBin, 'kaicc'), 0o755);
         fs.writeFileSync(path.join(releaseLib, 'libkai_runtime.a'), 'portable-release-archive');
+        setupLegalFiles(releaseRoot, { licenseContent: 'this-is-the-PORTABLE-release-LICENSE' });
 
         const result = stageCompiler({ repoRoot, extensionRoot, releaseRoot });
 
         assert.strictEqual(result.source, 'release');
         assert.strictEqual(fs.readFileSync(result.kaiccPath, 'utf8'), portableKaiccContent);
         assert.strictEqual(fs.readFileSync(result.runtimePath, 'utf8'), 'portable-release-archive');
+
+        // v0.1.0-alpha.1: legal material must come from releaseRoot too -
+        // never the repo's own copy - proving genuine preference the same
+        // way the kaicc/runtime content checks above do.
+        assert.strictEqual(
+            fs.readFileSync(path.join(extensionRoot, 'LICENSE'), 'utf8'),
+            'this-is-the-PORTABLE-release-LICENSE',
+        );
+        assert.ok(fs.existsSync(path.join(extensionRoot, 'THIRD_PARTY_NOTICES.md')));
+        assert.ok(fs.existsSync(path.join(extensionRoot, 'third_party', 'licenses', 'LLVM-LICENSE.txt')));
+        assert.ok(fs.existsSync(path.join(extensionRoot, 'third_party', 'licenses', 'Z3-LICENSE.txt')));
+        assert.ok(
+            result.legalFiles.includes('LICENSE') &&
+                result.legalFiles.includes('THIRD_PARTY_NOTICES.md') &&
+                result.legalFiles.some((f) => f.endsWith('LLVM-LICENSE.txt')),
+            'legalFiles should report every staged legal file',
+        );
     } finally {
         fs.rmSync(repoRoot, { recursive: true, force: true });
         fs.rmSync(releaseRoot, { recursive: true, force: true });
@@ -124,10 +158,19 @@ function testDefaultSourceIsBuildWhenReleaseRootOmitted() {
         fs.writeFileSync(path.join(buildBin, 'kaicc'), 'local-build-kaicc');
         fs.chmodSync(path.join(buildBin, 'kaicc'), 0o755);
         fs.writeFileSync(path.join(buildLib, 'libkai_runtime.a'), 'local-build-archive');
+        setupLegalFiles(repoRoot);
 
         const result = stageCompiler({ repoRoot, extensionRoot });
 
         assert.strictEqual(result.source, 'build');
+
+        // v0.1.0-alpha.1: with no releaseRoot, legal material comes from
+        // the repository root's own tracked files instead - ordinary
+        // local extension development must not require a release build
+        // just to get a valid LICENSE/notices staged.
+        assert.ok(fs.existsSync(path.join(extensionRoot, 'LICENSE')));
+        assert.ok(fs.existsSync(path.join(extensionRoot, 'THIRD_PARTY_NOTICES.md')));
+        assert.ok(fs.existsSync(path.join(extensionRoot, 'third_party', 'licenses', 'LLVM-LICENSE.txt')));
     } finally {
         fs.rmSync(repoRoot, { recursive: true, force: true });
         fs.rmSync(extensionRoot, { recursive: true, force: true });
@@ -172,6 +215,7 @@ function testStagesExtraBundledLibraryFromReleaseRoot() {
         fs.chmodSync(path.join(releaseBin, 'kaicc'), 0o755);
         fs.writeFileSync(path.join(releaseLib, 'libkai_runtime.a'), 'portable-archive');
         fs.writeFileSync(path.join(releaseLib, 'libz3.so.4'), 'fake-z3-contents');
+        setupLegalFiles(releaseRoot);
 
         const result = stageCompiler({ repoRoot, extensionRoot, releaseRoot });
 
@@ -200,12 +244,42 @@ function testNoExtraLibrariesStagedFromOrdinaryBuildTree() {
         fs.writeFileSync(path.join(buildBin, 'kaicc'), 'local-build-kaicc');
         fs.chmodSync(path.join(buildBin, 'kaicc'), 0o755);
         fs.writeFileSync(path.join(buildLib, 'libkai_runtime.a'), 'local-build-archive');
+        setupLegalFiles(repoRoot);
 
         const result = stageCompiler({ repoRoot, extensionRoot });
 
         assert.deepStrictEqual(result.extraLibraries, []);
     } finally {
         fs.rmSync(repoRoot, { recursive: true, force: true });
+        fs.rmSync(extensionRoot, { recursive: true, force: true });
+    }
+}
+
+// v0.1.0-alpha.1: a release layout missing required legal material must
+// fail clearly - a VSIX must never silently lose the project LICENSE or
+// third-party notices carried by the binary content it bundles.
+function testFailsClearlyWhenLegalMaterialIsMissing() {
+    const repoRoot = makeTempDir('kai-stage-test-repo-nolegal-');
+    const releaseRoot = makeTempDir('kai-stage-test-release-nolegal-');
+    const extensionRoot = makeTempDir('kai-stage-test-ext-nolegal-');
+
+    try {
+        const releaseBin = path.join(releaseRoot, 'bin');
+        const releaseLib = path.join(releaseRoot, 'lib', 'kai');
+        fs.mkdirSync(releaseBin, { recursive: true });
+        fs.mkdirSync(releaseLib, { recursive: true });
+        fs.writeFileSync(path.join(releaseBin, 'kaicc'), 'portable-kaicc');
+        fs.chmodSync(path.join(releaseBin, 'kaicc'), 0o755);
+        fs.writeFileSync(path.join(releaseLib, 'libkai_runtime.a'), 'portable-archive');
+        // Deliberately no LICENSE/THIRD_PARTY_NOTICES.md/third_party/ here.
+
+        assert.throws(
+            () => stageCompiler({ repoRoot, extensionRoot, releaseRoot }),
+            /required legal file not found/,
+        );
+    } finally {
+        fs.rmSync(repoRoot, { recursive: true, force: true });
+        fs.rmSync(releaseRoot, { recursive: true, force: true });
         fs.rmSync(extensionRoot, { recursive: true, force: true });
     }
 }
@@ -217,5 +291,6 @@ testDefaultSourceIsBuildWhenReleaseRootOmitted();
 testFailsClearlyWhenReleaseRootIsInvalid();
 testStagesExtraBundledLibraryFromReleaseRoot();
 testNoExtraLibrariesStagedFromOrdinaryBuildTree();
+testFailsClearlyWhenLegalMaterialIsMissing();
 
 console.log('stage-compiler.test.mjs: all tests passed');

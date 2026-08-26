@@ -20,17 +20,26 @@
 #     just-installed release kaicc below, so a future example that stops
 #     matching its documented output fails this script loudly instead of
 #     silently shipping broken)
+#   dist/kai-linux-x86_64/LICENSE (v0.1.0-alpha.1: the project's own
+#     Apache-2.0 license - see the root LICENSE file)
 #   dist/kai-linux-x86_64/README.md (RELEASE HARDENING M2.1: so a
 #     downloaded tarball is self-describing on its own)
 #   dist/kai-linux-x86_64/THIRD_PARTY_NOTICES.md +
 #     dist/kai-linux-x86_64/third_party/licenses/{LLVM-LICENSE.txt,
-#     Z3-COPYRIGHT.txt} (RELEASE HARDENING M2.1: the release statically
-#     links LLVM and bundles libz3.so.4 - see THIRD_PARTY_NOTICES.md
-#     itself - so the factual third-party notices ship alongside the
-#     binaries they describe, never left behind in the source repo only).
-#     This script FAILS if any of these required files is missing from
-#     the produced artifact - never a silent partial release.
-#   dist/kai-linux-x86_64.tar.gz
+#     Z3-LICENSE.txt,Z3-COPYRIGHT.txt} (RELEASE HARDENING M2.1: the
+#     release statically links LLVM and bundles libz3.so.4 - see
+#     THIRD_PARTY_NOTICES.md itself - so the factual third-party notices
+#     ship alongside the binaries they describe, never left behind in the
+#     source repo only). This script FAILS if any of these required files
+#     (including LICENSE) is missing from the produced artifact - never a
+#     silent partial release.
+#   dist/kai-<version>-linux-x86_64.tar.gz (v0.1.0-alpha.1: version is
+#     read directly from the just-installed release kaicc's own
+#     `--version` output - never a second hard-coded version literal in
+#     this script. The staging directory itself stays the unversioned
+#     kai-linux-x86_64/, since KAI_RELEASE_ROOT and other tooling
+#     reference that fixed name. This script no longer produces the old
+#     unversioned dist/kai-linux-x86_64.tar.gz.)
 #
 # Uses a container-local build directory (build-release/, bind-mounted
 # from the repo root) - NEVER the host's own build/ tree - so the
@@ -134,26 +143,29 @@ mkdir -p "${DIST_DIR}"
         check_release_example "variables.kai" "$(printf "KAI\n0.1\n2026\n1")"
         rm -f /tmp/release_example_check.out
 
-        # RELEASE HARDENING M2.1: root README + factual third-party
-        # notices ship in every release artifact - see the header comment
-        # at the top of this script. Copied verbatim, never renamed or
-        # paraphrased.
+        # RELEASE HARDENING M2.1 / v0.1.0-alpha.1: root README, project
+        # LICENSE, and factual third-party notices ship in every release
+        # artifact - see the header comment at the top of this script.
+        # Copied verbatim, never renamed or paraphrased.
+        cp LICENSE "${DEST}/LICENSE"
         cp README.md "${DEST}/README.md"
         cp THIRD_PARTY_NOTICES.md "${DEST}/THIRD_PARTY_NOTICES.md"
         mkdir -p "${DEST}/third_party/licenses"
         cp third_party/licenses/LLVM-LICENSE.txt "${DEST}/third_party/licenses/LLVM-LICENSE.txt"
+        cp third_party/licenses/Z3-LICENSE.txt "${DEST}/third_party/licenses/Z3-LICENSE.txt"
         cp third_party/licenses/Z3-COPYRIGHT.txt "${DEST}/third_party/licenses/Z3-COPYRIGHT.txt"
     '
 
 echo "==> Verifying required release documentation/notice files are present"
-# RELEASE HARDENING M2.1: never ship a silent partial release - fail loudly
-# if any factual third-party notice or the root README didn't make it into
-# the staged artifact.
+# RELEASE HARDENING M2.1 / v0.1.0-alpha.1: never ship a silent partial
+# release - fail loudly if the project LICENSE or any factual third-party
+# notice/root README didn't make it into the staged artifact.
 REQUIRED_FILES=(
+    "LICENSE"
     "README.md"
     "THIRD_PARTY_NOTICES.md"
     "third_party/licenses/LLVM-LICENSE.txt"
-    "third_party/licenses/Z3-COPYRIGHT.txt"
+    "third_party/licenses/Z3-LICENSE.txt"
 )
 for f in "${REQUIRED_FILES[@]}"; do
     if [ ! -f "${DIST_DIR}/${ARTIFACT_NAME}/${f}" ]; then
@@ -166,10 +178,26 @@ done
 echo "==> Portable artifact staged at dist/${ARTIFACT_NAME}/"
 find "${DIST_DIR}/${ARTIFACT_NAME}" -type f
 
+# v0.1.0-alpha.1: derive the archive's version from the just-built,
+# just-installed release kaicc itself (single canonical version source -
+# see CMakeLists.txt's KAI_CC_VERSION_STRING - never a second literal
+# version duplicated here). The staging directory name (kai-linux-x86_64/)
+# is left unversioned deliberately: KAI_RELEASE_ROOT (VS Code packaging)
+# and other tooling reference it by that fixed name.
+KAICC_BIN="${DIST_DIR}/${ARTIFACT_NAME}/bin/kaicc"
+KAICC_VERSION="$("${KAICC_BIN}" --version | awk '{print $2}')"
+if [ -z "${KAICC_VERSION}" ]; then
+    echo "error: could not determine kaicc version from '${KAICC_BIN} --version'" >&2
+    exit 1
+fi
+echo "==> Release kaicc version: ${KAICC_VERSION}"
+
+VERSIONED_ARCHIVE_NAME="kai-${KAICC_VERSION}-linux-x86_64.tar.gz"
+
 if command -v tar >/dev/null 2>&1; then
-    echo "==> Producing dist/${ARTIFACT_NAME}.tar.gz"
-    tar -C "${DIST_DIR}" -czf "${DIST_DIR}/${ARTIFACT_NAME}.tar.gz" "${ARTIFACT_NAME}"
-    echo "    $(du -h "${DIST_DIR}/${ARTIFACT_NAME}.tar.gz" | cut -f1)"
+    echo "==> Producing dist/${VERSIONED_ARCHIVE_NAME}"
+    tar -C "${DIST_DIR}" -czf "${DIST_DIR}/${VERSIONED_ARCHIVE_NAME}" "${ARTIFACT_NAME}"
+    echo "    $(du -h "${DIST_DIR}/${VERSIONED_ARCHIVE_NAME}" | cut -f1)"
 fi
 
 echo "==> Done."
