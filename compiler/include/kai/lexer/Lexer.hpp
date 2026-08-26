@@ -59,7 +59,6 @@ private:
     Token scanChar();
     Token scanOperatorOrPunctuation();
 
-    const SourceManager& sources_;
     FileId file_;
     std::string_view buffer_;
     std::uint32_t offset_ = 0;
