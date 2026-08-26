@@ -1,7 +1,13 @@
 # Build
 build/
+build-release/
 out/
 target/
+
+# RELEASE HARDENING M1: generated portable release artifacts - always
+# reproducible from release/linux-x86_64/Containerfile +
+# scripts/build-release-linux-x86_64.sh, never hand-authored
+dist/
 
 # CMake
 CMakeFiles/

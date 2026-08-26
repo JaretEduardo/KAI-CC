@@ -48,8 +48,7 @@ bool isSupportedCharEscapeChar(char c) noexcept {
 
 } // namespace
 
-Lexer::Lexer(const SourceManager& sources, FileId file)
-    : sources_(sources), file_(file), buffer_(sources.buffer(file)) {}
+Lexer::Lexer(const SourceManager& sources, FileId file) : file_(file), buffer_(sources.buffer(file)) {}
 
 bool Lexer::isAtEnd() const noexcept { return offset_ >= buffer_.size(); }
 

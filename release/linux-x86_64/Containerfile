@@ -1,0 +1,107 @@
+# RELEASE HARDENING M1: portable Linux x86_64 release-build environment.
+#
+# Goal: produce a `kaicc` that runs on an OLDER glibc/libstdc++ baseline
+# than the maintainer's own Fedora development host (which currently
+# requires GLIBC_2.38/GLIBCXX_3.4.32 - too new for a useful general Linux
+# x86_64 release; see the Release Hardening audit). Ubuntu 22.04 LTS
+# ("jammy", glibc 2.35) is the chosen baseline.
+#
+# LLVM 22 is pinned explicitly via apt.llvm.org's versioned
+# `llvm-toolchain-jammy-22` component - never an unversioned "latest LLVM"
+# install, and never an unpinned curl|bash helper script. kaicc statically
+# links the LLVM components it needs (see CMakeLists.txt's
+# llvm_map_components_to_libnames call) - end users never need LLVM
+# installed, on this baseline or any other.
+#
+# Compiler/stdlib choice - two things were verified directly, not assumed:
+#
+#   1. Ubuntu 22.04's DEFAULT system libstdc++ (GCC 11 headers) does NOT
+#      implement C++23 `std::expected` (compiler/include/kai/parser/
+#      ParseError.hpp and others use it): `#include <expected>` fails
+#      outright ("'expected' file not found") against GCC 11's headers.
+#      This is a genuine compiler/standard-library compatibility blocker,
+#      not a style preference.
+#
+#   2. Pairing Clang 22 with libc++ 22 (also from apt.llvm.org) DOES add
+#      `std::expected`, but Ubuntu's own llvm-22-dev static archives
+#      (libLLVM*.a) were themselves built against libstdc++ - linking
+#      libc++-built object files against them fails with undefined
+#      `std::logic_error`/GLIBCXX-versioned symbol errors (a real C++ ABI
+#      mismatch between two different standard library implementations
+#      in one binary), confirmed by an actual failed build attempt.
+#
+# The resolution that actually works, verified end-to-end: install GCC
+# 12's libstdc++ headers (`g++-12`/`libstdc++-12-dev`, available directly
+# from Ubuntu 22.04's OWN `jammy`/`jammy-updates` universe repos - no
+# extra third-party PPA needed). Clang 22 auto-selects the newest
+# installed GCC installation's headers, so it picks up GCC 12's
+# `<expected>` while still linking against the system's existing
+# `libstdc++.so.6` RUNTIME (still GCC 11's shared object - only the
+# headers are newer) and Ubuntu's libstdc++-based LLVM archives, with NO
+# ABI conflict. `std::expected` is implemented entirely in headers
+# (templates/inline code), so no new runtime symbol is actually required:
+# a real `#include <expected>` program built this way needs only
+# GLIBCXX_3.4 (verified via objdump) - dramatically older than Fedora's
+# GLIBCXX_3.4.32 baseline, and no libc++ dependency is introduced at all.
+
+FROM docker.io/library/ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Base build tooling. cmake/ninja-build come from Ubuntu 22.04's own
+# repos (cmake 3.22.1 satisfies this project's `cmake_minimum_required
+# (VERSION 3.20)`; ninja-build 1.10.1). ca-certificates/gnupg/wget are
+# only needed to fetch and verify the LLVM apt repository's signing key.
+# zlib1g-dev/libzstd-dev are required by LLVM's own exported CMake
+# targets (ZLIB::ZLIB, zstd::libzstd_shared) - verified directly: without
+# them, `cmake` fails immediately with "target was not found" for both.
+# g++-12/libstdc++-12-dev provide the newer libstdc++ HEADERS this
+# project's C++23 code needs (see this file's own header comment) -
+# ordinary Ubuntu universe packages, not a build of GCC itself.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        gnupg \
+        wget \
+        cmake \
+        ninja-build \
+        git \
+        zlib1g-dev \
+        libzstd-dev \
+        g++-12 \
+        libstdc++-12-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin the LLVM 22 apt repository explicitly (llvm-toolchain-jammy-22),
+# using the project's own published signing key - not an unpinned
+# `bash <(curl ...)` invocation of apt.llvm.org's own install helper.
+RUN wget -qO /usr/share/keyrings/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key \
+    && gpg --dearmor -o /usr/share/keyrings/llvm.gpg /usr/share/keyrings/llvm-snapshot.gpg.key \
+    && rm -f /usr/share/keyrings/llvm-snapshot.gpg.key \
+    && echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main" \
+        > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        clang-22 \
+        llvm-22-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# NativeLinker::findCompilerDriver() (compiler/src/codegen/NativeLinker.cpp)
+# searches PATH for the literal names "cc", "clang", "gcc" (in that order,
+# unless $KAI_CC is set) - it never looks for versioned binary names like
+# "clang-22". This symlink is what makes both `ctest` (native_compilation_
+# tests actually link+run real executables) and any KAI program a real end
+# user compiles work inside this image and inside the resulting install.
+RUN ln -sf /usr/bin/clang-22 /usr/bin/cc \
+    && ln -sf /usr/bin/clang-22 /usr/bin/clang \
+    && ln -sf /usr/bin/clang++-22 /usr/bin/clang++
+
+ENV CC=clang-22
+ENV CXX=clang++-22
+# Explicit, versioned LLVMConfig.cmake location - `find_package(LLVM
+# CONFIG REQUIRED)` in CMakeLists.txt needs this since llvm-22-dev
+# installs to a versioned path, not a "well-known" CMake package
+# location.
+ENV LLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm
+
+WORKDIR /workspace

@@ -181,6 +181,82 @@ set_target_properties(kai_runtime PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib/kai
 )
 
+# RELEASE HARDENING M1: install rules for the two artifacts an end user
+# actually needs (`kaicc`, `libkai_runtime.a`) - this is currently a
+# runtime/compiler DISTRIBUTION, not an SDK, so no headers, no LLVM
+# headers, no tests, no editor files are installed.
+#
+# `kaicc` uses GNUInstallDirs' CMAKE_INSTALL_BINDIR (always "bin" on every
+# platform this project targets). The runtime archive deliberately does
+# NOT use CMAKE_INSTALL_LIBDIR: that variable resolves to "lib64" on
+# Fedora/RHEL-family hosts (verified) but NativeLinker::
+# findDefaultRuntimeLibrary() (NativeLinker.cpp) has a HARD-CODED lookup
+# of `<kaicc's own directory>/../lib/kai/libkai_runtime.a` - literally
+# "lib", never "lib64" - so the install destination is the literal string
+# "lib/kai" on every platform, keeping the installed tree byte-for-byte
+# identical to what NativeLinker already looks for, regardless of this
+# platform's own GNUInstallDirs convention.
+include(GNUInstallDirs)
+
+install(TARGETS kaicc
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(FILES $<TARGET_FILE:kai_runtime>
+    DESTINATION lib/kai
+)
+
+# RELEASE HARDENING M1.1: some LLVM distributions (Ubuntu 22.04's
+# apt.llvm.org packages, confirmed) build LLVMSupport with
+# LLVM_ENABLE_Z3_SOLVER=ON, which bakes an unconditional dependency on the
+# system's libz3.so directly into LLVMSupport's own exported
+# INTERFACE_LINK_LIBRARIES (LLVMExports.cmake) - confirmed directly by
+# disassembling libLLVMSupport.a: its Z3Solver.cpp.o object references
+# 126 undefined Z3_* symbols (LLVM's optional SMT-solver wrapper, used by
+# nothing KAI-CC calls). This is NOT something `llvm_map_components_to_
+# libnames`'s component selection can avoid - LLVMSupport is a mandatory
+# transitive dependency of every component KAI-CC uses, and the Z3
+# dependency is compiled into that one archive regardless of which other
+# components are requested. Fedora's own LLVM 22 package was simply built
+# without Z3 support, so this whole block is a no-op there (the `if`
+# below never triggers).
+#
+# No static libz3.a is available via apt (Ubuntu's libz3-dev ships only
+# libz3.so/libz3.so.4) and building Z3 from source is out of scope for
+# this milestone - so the resolution is to bundle the EXACT SAME
+# libz3.so.4 KAI's own build already links against, install it alongside
+# libkai_runtime.a, and give the installed kaicc an origin-relative RPATH
+# so it resolves ONLY that bundled copy at runtime (never a build-tree or
+# system path). $ORIGIN is a literal linker/loader token, not a CMake
+# variable - CMake passes it through unmodified into the installed
+# binary's RPATH.
+get_target_property(KAI_LLVM_SUPPORT_LIBS LLVMSupport INTERFACE_LINK_LIBRARIES)
+set(KAI_Z3_LIBRARY "")
+if(KAI_LLVM_SUPPORT_LIBS)
+    foreach(_kai_llvm_support_lib ${KAI_LLVM_SUPPORT_LIBS})
+        if(_kai_llvm_support_lib MATCHES "libz3\\.so")
+            set(KAI_Z3_LIBRARY "${_kai_llvm_support_lib}")
+        endif()
+    endforeach()
+endif()
+
+if(KAI_Z3_LIBRARY)
+    get_filename_component(KAI_Z3_LIBRARY_REALPATH "${KAI_Z3_LIBRARY}" REALPATH)
+    message(STATUS "LLVM was built with Z3 support (${KAI_Z3_LIBRARY_REALPATH}) - "
+                    "bundling it into the installed release layout")
+
+    install(FILES "${KAI_Z3_LIBRARY_REALPATH}"
+        DESTINATION lib/kai
+    )
+
+    # INSTALL_RPATH only affects the RPATH baked in by `cmake --install` -
+    # it does NOT change build/bin/kaicc's own behavior (ordinary local
+    # development/ctest are unaffected).
+    set_target_properties(kaicc PROPERTIES
+        INSTALL_RPATH "$ORIGIN/../lib/kai"
+    )
+endif()
+
 # Tests
 enable_testing()
 add_subdirectory(tests)
