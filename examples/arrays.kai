@@ -1,14 +1,3 @@
-fn main() {
-    let numbers = [10, 20, 30, 40]
-
-    print(numbers[0])
-    print(numbers[1])
-
-    for n in numbers {
-        print(n)
-    }
-}
-
 fn sum(values: [i32]) -> i32 {
     mut result = 0
 
@@ -20,6 +9,15 @@ fn sum(values: [i32]) -> i32 {
 }
 
 fn main() {
+    let numbers = [10, 20, 30, 40]
+
+    print(numbers[0])
+    print(numbers[1])
+
+    for n in numbers {
+        print(n)
+    }
+
     let values = [10, 20, 30]
 
     print(sum(values))

@@ -259,6 +259,47 @@ void testGeneratorReusedAcrossTwoModulesFunctionsDoNotLeak() {
     }
 }
 
+// RELEASE HARDENING M2.1: LLVMCodeGenerator::unsupportedConstruct() (M2)
+// must never leak a PREVIOUS generate() call's diagnostic into a LATER,
+// unrelated one - mirrors testGeneratorReusedAcrossTwoModulesFunctions
+// DoNotLeak()'s own reuse pattern, applied to the new diagnostic state
+// instead of `functions_`.
+void testUnsupportedConstructDoesNotLeakAcrossGenerateCalls() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+
+    // (1) a `for` statement sets unsupportedConstruct() on this call.
+    Generated first = compileToLLVM(sm, codegen, "fn main() {\n    for i in 0..3 {\n        print(i)\n    }\n}");
+    KAI_CHECK(first.model.errors().empty());
+    KAI_CHECK(!first.generationSucceeded);
+    KAI_CHECK(codegen.unsupportedConstruct().has_value());
+    if (codegen.unsupportedConstruct().has_value()) {
+        KAI_CHECK(codegen.unsupportedConstruct()->description ==
+                  "code generation is not yet supported for 'for' statements");
+    }
+
+    // (2) a SUCCESSFUL, unrelated generate() call afterward must clear it
+    // - a stale message from (1) must never survive into a caller that
+    // checks unsupportedConstruct() after this call.
+    Generated second = compileToLLVM(sm, codegen, "fn main() -> i64 {\n    return 42\n}");
+    KAI_CHECK(second.model.errors().empty());
+    KAI_CHECK(second.generationSucceeded);
+    KAI_CHECK(!codegen.unsupportedConstruct().has_value());
+
+    // (3) a THIRD call, failing again via a DIFFERENT unsupported
+    // construct (an array/slice parameter type, not a `for` statement),
+    // must capture ITS OWN message fresh - proving the reset-then-
+    // recapture cycle works repeatedly, not merely once.
+    Generated third = compileToLLVM(sm, codegen, "fn sum(values: [i32]) -> i32 {\n    return 0\n}");
+    KAI_CHECK(third.model.errors().empty());
+    KAI_CHECK(!third.generationSucceeded);
+    KAI_CHECK(codegen.unsupportedConstruct().has_value());
+    if (codegen.unsupportedConstruct().has_value()) {
+        KAI_CHECK(codegen.unsupportedConstruct()->description ==
+                  "code generation is not yet supported for this parameter's type");
+    }
+}
+
 // --- M2: Primitive Expression Lowering ---
 //
 // Small shared helpers: every M2 test below compiles a single function
@@ -2555,6 +2596,7 @@ int main() {
     testMainReturnsI64Literal();
     testMultipleFunctionsBothExistAndVerify();
     testGeneratorReusedAcrossTwoModulesFunctionsDoNotLeak();
+    testUnsupportedConstructDoesNotLeakAcrossGenerateCalls();
 
     testIntegerAddition();
     testNestedArithmetic();

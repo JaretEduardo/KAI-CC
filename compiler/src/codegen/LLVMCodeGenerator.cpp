@@ -32,6 +32,7 @@ LLVMCodeGenerator::LLVMCodeGenerator(const SourceManager& sources) : sources_(so
 bool LLVMCodeGenerator::generate(const ast::SourceFile& file, const SemanticModel& model) {
     module_ = std::make_unique<llvm::Module>(std::string(sources_.fileName(file.file())), context_);
     functions_.clear();
+    unsupportedConstruct_.reset();
 
     // PASS 1: declare every function's signature before lowering ANY
     // body - this is what makes forward calls, recursion, and mutual
@@ -109,9 +110,17 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
 
     std::vector<llvm::Type*> paramTypes;
     paramTypes.reserve(signature.parameterTypes.size());
-    for (const Type paramType : signature.parameterTypes) {
-        llvm::Type* llvmParamType = lowerType(paramType);
+    for (std::size_t i = 0; i < signature.parameterTypes.size(); ++i) {
+        llvm::Type* llvmParamType = lowerType(signature.parameterTypes[i]);
         if (llvmParamType == nullptr) {
+            // RELEASE HARDENING M2: a parameter type that never resolved
+            // to a lowerable Type (arrays/slices/references/structs/...
+            // - see lowerType()'s own exhaustive switch) fails HERE, in
+            // Pass 1, before this function's body is ever reached - e.g.
+            // `fn sum(values: [i32]) -> i32` never gets far enough to
+            // report its `for` loop as the culprit otherwise.
+            recordUnsupportedConstruct("code generation is not yet supported for this parameter's type",
+                                        fn.params()[i].type->span());
             return false;
         }
         paramTypes.push_back(llvmParamType);
@@ -119,6 +128,8 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
 
     llvm::Type* returnType = lowerType(signature.returnType);
     if (returnType == nullptr) {
+        const SourceSpan span = fn.returnType() != nullptr ? fn.returnType()->span() : fn.name().span;
+        recordUnsupportedConstruct("code generation is not yet supported for this function's return type", span);
         return false;
     }
 
@@ -270,9 +281,16 @@ LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateStatement(const as
         case ast::StmtKind::For:
             // Iteration lowering remains deferred to M6+ - never silently
             // skipped.
+            recordUnsupportedConstruct("code generation is not yet supported for 'for' statements", stmt.span());
             return StatementResult::Failed;
     }
     return StatementResult::Failed;
+}
+
+void LLVMCodeGenerator::recordUnsupportedConstruct(std::string description, SourceSpan span) {
+    if (!unsupportedConstruct_.has_value()) {
+        unsupportedConstruct_ = UnsupportedConstruct{std::move(description), span};
+    }
 }
 
 LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateIfStmt(const ast::IfStmt& stmt, std::size_t branchIndex,

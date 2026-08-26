@@ -54,7 +54,21 @@ int runCompileCommand(SourceManager& sources, const std::filesystem::path& input
 
     codegen::LLVMCodeGenerator generator(sources);
     if (!generator.generate(*parsed, model)) {
-        err << "kaicc: error: LLVM IR generation failed\n";
+        // RELEASE HARDENING M2: prefer a specific, actionable message when
+        // generate() itself identified WHICH explicitly-deferred AST
+        // construct it rejected (see LLVMCodeGenerator::
+        // unsupportedConstruct()'s own doc comment) - this is never set
+        // for a genuine llvm::verifyModule() failure or other internal
+        // issue, so the generic message below still covers those
+        // honestly, rather than every codegen failure guessing "probably
+        // unsupported".
+        if (const auto& unsupported = generator.unsupportedConstruct(); unsupported.has_value()) {
+            const SourceManager::LineColumn where = sources.lineColumn(unsupported->span.begin());
+            err << "kaicc: error at " << where.line << ':' << where.column << ": " << unsupported->description
+                << '\n';
+        } else {
+            err << "kaicc: error: LLVM IR generation failed\n";
+        }
         return 6;
     }
 

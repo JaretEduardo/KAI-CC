@@ -20,21 +20,37 @@ void printVersion() {
     std::cout << "KAI-CC " << KAI_VERSION << '\n';
 }
 
+// RELEASE HARDENING M2: organized into logical sections (never a CLI
+// parsing framework, and no command syntax changed) so `kaicc --help`
+// reads as a small reference rather than one flat list, and the trailing
+// "Try 'kaicc --version'" line - leftover usage/error-message boilerplate
+// that made no sense at the end of a SUCCESSFUL --help - is gone. See
+// docs/CLI.md for the full reference (exit codes, exact flag shapes).
 void printUsage() {
-    std::cout << "KAI-CC compiler\n";
-    std::cout << "Usage:\n";
+    std::cout << "KAI-CC - reference compiler for the KAI programming language (early/pre-release)\n";
+    std::cout << "\n";
+    std::cout << "General:\n";
     std::cout << "  kaicc --version\n";
     std::cout << "  kaicc --help\n";
-    std::cout << "  kaicc --tokens <file.kai>\n";
-    std::cout << "  kaicc --ast <file.kai>\n";
+    std::cout << "\n";
+    std::cout << "Compile:\n";
     std::cout << "  kaicc <file.kai> -o <output>\n";
+    std::cout << "      Compiles to a native executable. Requires a host C compiler driver\n";
+    std::cout << "      (cc, clang, or gcc) on PATH for the final native link step.\n";
+    std::cout << "\n";
+    std::cout << "Semantic queries (compiler-resolved, not textual search; all require --json):\n";
     std::cout << "  kaicc inspect <file.kai> --json\n";
     std::cout << "  kaicc definition <file.kai> --line N --column M --json\n";
     std::cout << "  kaicc references <file.kai> --line N --column M --json\n";
     std::cout << "  kaicc callers <file.kai> --line N --column M --json\n";
     std::cout << "  kaicc callees <file.kai> --line N --column M --json\n";
     std::cout << "  kaicc call-graph <file.kai> --json\n";
-    std::cout << "Try 'kaicc --version'\n";
+    std::cout << "\n";
+    std::cout << "Debug/introspection (not primary compilation commands):\n";
+    std::cout << "  kaicc --tokens <file.kai>\n";
+    std::cout << "  kaicc --ast <file.kai>\n";
+    std::cout << "\n";
+    std::cout << "See docs/CLI.md for the full command reference and exit codes.\n";
 }
 
 // SEMANTIC INSPECTION MILESTONE 2: `--line`/`--column` must be positive
