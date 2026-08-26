@@ -59,9 +59,25 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+// v0.1.0-alpha.1 FINAL PRE-RELEASE PREPARATION: the packaged VSIX bundles
+// the same statically-linked LLVM code and libz3.so.4 as the portable
+// Linux x86_64 release tarball, so it must carry the same legal material
+// (project LICENSE, THIRD_PARTY_NOTICES.md, third-party license texts) -
+// otherwise the VSIX would redistribute that binary content with no
+// accompanying notices. These are copied, never hand-authored a second
+// time: from `releaseRoot` when packaging a real release (so the legal
+// material corresponds to the exact binary being staged, since
+// scripts/build-release-linux-x86_64.sh now guarantees LICENSE/
+// THIRD_PARTY_NOTICES.md/third_party/licenses/* exist there - see that
+// script's own required-files check), or from the repository root itself
+// for ordinary local development packaging (releaseRoot unset) - the same
+// tracked files, just not yet mirrored into a release layout.
+const LEGAL_FILES = ['LICENSE', 'THIRD_PARTY_NOTICES.md'];
+const LEGAL_LICENSE_DIR = path.join('third_party', 'licenses');
+
 /**
  * @param {{ repoRoot: string, extensionRoot: string, releaseRoot?: string }} options
- * @returns {{ kaiccPath: string, runtimePath: string, source: 'release' | 'build', extraLibraries: string[] }}
+ * @returns {{ kaiccPath: string, runtimePath: string, source: 'release' | 'build', extraLibraries: string[], legalFiles: string[] }}
  */
 export function stageCompiler({ repoRoot, extensionRoot, releaseRoot }) {
     const source = releaseRoot ? 'release' : 'build';
@@ -125,7 +141,41 @@ export function stageCompiler({ repoRoot, extensionRoot, releaseRoot }) {
         extraLibraries.push(entry);
     }
 
-    return { kaiccPath: destKaicc, runtimePath: destRuntime, source, extraLibraries };
+    // Legal material source: the release layout when packaging a real
+    // release (so it matches the exact binary staged above), otherwise
+    // the repository root's own tracked LICENSE/THIRD_PARTY_NOTICES.md/
+    // third_party/licenses - never a divergent hand-maintained copy.
+    const legalSourceRoot = releaseRoot || repoRoot;
+    const legalFiles = [];
+
+    for (const name of LEGAL_FILES) {
+        const src = path.join(legalSourceRoot, name);
+        if (!fs.existsSync(src)) {
+            throw new Error(
+                `required legal file not found at ${src} - a release VSIX must not lose the project ` +
+                    'license or third-party notices carried by the binary release it bundles.',
+            );
+        }
+        fs.copyFileSync(src, path.join(extensionRoot, name));
+        legalFiles.push(name);
+    }
+
+    const sourceLicenseDir = path.join(legalSourceRoot, LEGAL_LICENSE_DIR);
+    if (!fs.existsSync(sourceLicenseDir)) {
+        throw new Error(`required third-party license directory not found at ${sourceLicenseDir}.`);
+    }
+    const destLicenseDir = path.join(extensionRoot, LEGAL_LICENSE_DIR);
+    fs.mkdirSync(destLicenseDir, { recursive: true });
+    for (const entry of fs.readdirSync(sourceLicenseDir)) {
+        const srcEntry = path.join(sourceLicenseDir, entry);
+        if (!fs.statSync(srcEntry).isFile()) {
+            continue;
+        }
+        fs.copyFileSync(srcEntry, path.join(destLicenseDir, entry));
+        legalFiles.push(path.join(LEGAL_LICENSE_DIR, entry));
+    }
+
+    return { kaiccPath: destKaicc, runtimePath: destRuntime, source, extraLibraries, legalFiles };
 }
 
 function main() {
@@ -138,11 +188,14 @@ function main() {
     const releaseRoot = process.env.KAI_RELEASE_ROOT ? process.env.KAI_RELEASE_ROOT : undefined;
 
     try {
-        const { kaiccPath, runtimePath, source, extraLibraries } = stageCompiler({ repoRoot, extensionRoot, releaseRoot });
+        const { kaiccPath, runtimePath, source, extraLibraries, legalFiles } = stageCompiler({ repoRoot, extensionRoot, releaseRoot });
         console.log(`Staged kaicc (source: ${source}) -> ${kaiccPath}`);
         console.log(`Staged libkai_runtime.a (source: ${source}) -> ${runtimePath}`);
         for (const extra of extraLibraries) {
             console.log(`Staged ${extra} (source: ${source}) -> ${path.join(path.dirname(runtimePath), extra)}`);
+        }
+        for (const legal of legalFiles) {
+            console.log(`Staged ${legal} (legal material, source: ${source})`);
         }
         if (source === 'release') {
             console.log(`  KAI_RELEASE_ROOT=${releaseRoot}`);

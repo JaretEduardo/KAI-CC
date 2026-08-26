@@ -52,34 +52,55 @@ binary copy of Z3.
 
 **License:** MIT ("Expat").
 
-**License text source:** copied verbatim from
-`/usr/share/doc/libz3-4/copyright` inside the Ubuntu 22.04 release-build
-container (Debian packaging copyright-file format, `libz3-4` package,
-Z3 4.8.12) - this is the Debian package's copyright/license metadata
-file, which embeds the actual MIT license text and copyright holders
-(Microsoft Corporation and named contributors) inline; it is not Z3's own
-repository-root `LICENSE.txt` file, though the license terms are the
-same. See
-[`third_party/licenses/Z3-COPYRIGHT.txt`](third_party/licenses/Z3-COPYRIGHT.txt).
+**License text source:** the exact upstream Z3 `LICENSE.txt`, fetched
+directly from the official Z3Prover/z3 GitHub repository
+(https://github.com/Z3Prover/z3) pinned to tag `z3-4.8.12` -
+https://raw.githubusercontent.com/Z3Prover/z3/z3-4.8.12/LICENSE.txt. This
+tag was confirmed (via Launchpad's Ubuntu archive API for the `jammy`
+series) to be the exact upstream version corresponding to the `z3`
+source package (`4.8.12-1`) that produces Ubuntu 22.04's `libz3-4`
+binary package bundled in the release artifact - not an assumed or
+approximate version. See
+[`third_party/licenses/Z3-LICENSE.txt`](third_party/licenses/Z3-LICENSE.txt).
+
+Additionally,
+[`third_party/licenses/Z3-COPYRIGHT.txt`](third_party/licenses/Z3-COPYRIGHT.txt)
+(the Debian packaging copyright file, previously the only Z3 legal file
+tracked here) is kept alongside it: it lists upstream Z3 copyright
+holders beyond Microsoft Corporation (Arie Gurfinkel, Saint-Petersburg
+State University, Matteo Marescotti) that the bare upstream `LICENSE.txt`
+does not itself enumerate, so it remains useful for complete attribution.
+Its `Files: debian/*` section (GPL-2+) describes only the Debian
+packaging scripts, not any code that ends up inside the redistributed
+`libz3.so.4` binary, and does not apply to KAI-CC's release artifact.
+
+## Upstream NOTICE files
+
+Neither the LLVM Project (at the LLVM 22 release line packaged by
+Fedora's `llvm-libs`/Ubuntu's `llvm-22-dev`) nor Z3 (at tag `z3-4.8.12`)
+publishes a repository-root `NOTICE` file requiring separate
+reproduction alongside their license text - checked directly against
+each project's repository contents at the relevant version. No
+additional upstream NOTICE material applies here.
 
 ## What still needs review before public binary distribution
 
-- Confirm whether Z3's own upstream repository `LICENSE.txt`
-  (https://github.com/Z3Prover/z3) should be sourced directly instead of
-  (or in addition to) the Debian packaging copyright file captured here -
-  both state the same MIT terms, but the upstream file is the more
-  conventional citation for a project's own license text.
 - Confirm the exact LLVM Project copyright/attribution line expected for
   a binary redistribution under the Apache-2.0-with-exceptions terms
   (the captured license text already includes the standard LLVM Project
   notice).
-- This document intentionally does not make any determination about
-  compatibility between these third-party licenses and KAI-CC's own
-  (currently unselected) project license - see "Project License" below.
+- The release Containerfile pins the apt.llvm.org component
+  (`llvm-toolchain-jammy-22`), which tracks the latest LLVM 22.x build
+  rather than one exact patch release; the Apache-2.0-with-exceptions
+  license text is unchanged across LLVM 22.x patch releases, so this does
+  not affect the accuracy of the tracked license text, but a specific
+  patch version should be confirmed against whichever build actually
+  produced a given release artifact (see that release's own build log).
 
 ## Project License
 
-KAI-CC's own source code does not yet have a selected license - see the
-root `README.md`. The third-party notices above describe material
-KAI-CC's binary releases incorporate; they are independent of, and do not
-resolve, that still-open decision.
+KAI-CC's own source code is licensed under the Apache License, Version
+2.0 - see the root [`LICENSE`](LICENSE) and `README.md`. The
+third-party notices above describe material KAI-CC's binary releases
+incorporate under their own separate licenses; they are independent of
+KAI-CC's own project license.

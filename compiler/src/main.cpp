@@ -1,3 +1,4 @@
+#include "kai/Version.hpp"
 #include "kai/cli/AstPrinter.hpp"
 #include "kai/cli/CompileCommand.hpp"
 #include "kai/cli/InspectCommand.hpp"
@@ -14,10 +15,8 @@
 
 namespace {
 
-constexpr std::string_view KAI_VERSION = "0.1.0-dev";
-
 void printVersion() {
-    std::cout << "KAI-CC " << KAI_VERSION << '\n';
+    std::cout << "KAI-CC " << kai::kVersion << '\n';
 }
 
 // RELEASE HARDENING M2: organized into logical sections (never a CLI

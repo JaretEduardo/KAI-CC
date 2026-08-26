@@ -12,6 +12,14 @@ node_modules/
 /bin/
 /lib/
 
+# v0.1.0-alpha.1: legal material staged alongside the compiler/runtime above
+# (see scripts/stage-compiler.mjs) - copies of the repo root's own tracked
+# LICENSE/THIRD_PARTY_NOTICES.md/third_party/licenses, never hand-authored
+# here, never committed here.
+/LICENSE
+/THIRD_PARTY_NOTICES.md
+/third_party/
+
 # Packaged VSIX output.
 *.vsix
 
