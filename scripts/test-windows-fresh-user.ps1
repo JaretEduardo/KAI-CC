@@ -63,6 +63,19 @@
     https://update.code.visualstudio.com/<version>/win32-x64-archive/stable).
     Required together with VsixPath for the real isolated VSIX install test.
 
+.PARAMETER ExpectedVSCodeVersion
+    Optional exact version string (e.g. "1.135.0") the resolved VS Code
+    CLI's own `--version` output must report - the identity check that
+    catches a WRONG cli.js being resolved (see this milestone's report: a
+    real Windows run once silently ran @vscode/sandbox-runtime's own
+    internal cli.js instead of the real one, which happily exited 0 and
+    reported "1.0.0"). Strongly recommended whenever -VSCodeZipPath is
+    given. Deliberately a parameter, not a literal hardcoded in this
+    script: the script itself stays reusable against any VS Code archive a
+    maintainer points it at; CI passes the real pinned version from
+    scripts/windows-fresh-user-pins.json. If omitted, only a generic
+    non-empty-version-line check is performed (no identity guarantee).
+
 .PARAMETER WorkDir
     Optional override for the fresh, space-containing KAI test directory.
     If omitted, a unique directory containing a literal space is created
@@ -83,6 +96,7 @@ param(
     [Parameter(Mandatory = $true)][string]$ToolchainZipPath,
     [string]$VsixPath = $null,
     [string]$VSCodeZipPath = $null,
+    [string]$ExpectedVSCodeVersion = $null,
     [string]$WorkDir = $null,
     [string]$ToolchainWorkDir = $null
 )
@@ -276,6 +290,47 @@ function Find-FileRecursive([string]$Root, [string]$Name) {
     $found = Get-ChildItem -Path $Root -Filter $Name -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $found) { return $null }
     return $found.FullName
+}
+
+# ---------------------------------------------------------------------
+# EXACT VS CODE CLI ENTRYPOINT RESOLUTION: a real Windows run found that
+# a loose "**\cli.js" recursive filename search (Find-FileRecursive) can
+# select the WRONG file - the pinned VS Code 1.135.0 archive contains
+# THREE files literally named cli.js:
+#   <build-id>/resources/app/out/cli.js                                 <- the real one
+#   <build-id>/resources/app/node_modules/@vscode/sandbox-runtime/dist/cli.js  <- an unrelated internal tool
+#   <build-id>/resources/app/node_modules.asar.unpacked/.../codegen-cli.js    <- unrelated (different name, listed for completeness)
+# and filesystem enumeration order happened to return the sandbox-runtime
+# one first, which happily started, reported its own "1.0.0", and then
+# failed --install-extension with "Sandbox dependencies not available".
+#
+# code.cmd itself (inspected directly from the pinned archive - see the
+# previous round's report) is unambiguous about the REAL entrypoint's
+# STRUCTURAL shape: "%~dp0..\<build-id>\resources\app\out\cli.js" - i.e.
+# exactly one path of the form <VSCodeRoot>\<single top-level
+# directory>\resources\app\out\cli.js. This function checks ONLY that
+# exact structural shape (one Join-Path per top-level directory, never a
+# recursive filename search), which categorically excludes anything
+# nested under node_modules/sandbox-runtime/or any other internal tool -
+# there is no loose "first match wins" here. Zero matches or more than
+# one match are both treated as failures, never resolved by guessing.
+# ---------------------------------------------------------------------
+function Find-VSCodeCliJs {
+    param([Parameter(Mandatory = $true)][string]$VSCodeRoot)
+
+    $candidates = @(
+        Get-ChildItem -Path $VSCodeRoot -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'resources/app/out/cli.js' } |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    )
+
+    if ($candidates.Count -eq 0) {
+        throw "Find-VSCodeCliJs: no '<build-id>/resources/app/out/cli.js' found directly under $VSCodeRoot"
+    }
+    if ($candidates.Count -gt 1) {
+        throw "Find-VSCodeCliJs: ambiguous - found $($candidates.Count) '<build-id>/resources/app/out/cli.js' candidates under ${VSCodeRoot}: $($candidates -join '; ')"
+    }
+    return $candidates[0]
 }
 
 # ---------------------------------------------------------------------
@@ -717,22 +772,54 @@ if ($VsixPath -and $VSCodeZipPath) {
     $vscodeRoot = Join-Path $WorkDir 'VSCode'
     Expand-Archive -LiteralPath $VSCodeZipPath -DestinationPath $vscodeRoot -Force
 
-    # VS CODE CLI ISOLATED-INSTALL DIAGNOSIS: bin/code.cmd (inspected
-    # directly from this exact pinned archive - see this milestone's
-    # report) is confirmed to be nothing more than:
-    #   set ELECTRON_RUN_AS_NODE=1
-    #   "<root>\Code.exe" "<root>\<build-hash>\resources\app\out\cli.js" %*
-    # Reproducing that directly - Code.exe run as a plain Node process on
-    # cli.js - avoids cmd.exe entirely: no "/c <string>" re-parsing, no
-    # cmd.exe quoting rules, true ArgumentList handling throughout,
-    # exactly like every other invocation in this script. The
-    # build-specific hash directory name is never hardcoded - cli.js is
-    # located the same way gcc.exe/code.cmd are (Find-FileRecursive), so
-    # this keeps working across VS Code versions.
+    # VS CODE CLI ISOLATED-INSTALL DIAGNOSIS ROUND 2: a real Windows run
+    # found that a loose recursive "cli.js" filename search
+    # (Find-FileRecursive) can select the WRONG file - the pinned archive
+    # ships THREE files literally named cli.js, and enumeration order
+    # picked @vscode/sandbox-runtime's own internal cli.js instead of the
+    # real one (it happily started, reported its own "1.0.0", then failed
+    # --install-extension with "Sandbox dependencies not available").
+    # Find-VSCodeCliJs (see its own doc comment) resolves ONLY the exact
+    # structural shape code.cmd itself uses - <build-id>/resources/app/
+    # out/cli.js - never a loose basename match, and fails closed on zero
+    # or multiple candidates rather than "first match wins". Reproducing
+    # code.cmd's real behavior directly (ELECTRON_RUN_AS_NODE=1 + Code.exe
+    # + this resolved cli.js) still avoids cmd.exe entirely - the earlier
+    # problem was never shell-free invocation itself, only which file it
+    # pointed at.
     $codeExe = Join-Path $vscodeRoot 'Code.exe'
-    $cliJs = Find-FileRecursive -Root $vscodeRoot -Name 'cli.js'
-    if (-not (Test-Path -LiteralPath $codeExe -PathType Leaf) -or -not $cliJs) {
-        Write-Host '  LIMITATION: Code.exe and/or cli.js not found in the extracted VS Code archive - skipping VSIX install test.'
+    $cliJsResolutionFailed = $false
+    $cliJs = $null
+    if (-not (Test-Path -LiteralPath $codeExe -PathType Leaf)) {
+        Write-Host '  LIMITATION: Code.exe not found in the extracted VS Code archive - skipping VSIX install test.'
+        $cliJsResolutionFailed = $true
+    } else {
+        try {
+            $cliJs = Find-VSCodeCliJs -VSCodeRoot $vscodeRoot
+            Write-Host "  resolved cli.js (structural match, <build-id>/resources/app/out/cli.js): $cliJs"
+        } catch {
+            Write-Host "  LIMITATION: $($_.Exception.Message) - skipping VSIX install test."
+            $cliJsResolutionFailed = $true
+        }
+
+        # Optional cross-check (spec §4): code.cmd itself is the
+        # authoritative wrapper shipped by this archive - confirm it at
+        # least REFERENCES the same relative shape we resolved, as a
+        # cheap sanity check. Deliberately not a general batch-file
+        # parser - purely informational, never fatal on its own (the
+        # structural resolver above and the version-identity check below
+        # are the real authority).
+        $codeCmdPath = Find-FileRecursive -Root $vscodeRoot -Name 'code.cmd'
+        if ($codeCmdPath) {
+            $codeCmdContent = Get-Content -LiteralPath $codeCmdPath -Raw
+            if ($codeCmdContent -match [regex]::Escape('resources\app\out\cli.js')) {
+                Write-Host '  code.cmd cross-check: references resources\app\out\cli.js, matching the resolved entrypoint'
+            } else {
+                Write-Host '  code.cmd cross-check: could not confirm the expected reference (informational only, not fatal)'
+            }
+        }
+    }
+    if ($cliJsResolutionFailed) {
         $script:FailureCount++
     } else {
         $userDataDir = Join-Path $WorkDir 'vscode-user-data'
@@ -741,18 +828,30 @@ if ($VsixPath -and $VSCodeZipPath) {
         New-Item -ItemType Directory -Path $userDataDir, $extensionsDir, $vscodeProfileRoot -Force | Out-Null
         $vscodeSanitized = New-VSCodeSanitizedEnvironment -IsolatedProfileRoot $vscodeProfileRoot
 
-        # Preflight (spec §2): prove the CLI itself starts, using the
-        # EXACT same executable/environment/working directory as every
-        # later call, before ever touching --install-extension. A
-        # --version failure here means this is not a VSIX problem at all.
+        # Preflight (spec §2/§5): prove the CLI itself starts AND is
+        # genuinely the pinned VS Code build - not just "some cli.js
+        # exited 0". This is the exact identity check that would have
+        # caught the sandbox-runtime cli.js immediately (its own
+        # "--version" reports "1.0.0", never the pinned VS Code version).
         $versionCheck = Invoke-Native -FilePath $codeExe -ArgumentList @($cliJs, '--version') -WorkingDirectory $vscodeRoot -Sanitized $vscodeSanitized
         Write-Host "  VS Code CLI --version: exit $($versionCheck.ExitCode)"
         Write-BoundedOutput 'stdout' $versionCheck.Stdout
         Write-BoundedOutput 'stderr' $versionCheck.Stderr
-        Assert-True ($versionCheck.ExitCode -eq 0) 'VS Code CLI starts (Code.exe + cli.js, --version)'
+        Assert-True ($versionCheck.ExitCode -eq 0) 'VS Code CLI starts (Code.exe + resolved cli.js, --version)'
 
-        if ($versionCheck.ExitCode -ne 0) {
-            Write-Host '  SKIPPING install/list - the VS Code CLI itself did not start (not a VSIX problem, see above)'
+        $reportedVersion = if ($versionCheck.ExitCode -eq 0) { (($versionCheck.Stdout -split "`r?`n")[0]).Trim() } else { $null }
+        $identityConfirmed = ($versionCheck.ExitCode -eq 0)
+        if ($identityConfirmed -and $ExpectedVSCodeVersion) {
+            Write-Host "  expected VS Code version (pinned): $ExpectedVSCodeVersion"
+            Write-Host "  actual reported version:           $reportedVersion"
+            $identityConfirmed = ($reportedVersion -ceq $ExpectedVSCodeVersion)
+            Assert-True $identityConfirmed "resolved cli.js reports the pinned VS Code version '$ExpectedVSCodeVersion' (this is the exact identity check that catches a wrong-cli.js regression - resolved path: $cliJs)"
+        } elseif ($identityConfirmed) {
+            Assert-True ($reportedVersion.Length -gt 0) 'VS Code CLI --version produced a non-empty version line (no -ExpectedVSCodeVersion given, so identity was not strictly verified)'
+        }
+
+        if (-not $identityConfirmed) {
+            Write-Host '  SKIPPING install/list - the resolved VS Code CLI did not start, or its identity did not match the pinned version (fail closed rather than trusting the wrong cli.js).'
         } else {
             $installArgs = @($cliJs, '--user-data-dir', $userDataDir, '--extensions-dir', $extensionsDir, '--install-extension', $VsixPath, '--force')
             $installResult = Invoke-Native -FilePath $codeExe -ArgumentList $installArgs -WorkingDirectory $vscodeRoot -Sanitized $vscodeSanitized

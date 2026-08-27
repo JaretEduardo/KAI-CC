@@ -694,8 +694,14 @@ jobs:
           $vsix = Get-ChildItem -Path fresh-user-input/vsix -Filter *.vsix | Select-Object -First 1
           if (-not $kaiZip) { throw 'no KAI Windows ZIP found in the downloaded artifact' }
           if (-not $vsix) { throw 'no Windows VSIX found in the downloaded artifact' }
+          # -ExpectedVSCodeVersion is the real identity check that catches
+          # a wrong-cli.js resolution (see this milestone's report) - read
+          # from the SAME pins file used to verify the download, never a
+          # second literal here.
+          $pins = Get-Content scripts/windows-fresh-user-pins.json -Raw | ConvertFrom-Json
           ./scripts/test-windows-fresh-user.ps1 `
             -KaiZipPath $kaiZip.FullName `
             -ToolchainZipPath (Resolve-Path fresh-user-input/toolchain.zip) `
             -VsixPath $vsix.FullName `
-            -VSCodeZipPath (Resolve-Path fresh-user-input/vscode.zip)
+            -VSCodeZipPath (Resolve-Path fresh-user-input/vscode.zip) `
+            -ExpectedVSCodeVersion $pins.vscode.version
