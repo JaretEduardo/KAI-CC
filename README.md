@@ -209,6 +209,48 @@ verified.
 
 ---
 
+## Portable Windows release (in development, WINDOWS PORTABLE PACKAGE M2)
+
+A portable Windows x86_64 distribution, analogous in spirit to the Linux release above, is under active
+development from an MSYS2 UCRT64 baseline (the same one `compiler-windows` CI/WINDOWS M1 already build/test
+against):
+
+```sh
+scripts/build-release-windows-x86_64.sh
+```
+
+Run from inside an MSYS2 UCRT64 shell (never WSL, never a plain `cmd.exe`/PowerShell prompt), this configures a
+Release build, runs the full CTest suite, installs to a staging tree, discovers and bundles `kaicc.exe`'s actual
+recursive non-system DLL dependencies (never guessed - see the script's own dependency-manifest output), copies
+the same curated examples as the Linux release, and produces:
+
+```
+dist/kai-windows-x86_64/
+dist/kai-<version>-windows-x86_64.zip
+```
+
+with the layout:
+
+```
+kai-windows-x86_64/
+  bin/kaicc.exe
+  bin/<bundled non-system DLLs, if any>
+  lib/kai/libkai_runtime.a
+  examples/*.kai        (same curated set as the Linux release)
+```
+
+`kaicc.exe` itself needs no separate LLVM/MSYS2 installation to start or to answer semantic queries
+(`inspect`/`references`/`call-graph`/...) - required non-system DLLs, if any, ship in `bin/` alongside it, and
+Windows' own executable-directory DLL search resolves them with no `PATH` changes. **Native compilation still
+requires a working host C toolchain on `PATH`** (a `clang`/`gcc`-compatible driver `kaicc.exe` shells out to for
+the final link step), exactly as the Linux release requires `gcc`/`clang` + `libc6-dev` - this is a real,
+documented remaining requirement for this alpha, not an oversight.
+
+**This is a development milestone, not yet a public download.** No `v0.1.0-alpha.2` release exists yet; this
+`.zip` is produced and validated by CI as build evidence, not published anywhere.
+
+---
+
 ## Examples
 
 See [`examples/README.md`](examples/README.md) for the exact status of every tracked example, including which
@@ -231,12 +273,16 @@ Parses and/or type-checks in some form, but explicitly **not** backend-lowerable
 
 Platform: **Linux x86_64 only** for the released/distributed compiler. No macOS support exists or is claimed.
 
-A native **Windows x86_64 build and test baseline** (MSYS2 UCRT64, Clang/LLVM 22.1.8 - see the
-`compiler-windows` CI job and `COMPILER_ARCHITECTURE.md`'s "WINDOWS M1" note) is under active, in-progress
-development: the same source tree builds `kaicc.exe` and runs its CTest suite on Windows. This is a
-**development-only portability milestone, not a supported or released platform yet** - there is no packaged
-Windows distribution, no bundled VS Code compiler for Windows, and no Windows entry in a GitHub Release. Do not
-rely on Windows support until a future packaging milestone says otherwise here.
+A native **Windows x86_64 build/test/packaging baseline** (MSYS2 UCRT64, Clang/LLVM 22.1.8 - see the
+`compiler-windows` CI job, `COMPILER_ARCHITECTURE.md`'s "WINDOWS M1" note, and "Portable Windows release" above)
+is under active, in-progress development: the same source tree builds `kaicc.exe`, runs its CTest suite, and now
+also produces a portable `.zip` distribution on Windows. Distinguish two separate claims here: native Windows
+**compiler support** (building/running `kaicc.exe` and compiling KAI programs on Windows) is real and CI-proven;
+a fully **frictionless end-user setup** is not yet claimed, since compiling a KAI program still requires a host
+C toolchain on `PATH` (see "Portable Windows release" above), same as the Linux release requires one. There is
+still no bundled VS Code compiler for Windows and no Windows entry in a GitHub Release - this remains a
+**development milestone, not a supported or released platform yet**. Do not rely on Windows support until a
+future release milestone says otherwise here.
 
 ---
 
