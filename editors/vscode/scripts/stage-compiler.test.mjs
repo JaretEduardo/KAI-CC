@@ -92,8 +92,24 @@ function testStagesBothFilesToExpectedPaths() {
         assert.strictEqual(fs.readFileSync(expectedKaicc, 'utf8'), fakeKaiccContent);
         assert.strictEqual(fs.readFileSync(expectedRuntime, 'utf8'), 'fake-archive-contents');
 
-        const mode = fs.statSync(expectedKaicc).mode;
-        assert.ok((mode & 0o111) !== 0, 'staged kaicc must remain executable');
+        // VS CODE WINDOWS M4 EXECUTABLE-PERMISSION PORTABILITY FIX:
+        // distinguish TARGET-platform semantics (this fixture stages the
+        // linux-x64 target, which always means something) from TEST-HOST
+        // filesystem semantics (POSIX chmod/mode bits are only a real,
+        // checkable guarantee when the machine actually RUNNING this
+        // assertion has a POSIX filesystem). NTFS does not implement
+        // Unix permission bits at all - Node's chmod()/stat().mode calls
+        // on Windows do not reliably reflect execute permission - so
+        // `mode & 0o111` proves nothing there regardless of which target
+        // was staged, and a Windows machine could never run a staged
+        // linux-x64 kaicc anyway. Skip only when the TEST HOST is
+        // Windows; this still runs (and still means something) on every
+        // POSIX host that actually cares about this guarantee (Fedora
+        // dev, GitHub Ubuntu CI).
+        if (process.platform !== 'win32') {
+            const mode = fs.statSync(expectedKaicc).mode;
+            assert.ok((mode & 0o111) !== 0, 'staged kaicc must remain executable');
+        }
 
         // bin/ and lib/kai/ must be siblings under extensionRoot - this is
         // the exact shape NativeLinker's relative lookup depends on.
@@ -341,7 +357,15 @@ function testStagesWin32X64FromReleaseRoot() {
         // (this test runs on Linux CI/dev machines).
         assert.strictEqual(result.target, 'win32-x64');
         assert.strictEqual(result.kaiccPath, path.join(extensionRoot, 'bin', 'kaicc.exe'));
+        // A Windows .exe's executability is governed by the OS
+        // recognizing its PE format/extension, never POSIX mode bits
+        // (see the linux-x64 test above) - so the meaningful assertion
+        // here is that it staged as a real regular file, not a directory
+        // or something else gone wrong. Whether it can actually be
+        // spawned is proven separately, for real, by this CI job's own
+        // extension-smoke.mjs step against the genuine kaicc.exe.
         assert.ok(fs.existsSync(result.kaiccPath), 'staged kaicc.exe should exist');
+        assert.ok(fs.statSync(result.kaiccPath).isFile(), 'staged kaicc.exe should be a regular file');
         assert.ok(fs.existsSync(path.join(extensionRoot, 'lib', 'kai', 'libkai_runtime.a')));
 
         for (const dll of WIN32_REQUIRED_DLLS) {
