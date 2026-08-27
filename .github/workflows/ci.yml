@@ -67,20 +67,25 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # AI-NATIVE BENCHMARK - ISOLATION M1/M2: validates the containerized
+  # AI-NATIVE BENCHMARK - ISOLATION M1/M2/M3A: validates the containerized
   # trial sandbox (network-disabled, non-root, read-only rootfs, no
-  # repo/HOME mount, safe result collection) and the enforced condition-
+  # repo/HOME mount, safe result collection), the enforced condition-
   # specific tool boundary (raw kaicc never sandbox-visible; a host-side
-  # broker is the actual enforcement point, not wrapper naming). This is
+  # broker is the actual enforcement point, not wrapper naming), and the
+  # provider-neutral agent-orchestration layer (exercised only by a
+  # deterministic, offline ScriptedAdapter - no real model provider, no
+  # API credentials, no network call to any provider). This is
   # infrastructure validation only - it runs no formal agent trial and
   # produces no benchmark score. `needs: compiler` because it reuses the
   # SAME commit's freshly-built portable compiler artifact (never the
   # official vX.Y.Z release asset) rather than re-deriving a second build
-  # recipe. GitHub-hosted Ubuntu runners provide Docker (not Podman) -
-  # this is the first real validation of the Docker engine path; M1/M2
-  # were developed and verified locally only on Fedora/rootless Podman.
+  # recipe. GitHub-hosted Ubuntu runners provide Docker (not Podman) - a
+  # prior PR already confirmed the Docker path green for the M1/M2 steps
+  # above; the M3A step is new in THIS change and has so far only been
+  # verified locally on Fedora/rootless Podman - this PR's own run is
+  # what actually validates it under Docker for the first time.
   benchmark-isolation:
-    name: AI-native benchmark isolation (M1/M2)
+    name: AI-native benchmark isolation (M1/M2/M3A)
     needs: compiler
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -108,6 +113,13 @@ jobs:
 
       - name: Run Isolation M2 tests (enforced tool boundary)
         run: benchmarks/ai-native/v1/scripts/test-tool-boundary.sh --compiler-root dist/kai-linux-x86_64
+
+      - name: Run Agent Adapter M3A tests (deterministic ScriptedAdapter orchestration)
+        # Deterministic and offline - no provider network/API credentials
+        # needed, no real model contacted, no formal trial run. Eligible
+        # for this same job precisely because of that (see M3A's own
+        # instructions).
+        run: benchmarks/ai-native/v1/scripts/test-agent-adapter.py --compiler-root dist/kai-linux-x86_64
 
   # Independent of the compiler job - it does not need a real kaicc build,
   # so it must not wait on one. Uses the committed package-lock.json via

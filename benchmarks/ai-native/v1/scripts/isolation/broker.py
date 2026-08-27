@@ -43,12 +43,13 @@ import json
 import os
 import shutil
 import socket
-import stat
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+
+from safe_source import InvalidSource, read_validated_source
 
 SCHEMA_VERSION = 1
 MAX_REQUEST_BYTES = 64 * 1024
@@ -136,12 +137,6 @@ def validate_params(operation, params):
     raise DeniedOperation(f"invalid params: unknown operation {operation!r}")
 
 
-class InvalidSource(Exception):
-    def __init__(self, reason):
-        super().__init__(reason)
-        self.reason = reason
-
-
 def read_authoritative_condition(trial_root):
     """Reads the condition from host/orchestration.json - the ONLY
     authoritative source. Never reads workspace/trial.json for this."""
@@ -158,60 +153,6 @@ def allowed_operations_for(condition):
     if condition == "textual":
         return set(TEXTUAL_OPERATIONS)
     return set(TEXTUAL_OPERATIONS) | set(SEMANTIC_ONLY_OPERATIONS)
-
-
-def read_validated_source(workspace_dir):
-    """Safely reads workspace/benchmark.kai's bytes on the HOST, refusing
-    anything that is not a genuine regular file - see
-    scripts/collect-isolated-trial.sh for the identical rationale and
-    mechanism (a sandboxed process can replace benchmark.kai with a
-    symlink/FIFO/etc. to try to trick host-side code into reading or
-    blocking on something else). Returns the file's bytes; never returns
-    a path for a second process to re-open by name (that would reopen a
-    TOCTOU window against a LIVE, still-running sandbox - this broker,
-    unlike the one-shot M1 collector, may service many requests across a
-    trial's whole lifetime, so the concurrent-tampering window is real)."""
-    src = os.path.join(workspace_dir, "benchmark.kai")
-    try:
-        st = os.lstat(src)
-    except FileNotFoundError:
-        raise InvalidSource("benchmark.kai does not exist")
-    except OSError as exc:
-        raise InvalidSource(f"could not lstat benchmark.kai: {exc}")
-
-    if not stat.S_ISREG(st.st_mode):
-        if stat.S_ISLNK(st.st_mode):
-            kind = "a symlink"
-        elif stat.S_ISFIFO(st.st_mode):
-            kind = "a FIFO"
-        elif stat.S_ISSOCK(st.st_mode):
-            kind = "a socket"
-        elif stat.S_ISBLK(st.st_mode):
-            kind = "a block device"
-        elif stat.S_ISCHR(st.st_mode):
-            kind = "a character device"
-        elif stat.S_ISDIR(st.st_mode):
-            kind = "a directory"
-        else:
-            kind = "not a regular file"
-        raise InvalidSource(f"benchmark.kai is {kind}, not a regular file")
-
-    real_workspace = os.path.realpath(workspace_dir)
-    real_parent = os.path.dirname(os.path.realpath(src))
-    if real_parent != real_workspace:
-        raise InvalidSource("resolved source path escapes the workspace")
-
-    # O_NOFOLLOW: a second, TOCTOU-resistant guarantee of the same
-    # regular-file property confirmed above via lstat.
-    try:
-        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise InvalidSource(f"could not open benchmark.kai safely: {exc}")
-    try:
-        with os.fdopen(fd, "rb") as f:
-            return f.read()
-    except OSError as exc:
-        raise InvalidSource(f"could not read benchmark.kai: {exc}")
 
 
 class Broker:

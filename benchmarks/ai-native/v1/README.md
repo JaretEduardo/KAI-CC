@@ -150,7 +150,7 @@ ordinary broad filesystem search, which would contaminate the trial.
   - the agent must reach the correct output by actually solving the task,
     and validation happens afterward, outside the agent's view.
 
-### Isolation M1/M2: containerized sandbox + enforced tool boundary (infrastructure only)
+### Isolation M1/M2/M3A: containerized sandbox + enforced tool boundary + agent orchestration (infrastructure only)
 
 The steps above isolate a trial at the *directory* level, which is not
 sufficient on its own now that this repository is public - a trial
@@ -165,10 +165,15 @@ convention: raw `kaicc` never enters the sandbox, and a host-side broker
 (`scripts/isolation/broker.py`) is the only thing that ever invokes it,
 enforcing each trial's condition from host-only metadata regardless of
 what the sandbox does or discovers
-(`scripts/tool-sandbox-exec.sh`, `scripts/test-tool-boundary.sh`). See
-[`ISOLATION.md`](ISOLATION.md) for the full threat model, exact
-mechanisms, and explicit current limitations. No formal trial has been
-run through this sandbox yet; this is infrastructure, not a result.
+(`scripts/tool-sandbox-exec.sh`, `scripts/test-tool-boundary.sh`).
+**Isolation M3A** adds a provider-neutral agent-orchestration layer
+(`scripts/agent/`) that will drive a real model in a future milestone -
+today it is exercised only by a deterministic, offline `ScriptedAdapter`
+(`scripts/run-agent-dry-run.py`, `scripts/test-agent-adapter.py`), never
+a real provider. See [`ISOLATION.md`](ISOLATION.md) for the full threat
+model, exact mechanisms, and explicit current limitations. No formal
+trial has been run through this sandbox yet; this is infrastructure, not
+a result.
 
 ## Preparing a run
 

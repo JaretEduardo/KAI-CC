@@ -1,16 +1,19 @@
-# AI-Native Benchmark v1 — Isolation Threat Model (Isolation M1 + M2)
+# AI-Native Benchmark v1 — Isolation Threat Model (Isolation M1 + M2 + M3A)
 
 This document is the isolation/threat-model reference for the containerized
 sandbox substrate under `scripts/prepare-isolated-trial.sh`,
 `scripts/sandbox-exec.sh`, `scripts/cleanup-isolated-trials.sh`,
-`scripts/collect-isolated-trial.sh`, `scripts/test-isolation.sh` (M1), and
+`scripts/collect-isolated-trial.sh`, `scripts/test-isolation.sh` (M1);
 `scripts/tool-sandbox-exec.sh`, `scripts/isolation/{stage-toolchain.sh,
-broker.py, generate-tool-surface.sh}`, `scripts/test-tool-boundary.sh`
-(M2). It supplements, and does not replace, `README.md`'s existing
-"Isolation" section, which still governs the original, uncontained
-workflow (`scripts/prepare-run.sh` + `scripts/validate-run.py`).
+broker.py, generate-tool-surface.sh, safe_source.py}`,
+`scripts/test-tool-boundary.sh` (M2); and `scripts/agent/{adapter.py,
+prompts.py, orchestrator.py, fixtures.py}`,
+`scripts/run-agent-dry-run.py`, `scripts/test-agent-adapter.py` (M3A). It
+supplements, and does not replace, `README.md`'s existing "Isolation"
+section, which still governs the original, uncontained workflow
+(`scripts/prepare-run.sh` + `scripts/validate-run.py`).
 
-**Status: infrastructure only.** As of Isolation M2, no formal benchmark
+**Status: infrastructure only.** As of Isolation M3A, no formal benchmark
 trial has been run. Formal trial counts remain:
 
 ```
@@ -18,13 +21,16 @@ textual  = 0
 semantic = 0
 ```
 
-Both milestones exist to build and verify a sandbox substrate a future
-agent adapter can safely use — neither runs an agent itself, and neither
-changes those counts. M1 established filesystem/network isolation and
-safe result collection; M2 adds the enforced, condition-specific tool
-boundary (see "Isolation M2" below) — the piece that makes a formal
-trial's textual-vs-semantic comparison technically meaningful rather than
-merely a naming convention.
+All three milestones exist to build and verify infrastructure a future
+formal trial can safely use — none of them runs a real benchmark trial,
+and none changes those counts. M1 established filesystem/network
+isolation and safe result collection; M2 added the enforced,
+condition-specific tool boundary (see "Isolation M2" below) - the piece
+that makes a formal trial's textual-vs-semantic comparison technically
+meaningful rather than merely a naming convention. M3A adds a
+provider-neutral agent-orchestration layer (see "Isolation M3A" below),
+exercised only by a deterministic `ScriptedAdapter` - no real model
+provider is integrated yet.
 
 ## Why a second isolation layer
 
@@ -99,33 +105,41 @@ unmodified.
   addressed by disabling the sandbox's network entirely
   (`--network=none`), not merely by hiding files on disk
 
-## E. Threats neither M1 nor M2 solves
+## E. Threats neither M1, M2, nor M3A solves
 
 Stated explicitly, per the project's own convention of never claiming
 stronger isolation than implemented. (Textual-vs-semantic tool
 enforcement — previously listed here as M1's single biggest gap — is now
-implemented; see "Isolation M2" below.)
+implemented; see "Isolation M2" below. The orchestration layer a real
+agent will use is now built and tested; see "Isolation M3A" below - but
+no real model provider is integrated by it.)
 
 - **Model-provider training contamination cannot be controlled.** A model
   may already have memorized KAI's public repository, including
   `reference/`/`expected/`, from its training data. Filesystem/network
   sandboxing isolates trial-visible **tools and context**, not what a
   model already "knows." See "Explicit limitations" below.
-- **No agent adapter exists yet.** M2 hardens the tool boundary a future
-  agent will use; it does not itself integrate Claude/OpenAI/Codex/
-  Copilot/MCP. A real adapter needs authenticated API access to reach its
-  model provider — the intended architecture keeps that host-side model
-  adapter *outside* the networkless execution sandbox, relaying only
-  narrowly-defined tool requests in. Designing and building that adapter
-  is future work (see "Recommended next milestone" territory).
+- **No real model provider is integrated yet.** M3A hardens and tests the
+  orchestration layer a future agent will use, exercised only by a
+  deterministic `ScriptedAdapter`; it does not itself integrate Claude/
+  OpenAI/Codex/Copilot/MCP. A real adapter needs authenticated API access
+  to reach its model provider — the intended architecture keeps that
+  host-side model adapter *outside* the networkless execution sandbox,
+  relaying only narrowly-defined tool requests in. Building that real
+  adapter is M3B's job.
 - **Model nondeterminism** is unaffected by this sandbox and is out of
   scope here.
 - **Token accounting differences between providers** are unaffected by
-  this sandbox.
+  this sandbox; M3A's metrics schema reserves fields for them
+  (`inputTokens`, `outputTokens`, `cachedInputTokens`, `cost`) but
+  `ScriptedAdapter` always leaves them `null`, never fabricated.
 - **Broker transcript sequence numbers are per-invocation, not
   per-trial.** See Isolation M2's "Host-only tool transcript" section for
   what this means in practice and how a future long-lived session avoids
   it.
+- **Agent transcript ↔ broker transcript correlation is timestamp-based
+  only**, not a shared ID - see Isolation M3A's own "Correlation
+  limitation" note.
 
 ## Directory layout
 
@@ -480,6 +494,256 @@ non-root execution, and every mount restriction remain fully independent
 DAC/namespace controls and are unaffected. It is a no-op on non-SELinux
 hosts (e.g. Docker on Ubuntu GitHub Actions runners using AppArmor).
 
+## Isolation M3A: provider-neutral agent-adapter foundation
+
+**Status: infrastructure only.** M3A builds and tests the exact
+orchestration layer a real model provider will use in a future M3B - it
+does not integrate Claude, OpenAI, or any other provider, requires no API
+key, and every session it runs uses a deterministic, offline
+`ScriptedAdapter` (see `agent/adapter.py`). Formal trial counts remain
+unaffected by M3A - see "Dry-run vs. formal trial" below.
+
+### The trusted/untrusted boundary
+
+```
+TRUSTED HOST                                        UNTRUSTED-BY-DESIGN
+                                                     (never given a shell)
+agent/orchestrator.py                               AgentAdapter
+  |  reads/writes workspace/benchmark.kai            (ScriptedAdapter today;
+  |  directly (safe_source.py)                        a real provider in M3B)
+  |
+  |  connects to the EXISTING M2 broker socket       returns only:
+  |  for compile/semantic queries - never              - assistant text
+  |  invokes kaicc itself                              - structured tool calls
+  |                                                     - usage metadata (or null)
+  |  shells out to the EXISTING M1
+  |  sandbox-exec.sh for `run` only
+  v
+M1/M2 sandbox + broker (unchanged)
+```
+
+The adapter is a plain Python object living in the orchestrator's own
+host process - it is **never itself placed inside a sandbox container**,
+because it never executes arbitrary code at all: it only ever returns a
+structured dict (`{"assistantText", "toolCalls", "stopReason", "usage"}`)
+that the orchestrator independently validates and dispatches (see
+"Response/tool-call validation" below). This is the mechanism that
+satisfies "no shell/exec/arbitrary path" - there is no code path by which
+an adapter implementation could obtain one, provider-neutral or
+otherwise.
+
+Only the **compiled KAI program itself** (`run`) executes inside the M1
+container - the same network-disabled, non-root, read-only-rootfs sandbox
+already established, via the unmodified `scripts/sandbox-exec.sh`.
+Compile and semantic-query tool calls are serviced by the **existing M2
+broker**, connected to directly by the trusted orchestrator (the
+orchestrator plays exactly the same socket-client role
+`isolation/generate-tool-surface.sh`'s `_client.py` already plays for a
+human-driven sandboxed session) - never a second, parallel compiler
+execution path.
+
+### Canonical prompt construction (`agent/prompts.py`)
+
+The system prompt is one fixed string, identical for every trial
+regardless of condition or task - it never says "you are in semantic
+mode" or otherwise coaches one condition. The user prompt embeds that
+task's `TASK.md` content and the current `benchmark.kai` content, in an
+identical template for both conditions - the embedded text differs only
+by *task*, never by *condition*. Neither prompt ever mentions the trial
+ID, a host path, the reference solution, expected stdout, or the
+validator's implementation.
+
+**Prompt equality is proven by host-side SHA-256 hashing**, not asserted:
+`session.json` records `systemPromptSha256`, `userPromptSha256`, and
+`commonToolsSha256` (a hash of only the leading baseline-tool slice of
+the advertised schema, computed independently per condition rather than
+assumed from a shared constant). `scripts/test-agent-adapter.py` proves,
+for all three existing tasks, that a textual and a semantic trial produce
+identical values for all three hashes, and identical `benchmark.kai`/
+`TASK.md` input hashes (reusing the same `trial.json` mechanism M1
+already established).
+
+### Agent-visible tools
+
+Deliberately narrow - no generic file/path/shell/environment parameter
+exists anywhere in any schema:
+
+| Tool | Textual | Semantic | Arguments |
+|---|---|---|---|
+| `read_source` | yes | yes | none - always `workspace/benchmark.kai` |
+| `replace_source` | yes | yes | `{"content": string}` only - never a destination path |
+| `compile` | yes | yes | none - routes through the M2 broker unchanged |
+| `run` | yes | yes | none - executes only `workspace/benchmark_out`, inside the M1 sandbox |
+| `finish` | yes | yes | none - ends the session and triggers collection |
+| `inspect`, `call-graph` | no | yes | none |
+| `definition`, `references`, `callers`, `callees` | no | yes | `{"line": int, "column": int}` only |
+
+`read_source`/`replace_source` reuse the EXACT SAME lstat + O_NOFOLLOW
+symlink/special-file defense as M1's collector and M2's broker
+(refactored into the shared `isolation/safe_source.py` this milestone -
+see below). `replace_source` writes to a fresh temp file in the
+workspace, fsyncs it, then atomically renames it onto `benchmark.kai` -
+it refuses outright (rather than silently succeeding via `rename()`'s
+own safe-by-construction behavior) if the current destination is
+anything other than absent or a regular file, matching `read_source`'s
+own refusal for a clearer, more predictable, more auditable outcome.
+`compile`/semantic queries forward to the M2 broker exactly as before -
+same condition check, same strict per-operation params schema, same
+symlink defense, same timeouts, same transcript. `run` refuses outright
+if `benchmark_out` does not exist, and otherwise always executes exactly
+`/workspace/benchmark_out` via `scripts/sandbox-exec.sh` - never a
+model-suppliable path, argv, or shell string.
+
+### Defense in depth (tool permission is never advertisement-only)
+
+Advertised tool schemas differ by condition, but that alone is UX, not
+enforcement - exactly like M2's own "wrapper name is not enforcement"
+principle. The orchestrator independently checks every tool call's name
+against the condition's allowed set BEFORE dispatch, so a textual
+`ScriptedAdapter` fixture that deliberately emits `inspect` (never
+advertised to it) is still denied - proven directly by
+`scripts/test-agent-adapter.py`'s illegal-semantic-call test. Even if
+such a call somehow reached the M2 broker unmodified, the broker's own,
+already-tested condition check would deny it a second time (M2's own
+test suite already proves this independently; M3A does not duplicate
+that specific test at the broker layer).
+
+### Response/tool-call validation
+
+`agent/orchestrator.py`'s `parse_adapter_response()` and
+`validate_tool_call_args()` strictly validate every adapter response and
+every tool call's arguments before anything is dispatched: unknown tool
+names, wrong argument types, missing required arguments, unexpected
+extra arguments (a model can never smuggle `path`/`filename`/`trialId`/
+`condition`/`executable`/`environment` through any tool's arguments -
+none of the schemas has a slot for one), duplicate or non-string tool
+call IDs, and malformed response shapes are all rejected with an explicit
+reason - never silently reinterpreted, never executed.
+
+### Dry-run vs. formal trial
+
+Every M3A session is written under `<trial>/host/agent/` -
+**never** `workspace/`, **never** the existing formal `runs/` location
+`scripts/summarize-results.py` counts - and `session.json` always records
+`"dryRun": true`, `"adapterType": "scripted-v1"` (never a vendor name).
+No `result.json` in the schema `summarize-results.py` recognizes is ever
+written by M3A. Formal trial counts remain exactly as before this
+milestone:
+
+```
+textual  = 0
+semantic = 0
+```
+
+### Session metadata and transcript
+
+`host/agent/session.json` (schemaVersion 1): `trialId`, `condition`,
+`dryRun`, `adapterType`, `startedAt`/`finishedAt`, `terminationReason`,
+the three prompt/tool-schema hashes above, and the compiler
+`compilerVersion`/`compilerSha256` actually used (read from
+`isolation/stage-toolchain.sh`'s own manifest - never assumed).
+
+`host/agent/transcript.jsonl` (schemaVersion 1, one JSON object per
+line): `session_start`, `model_response`, `tool_call`, `tool_result`,
+`finish`, `session_end` events. Each `tool_call`/`tool_result` pair
+carries a **host-generated** `callId` (a UUID, never the model-supplied
+call ID used only for protocol-level request/response matching within
+the conversation - "do not trust model-supplied IDs as security
+authority"). Tool arguments are logged only in a bounded, sanitized form
+(`normalize_args_for_log()`: a clean `{line, column}` pair, or
+`replace_source`'s content **byte count** only - never full source text,
+never full stdout/stderr content, matching the M2 broker transcript's own
+philosophy). `host/agent/metrics.json` separately records turn/tool-call
+counts by operation, compile/run/semantic-query counts, source
+read/write counts, wall-clock duration, tool stdout/stderr byte totals,
+and termination reason; `inputTokens`/`outputTokens`/
+`cachedInputTokens`/`cost` are always `null` in M3A (ScriptedAdapter never
+fabricates provider usage) - the fields exist so M3B can populate them
+from a real provider's response without changing the metrics schema.
+
+**Correlation limitation, stated explicitly:** the host-generated
+`callId` above exists only in the M3A agent transcript. It is **not**
+passed into the M2 broker's own protocol (doing so would require
+modifying M2's already-strict, already-tested request schema, which this
+milestone deliberately avoids per its own "do not redesign M1/M2
+unnecessarily" instruction). A reviewer correlating an agent `tool_call`
+to the corresponding M2 broker transcript entry for the same trial must
+do so by timestamp proximity, not a shared ID. Revisiting this is
+reasonable future scope, not solved here.
+
+### Resource limits
+
+Conservative defaults, all independently enforced by the orchestrator -
+never assumed from adapter/provider behavior: `max_turns` (20),
+`max_tool_calls` (40), `max_wall_time_seconds` (120, checked against an
+injectable clock - `time.monotonic` in production, a fixture-controlled
+clock in tests), `max_source_bytes` (1,000,000), `run_timeout_seconds`
+(15), `dry_run_timeout_seconds` (20). Exceeding a turn/tool-call/wall-time
+limit terminates the session immediately with an explicit
+`terminationReason` (`max_turns_exceeded`, `max_tool_calls_exceeded`,
+`max_wall_time_exceeded`) - the session is never reported as having
+finished successfully in that case.
+
+**Two real bugs were found and fixed while testing these limits with a
+genuinely non-terminating compiled KAI program** (`fn main() { while true
+{ } }`), not merely asserted:
+
+1. **`run`'s timeout did not actually stop the sandboxed program.**
+   `subprocess.run(..., timeout=...)` against `sandbox-exec.sh`'s `podman
+   run` only kills the CLIENT process on expiry - podman/docker detach a
+   running container from its own attached CLI via `conmon`, so the
+   container itself kept running as an orphan indefinitely (reproduced
+   directly, confirmed with `podman ps`). Fixed in `sandbox-exec.sh`
+   itself (a new, opt-in, backward-compatible `--timeout SECONDS` flag -
+   omitting it preserves the exact prior behavior): the container is
+   given an explicit `--name`, and a background watcher kills it BY NAME
+   via the engine's own `kill` if it runs too long, so the foreground
+   `podman run` naturally notices and returns instead of needing to be
+   killed itself.
+2. **The automatic post-`finish` dry-run validation diagnostic could hang
+   the whole orchestrator forever.** It runs the existing, unmodified
+   `scripts/validate-run.py` against whatever source a session collected
+   - including, potentially, a non-terminating one - and `validate-run.py`
+   itself runs the compiled candidate directly on the host with no
+   timeout (a reasonable design for its original, human-operator-driven
+   use case). A naive `subprocess.run(..., timeout=...)` wrapper would
+   only kill `validate-run.py`'s own process, leaving the compiled
+   candidate it spawned running as an orphaned grandchild on the host.
+   Fixed by starting `validate-run.py` in its own process group
+   (`start_new_session=True`) and killing the whole group
+   (`os.killpg(..., SIGKILL)`) on timeout - never `validate-run.py`
+   itself modified.
+
+Both fixes are exercised by real, non-flaky regression tests in
+`scripts/test-agent-adapter.py` (a genuinely compiled infinite loop, a
+real sandboxed `run` call, and a real dry-run-validation call - not
+mocks), which also assert no orphaned container or host process remains
+afterward.
+
+### What is shared with M1/M2 vs. new in M3A
+
+`isolation/safe_source.py` is a new module extracted from
+`isolation/broker.py`'s own `read_validated_source`/`InvalidSource` (pure
+extraction, identical logic, no behavior change - re-verified by
+re-running the full M1/M2 suites after the refactor) so the exact same,
+already-tested symlink/special-file defense is reused by the M2 broker
+*and* the new `read_source`/`replace_source` tools, rather than
+implemented a third time. `agent/orchestrator.py` never invokes `kaicc`
+directly, never bypasses the M2 broker's condition/params checks, and
+never runs the compiled program outside `scripts/sandbox-exec.sh`.
+
+### Remaining M3A limitations, stated explicitly
+
+- No real model provider is integrated; `ScriptedAdapter` proves the
+  orchestration layer works, not that a real model will use it
+  correctly - that is M3B's job.
+- Broker transcript ↔ agent transcript correlation is timestamp-based
+  only (see above).
+- `run`'s sandbox invocation is one-shot per tool call (a fresh container
+  per `run`, matching M1's own `sandbox-exec.sh` pattern) - no persistent
+  sandboxed session is maintained across a trial's tool calls; only the
+  M2 broker process persists across a session's lifetime.
+
 ## Result collection and the validation boundary
 
 **Trial sandbox** (inside the network-disabled container):
@@ -627,6 +891,29 @@ files on disk plus the commands below — never by trusting a summary:
     section's own tested cases (direct client bypass, raw-protocol
     bypass, `trial.json` tampering), all denied by the host broker
     independent of anything sandbox-visible.
+13. **What exact system/user prompt did the agent receive?**
+    `<trial>/host/agent/session.json`'s `systemPromptSha256`/
+    `userPromptSha256` - recompute both from `agent/prompts.py` given the
+    same task/source to verify, or compare against a paired trial's
+    hashes for the other condition (must match exactly - see item 8).
+14. **What tools were advertised, and were any tool calls attempted/
+    denied?** `<trial>/host/agent/transcript.jsonl` - `model_response`
+    events show `toolCallCount`; `tool_call`/`tool_result` pairs (matched
+    by the host-generated `callId`) show which tool, whether `allowed`,
+    and timing - never the full argument/result content for
+    `replace_source`/compiler output (only byte counts).
+15. **How many compile/run/semantic calls occurred, and why did the
+    session end?** `<trial>/host/agent/metrics.json`'s
+    `toolCallsByOperation`/`compileCalls`/`runCalls`/`semanticQueryCalls`
+    and `terminationReason`.
+16. **Was this a dry-run or a formal trial?** `session.json`'s
+    `"dryRun"` field (always `true` for anything M3A produces) and
+    `"adapterType"` (always `"scripted-v1"` for M3A - never a vendor
+    name, never counted by `scripts/summarize-results.py`).
+17. **What final source was collected, and does it match?** Same
+    mechanism as item 7 above - `<trial>/host/result/benchmark.kai`,
+    produced by `scripts/collect-isolated-trial.sh` after `finish`, never
+    fed back to the agent.
 
 ## Explicit limitations
 
