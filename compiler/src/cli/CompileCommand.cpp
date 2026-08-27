@@ -14,11 +14,48 @@
 
 #include <llvm/IR/Module.h>
 
+#include <cctype>
 #include <optional>
 #include <string>
 #include <system_error>
 
 namespace kai::cli {
+
+#ifdef _WIN32
+namespace {
+
+// Case-insensitive ".exe" check - std::filesystem::path::extension()
+// itself does not fold case, and a user/build-script-provided `-o
+// HELLO.EXE` is still an already-suffixed path that must not be
+// double-suffixed. Compiled only on Windows - resolveNativeExecutablePath()
+// is the only caller, and it is a no-op on every other platform (see its
+// own doc comment in CompileCommand.hpp).
+bool hasExeExtensionCaseInsensitive(const std::filesystem::path& path) {
+    const std::string extension = path.extension().string();
+    if (extension.size() != 4) {
+        return false;
+    }
+    return std::tolower(static_cast<unsigned char>(extension[0])) == '.' &&
+           std::tolower(static_cast<unsigned char>(extension[1])) == 'e' &&
+           std::tolower(static_cast<unsigned char>(extension[2])) == 'x' &&
+           std::tolower(static_cast<unsigned char>(extension[3])) == 'e';
+}
+
+} // namespace
+#endif
+
+std::filesystem::path resolveNativeExecutablePath(const std::filesystem::path& requestedOutputPath) {
+#ifdef _WIN32
+    if (hasExeExtensionCaseInsensitive(requestedOutputPath)) {
+        return requestedOutputPath;
+    }
+    std::filesystem::path suffixed = requestedOutputPath;
+    suffixed += ".exe";
+    return suffixed;
+#else
+    return requestedOutputPath;
+#endif
+}
 
 int runCompileCommand(SourceManager& sources, const std::filesystem::path& inputPath,
                        const std::filesystem::path& outputPath, std::ostream& err) {
@@ -80,6 +117,15 @@ int runCompileCommand(SourceManager& sources, const std::filesystem::path& input
 
     codegen::LLVMObjectEmitter::initializeNativeTarget();
 
+    // WINDOWS M1 spec §7: the actual final linked-executable path - a
+    // no-op on every platform except Windows, where a missing `.exe`
+    // extension is filled in (see resolveNativeExecutablePath()'s own
+    // doc comment). The intermediate object file is still named from the
+    // ORIGINAL requested `outputPath` - it is a temporary, always removed
+    // before this function returns, so its exact name is not
+    // user-visible and does not need the same treatment.
+    const std::filesystem::path nativeOutputPath = resolveNativeExecutablePath(outputPath);
+
     std::filesystem::path objectPath = outputPath;
     objectPath += ".o";
 
@@ -113,9 +159,9 @@ int runCompileCommand(SourceManager& sources, const std::filesystem::path& input
         return 10;
     }
 
-    if (!codegen::NativeLinker::link(*compilerDriver, objectPath, *runtimeLibrary, outputPath, err)) {
+    if (!codegen::NativeLinker::link(*compilerDriver, objectPath, *runtimeLibrary, nativeOutputPath, err)) {
         std::error_code ignored;
-        std::filesystem::remove(outputPath, ignored); // no partial/stale executable left behind
+        std::filesystem::remove(nativeOutputPath, ignored); // no partial/stale executable left behind
         cleanupObject();
         return 11;
     }

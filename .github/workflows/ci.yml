@@ -67,6 +67,119 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # WINDOWS M1: proves the SAME source tree also builds and runs its
+  # CTest suite natively on Windows x86_64 - a portability BASELINE, not
+  # yet the portable Windows release/packaging milestone (no install
+  # step, no bundling, no artifact upload, no version/tag change here).
+  # Independent of the "compiler" job above - it builds its own fresh
+  # kaicc.exe on windows-latest rather than reusing the Linux job's
+  # artifact, since the two are different native binaries for different
+  # host triples.
+  #
+  # Exactly one Windows toolchain baseline (WINDOWS M1 spec §2): MSYS2
+  # UCRT64 with LLVM/Clang 22.1.8, never MSVC and never WSL - WSL is a
+  # Linux userspace inside Windows, not a test of KAI-CC's own Windows
+  # portability, and a second (MSVC) configuration is explicitly out of
+  # scope for this milestone.
+  compiler-windows:
+    name: Compiler (Windows x86_64 build/test baseline)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        # Every step below runs inside the MSYS2 UCRT64 shell that
+        # msys2/setup-msys2@v2 installs - never Windows' own cmd.exe/
+        # PowerShell - so PATH already contains exactly the UCRT64
+        # toolchain this job just installed, with no manual PATH surgery.
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          # Deliberately narrow (WINDOWS M1 spec §13: "verify actual
+          # package requirements rather than blindly installing all of
+          # them") - not the entire UCRT64 package set:
+          #   toolchain    - gcc/g++/make/binutils: the host C toolchain
+          #                  NativeLinker searches for (cc/clang/gcc) to
+          #                  invoke as the final native link step, and a
+          #                  second working driver besides clang itself
+          #   clang        - the Clang 22.1.8 frontend, used to BUILD
+          #                  kaicc/kai_compiler/kai_runtime themselves
+          #   llvm         - LLVM 22.1.8 + llvm-config + LLVMConfig.cmake,
+          #                  the actual codegen/object-emission backend
+          #                  kai_compiler links against (find_package(LLVM
+          #                  CONFIG REQUIRED) in the root CMakeLists.txt)
+          #   cmake, ninja - the build system (CMakeLists.txt is unforked
+          #                  between platforms - WINDOWS M1 spec §4)
+          #   z3           - only actually bundled by kai-cc's own CMake
+          #                  Z3-detection block if LLVMSupport was built
+          #                  against it (see CMakeLists.txt's own "RELEASE
+          #                  HARDENING M1.1" comment); installed here so
+          #                  that detection has something real to find if
+          #                  this UCRT64 LLVM build does depend on it -
+          #                  never assumed, only audited (WINDOWS M1
+          #                  spec §10/§17)
+          install: >-
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-llvm
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-z3
+
+      - name: Configure
+        # LLVM_DIR is passed explicitly (WINDOWS M1 spec §2/§3: "use the
+        # correct LLVM_DIR discovered from MSYS2 if required") via
+        # llvm-config itself, rather than assumed to be found implicitly -
+        # this is the exact same find_package(LLVM CONFIG REQUIRED) call
+        # every platform uses (CMakeLists.txt is not forked - spec §4),
+        # just told explicitly where THIS platform's LLVM package put its
+        # CMake config.
+        run: |
+          set -e
+          LLVM_CMAKE_DIR="$(llvm-config --cmakedir)"
+          echo "LLVM_DIR: ${LLVM_CMAKE_DIR}"
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DLLVM_DIR="${LLVM_CMAKE_DIR}"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test (CTest, including native .kai -> object -> link -> execute suites)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Native .kai -> kaicc.exe -> hello.exe smoke test
+        # WINDOWS M1 spec §12: the real, required end-to-end pipeline -
+        # not merely CTest's own in-tree native_compilation_tests, but
+        # the actual `kaicc.exe <file> -o <output>` CLI contract a real
+        # Windows user would run, including the `.exe`-suffix behavior
+        # documented in kai::cli::resolveNativeExecutablePath().
+        run: |
+          set -e
+          printf 'fn main() {\n    print("Hello from KAI on Windows")\n}\n' > windows_m1_hello.kai
+          ./build/bin/kaicc.exe windows_m1_hello.kai -o windows_m1_hello
+          test -f windows_m1_hello.exe
+          ./windows_m1_hello.exe
+
+      - name: Report kaicc.exe's runtime DLL dependencies (WINDOWS M1 spec §10 - informational only)
+        # Packaging/bundling decisions are explicitly OUT OF SCOPE for
+        # this milestone (spec §10: "Do NOT decide final Windows bundling
+        # yet") - this step only records the dependency list as a CI log
+        # artifact for the future Windows M3 packaging milestone to use;
+        # it never fails the build and never copies/bundles any DLL.
+        if: always()
+        run: |
+          echo "== kaicc.exe DLL dependencies (objdump -p) =="
+          objdump -p ./build/bin/kaicc.exe | grep -i 'DLL Name' || true
+
   # AI-NATIVE BENCHMARK - ISOLATION M1/M2/M3A: validates the containerized
   # trial sandbox (network-disabled, non-root, read-only rootfs, no
   # repo/HOME mount, safe result collection), the enforced condition-

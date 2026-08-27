@@ -30,6 +30,12 @@ driver package is not always sufficient by itself (see the root
 It does **not** require LLVM to be installed on the machine running
 `kaicc`.
 
+**Output naming (WINDOWS M1):** on every platform except Windows, `<output>` is the literal produced file, with
+no suffix ever added. On Windows, if `<output>` does not already end in `.exe` (case-insensitively), `kaicc`
+appends `.exe` itself - so `kaicc hello.kai -o hello` produces `hello.exe`, not `hello` - rather than depending
+on whichever suffixing behavior a given host compiler driver happens to apply on its own. An `<output>` that
+already ends in `.exe` is never modified or double-suffixed, on any platform.
+
 ## Semantic queries
 
 These are compiler-resolved queries against KAI's own semantic model -

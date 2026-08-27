@@ -84,8 +84,15 @@ CompileAndRunResult compileAndRun(const std::string& kaiSourceName, const std::s
 
     const std::filesystem::path sourcePath = writeTempSource(kaiSourceName, source);
     const std::filesystem::path outputPath = std::filesystem::temp_directory_path() / (kaiSourceName + ".out");
+    // WINDOWS M1 spec §7: the file runCompileCommand() actually produces -
+    // on every platform except Windows this is `outputPath` itself
+    // unchanged; on Windows a missing `.exe` is filled in. Every caller
+    // that needs the real produced filename uses this exact function
+    // (kai::cli::resolveNativeExecutablePath()'s own doc comment) rather
+    // than assuming `outputPath` is the literal produced file.
+    const std::filesystem::path nativeOutputPath = kai::cli::resolveNativeExecutablePath(outputPath);
     std::error_code ignored;
-    std::filesystem::remove(outputPath, ignored);
+    std::filesystem::remove(nativeOutputPath, ignored);
 
     SourceManager sm;
     std::ostringstream err;
@@ -97,10 +104,10 @@ CompileAndRunResult compileAndRun(const std::string& kaiSourceName, const std::s
         return result;
     }
 
-    result.runExitCode = runAndCaptureStdout(outputPath, result.stdoutText);
+    result.runExitCode = runAndCaptureStdout(nativeOutputPath, result.stdoutText);
 
     std::filesystem::remove(sourcePath, ignored);
-    std::filesystem::remove(outputPath, ignored);
+    std::filesystem::remove(nativeOutputPath, ignored);
     return result;
 }
 
@@ -306,7 +313,14 @@ void testNativeLinkerProducesRunnableExecutable() {
     SourceManager sm;
     const std::filesystem::path sourcePath = writeTempSource("kai_link_test.kai", "fn main() {\n    print(7)\n}");
     const std::filesystem::path objectPath = std::filesystem::temp_directory_path() / "kai_link_test.o";
-    const std::filesystem::path outputPath = std::filesystem::temp_directory_path() / "kai_link_test.out";
+    // NativeLinker::link() itself has no output-naming policy - it links
+    // to exactly the path it is given (that policy lives one layer up, in
+    // kai::cli::resolveNativeExecutablePath() - see CompileCommand.cpp).
+    // This test applies the same resolution a real caller would, so it
+    // asks the host driver to produce a path it will actually create on
+    // every platform (WINDOWS M1 spec §7).
+    const std::filesystem::path outputPath =
+        kai::cli::resolveNativeExecutablePath(std::filesystem::temp_directory_path() / "kai_link_test.out");
     std::error_code ignored;
     std::filesystem::remove(objectPath, ignored);
     std::filesystem::remove(outputPath, ignored);

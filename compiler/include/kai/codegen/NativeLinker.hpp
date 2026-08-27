@@ -62,15 +62,30 @@ public:
     ///      flatter fallback layout, checked only if (2) does not exist.
     /// Returns std::nullopt if none of these exist on disk - never a
     /// path that has not actually been verified to exist.
+    ///
+    /// WINDOWS M1: the archive is named `libkai_runtime.a` on Windows too
+    /// - the project's one supported Windows baseline is the MSYS2 UCRT64
+    /// Clang/GCC (MinGW-w64) toolchain, never MSVC, and MinGW-style
+    /// toolchains use the same `lib`-prefixed `.a` static-archive naming
+    /// as Linux/GCC (`.lib` is an MSVC-only convention this project does
+    /// not target - see COMPILER_ARCHITECTURE.md's Windows M1 notes).
+    /// This lookup is therefore already correct, unmodified, on both
+    /// platforms.
     static std::optional<std::filesystem::path>
     findDefaultRuntimeLibrary(const std::filesystem::path& kaiccExecutablePath);
 
-    /// The absolute path to the currently running executable, via Linux's
-    /// `/proc/self/exe` (Fedora Linux x86_64 is this MVP's only supported
-    /// host - M7 spec §5) - robust regardless of how the process was
-    /// invoked (a bare name found via PATH, a relative path, a symlink),
-    /// unlike parsing argv[0] directly. Returns an empty path if the
-    /// symlink cannot be read.
+    /// The absolute path to the currently running executable - robust
+    /// regardless of how the process was invoked (a bare name found via
+    /// PATH, a relative path, a symlink), unlike parsing argv[0] directly.
+    /// On Linux this reads the `/proc/self/exe` symlink (Fedora Linux
+    /// x86_64 was this MVP's original only supported host - M7 spec §5);
+    /// on Windows (WINDOWS M1: native Windows x86_64 build/test baseline)
+    /// there is no `/proc`, so `GetModuleFileNameW(nullptr, ...)` is used
+    /// instead - the standard, documented Win32 API for "the path of the
+    /// executable that owns this process," with a growing buffer since
+    /// `GetModuleFileNameW` gives no advance way to know the required
+    /// length. Returns an empty path if the underlying platform call
+    /// fails.
     static std::filesystem::path currentExecutablePath();
 
     /// Links `objectPath` and `runtimeLibraryPath` into a native

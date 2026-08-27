@@ -222,7 +222,14 @@ Parses and/or type-checks in some form, but explicitly **not** backend-lowerable
 - string concatenation, equality, slicing, and indexing
 - modules/packages
 
-Platform: **Linux x86_64 only**. No Windows or macOS support exists or is claimed.
+Platform: **Linux x86_64 only** for the released/distributed compiler. No macOS support exists or is claimed.
+
+A native **Windows x86_64 build and test baseline** (MSYS2 UCRT64, Clang/LLVM 22.1.8 - see the
+`compiler-windows` CI job and `COMPILER_ARCHITECTURE.md`'s "WINDOWS M1" note) is under active, in-progress
+development: the same source tree builds `kaicc.exe` and runs its CTest suite on Windows. This is a
+**development-only portability milestone, not a supported or released platform yet** - there is no packaged
+Windows distribution, no bundled VS Code compiler for Windows, and no Windows entry in a GitHub Release. Do not
+rely on Windows support until a future packaging milestone says otherwise here.
 
 ---
 
