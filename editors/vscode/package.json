@@ -78,7 +78,7 @@
                 "kai.compilerPath": {
                     "type": "string",
                     "default": "",
-                    "description": "Optional override path to a kaicc executable. Leave empty to use the compiler bundled with this extension (Linux x64 only for now)."
+                    "description": "Optional override path to a kaicc executable. Leave empty to use the compiler bundled with this extension (Linux x64 and Windows x64 only for now)."
                 }
             }
         }
@@ -90,7 +90,9 @@
         "test": "node ./out/test/paths.test.js && node ./out/test/process.test.js && node ./out/test/completionData.test.js && node ./out/test/snippets.test.js && node ./out/test/iconThemeConfig.test.js && node ./scripts/stage-compiler.test.mjs",
         "stage-compiler": "node ./scripts/stage-compiler.mjs",
         "vscode:prepublish": "npm run compile",
-        "package": "npm run compile && npm run stage-compiler && npx @vscode/vsce package"
+        "package": "npm run compile && npm run stage-compiler && npx @vscode/vsce package",
+        "package:linux-x64": "npm run compile && KAI_VSCE_TARGET=linux-x64 npm run stage-compiler && npx @vscode/vsce package --target linux-x64",
+        "package:win32-x64": "npm run compile && KAI_VSCE_TARGET=win32-x64 npm run stage-compiler && npx @vscode/vsce package --target win32-x64"
     },
     "devDependencies": {
         "@types/node": "^20.14.0",
