@@ -1,0 +1,98 @@
+name: CI
+
+# CI M1: prove every relevant push/PR still builds and passes tests. This
+# workflow does NOT publish anything - no GitHub Release, no tag, no VSIX
+# marketplace publish. Artifacts produced/uploaded here are CI build
+# output for inspection only, never an official KAI release (see the
+# "compiler" job's upload-artifact step below for the exact naming
+# distinction from a real vX.Y.Z release asset).
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+# Least-privilege token: this workflow only reads the repository (checkout,
+# build, test). It never pushes commits/tags, creates releases, or
+# publishes packages, so it never needs "contents: write" or any other
+# elevated scope.
+permissions:
+  contents: read
+
+# Cancel a superseded run for the same ref (e.g. a PR that received a new
+# push) instead of letting redundant runs keep going.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Builds KAI-CC exactly the way the portable Linux x86_64 release does -
+  # reusing release/linux-x86_64/Containerfile and
+  # scripts/build-release-linux-x86_64.sh rather than re-deriving a second,
+  # separate LLVM 22 + Ubuntu 22.04 apt-get recipe in this YAML file. This
+  # keeps the LLVM/Z3/toolchain setup knowledge in exactly one place. The
+  # script already performs: containerized configure -> build -> full
+  # CTest suite (including native_compilation_tests, which exercises the
+  # real .kai -> object -> host linker -> executable -> run pipeline) ->
+  # cmake install -> curated example compile/run checks -> portable
+  # tarball creation. Nothing here duplicates those checks.
+  compiler:
+    name: Compiler (Linux x86_64 portable release build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build, test, and package the portable Linux x86_64 release
+        run: scripts/build-release-linux-x86_64.sh
+
+      - name: Upload CI build artifact (not an official KAI release)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          # Upload the unpacked staging tree (dist/kai-linux-x86_64/),
+          # never the versioned tarball the script also produces
+          # (dist/kai-<version>-linux-x86_64.tar.gz) - that filename
+          # matches an official GitHub Release asset (e.g.
+          # kai-0.1.0-alpha.1-linux-x86_64.tar.gz), and uploading it here
+          # would make an arbitrary CI build on master/a PR look like that
+          # release. actions/upload-artifact zips this tree itself, so no
+          # second repackaging step is needed. The artifact name is
+          # explicitly CI-scoped and carries no version string.
+          name: kai-cc-ci-linux-x86_64-${{ github.sha }}
+          path: dist/kai-linux-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Independent of the compiler job - it does not need a real kaicc build,
+  # so it must not wait on one. Uses the committed package-lock.json via
+  # `npm ci` (never `npm install`) for a reproducible dependency tree.
+  vscode:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Test
+        run: npm test

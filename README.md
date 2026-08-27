@@ -1,5 +1,7 @@
 # KAI
 
+[![CI](https://github.com/JaretEduardo/KAI-CC/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/JaretEduardo/KAI-CC/actions/workflows/ci.yml)
+
 **KAI** is an experimental, statically-typed, compiled systems programming language explored with AI-assisted
 software development in mind from the start. **KAI-CC** is its reference compiler.
 
@@ -151,6 +153,9 @@ ctest --test-dir build --output-on-failure
 This produces `build/bin/kaicc` and `build/lib/kai/libkai_runtime.a`. No Ubuntu-host-native package
 instructions are given here since they haven't been verified the same way - see "Portable Linux release"
 below for the separate, containerized way this project produces a portable Ubuntu-22.04-baseline build.
+
+Pull requests and `master` are validated by GitHub Actions using this same portable Linux x86_64 baseline -
+see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
 
