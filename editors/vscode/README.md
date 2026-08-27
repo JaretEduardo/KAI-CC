@@ -149,8 +149,9 @@ planned once the compiler commits to a stable diagnostic format (see
   installation to run, but the final native link step shells out to a host
   compiler driver exactly like the portable CLI releases do (see the root
   `README.md`'s "Portable Linux release"/"Portable Windows release"
-  sections). If it's missing, the build fails with a clear message rather
-  than an obscure linker error.
+  sections, and its Windows quickstart for the one toolchain route this
+  project actually tests: standalone WinLibs GCC). If it's missing, the
+  build fails with a clear message rather than an obscure linker error.
 - **Development override**: set the `kai.compilerPath` setting to point at
   any other `kaicc`/`kaicc.exe` binary (e.g. a local build for testing) -
   this is an explicit opt-in, never a silent `PATH` search, so packaged

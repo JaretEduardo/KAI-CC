@@ -1,0 +1,15 @@
+{
+  "_comment": "WINDOWS FRESH-USER M5.1: the single source of truth for the two EXTERNAL, third-party archives windows-fresh-user CI downloads and executes (the KAI compiler ZIP and VSIX are same-commit build artifacts from this same workflow and are deliberately NOT pinned here - see M5.1's report). Both entries below were verified this round: winlibs's sha256 matches the .sha256 file WinLibs itself publishes alongside the release asset, and vscode's sha256 matches the x-sha256 response header Microsoft's own download endpoint returns for this exact version. scripts/verify-pinned-download.ps1 reads this file and refuses to let CI extract/execute either archive unless its downloaded bytes hash to exactly the value recorded here.",
+  "winlibs": {
+    "version": "16.2.0posix-14.0.0-ucrt-r1",
+    "url": "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip",
+    "filename": "winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip",
+    "sha256": "c1f52294597c0b73786b2a78eb5d176d89226d2f21875eab75e783a8b1cefcc4"
+  },
+  "vscode": {
+    "version": "1.135.0",
+    "url": "https://update.code.visualstudio.com/1.135.0/win32-x64-archive/stable",
+    "filename": "VSCode-win32-x64-1.135.0.zip",
+    "sha256": "0ee1557bab25c2b86d1dffc012fd367abef5e77ea62c2c3d7e32ec90281b2c6c"
+  }
+}

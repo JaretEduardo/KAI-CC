@@ -243,6 +243,25 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Upload a CI-scoped copy of the generated Windows ZIP (not an official release)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          # WINDOWS FRESH-USER M5 spec §5: the fresh-user job needs the
+          # ACTUAL distributable archive an end user would download, not
+          # merely the unpacked staging tree above - so expose it too,
+          # same commit, same build. The file inside still has the normal
+          # versioned release filename (kai-<version>-windows-x86_64.zip,
+          # currently kai-0.1.0-alpha.1-windows-x86_64.zip) - this is a
+          # same-commit DEVELOPMENT artifact for CI consumption, never an
+          # official release; the ARTIFACT NAME itself is what stays
+          # unambiguously CI-scoped (never something that could be
+          # mistaken for a real vX.Y.Z GitHub Release asset).
+          name: kai-windows-zip-ci-${{ github.sha }}
+          path: dist/kai-*-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 7
+
   # AI-NATIVE BENCHMARK - ISOLATION M1/M2/M3A: validates the containerized
   # trial sandbox (network-disabled, non-root, read-only rootfs, no
   # repo/HOME mount, safe result collection), the enforced condition-
@@ -600,3 +619,83 @@ jobs:
         # spec §24: expected to still report 0.1.0-alpha.1 during this
         # milestone - no version bump happens here.
         run: ./bin/kaicc.exe --version
+
+  # WINDOWS FRESH-USER M5: the question this job answers is deliberately
+  # different from compiler-windows/vscode-windows-package above - those
+  # prove KAI builds and runs on the DEVELOPMENT environment (MSYS2
+  # UCRT64). This job proves an ORDINARY Windows user - who has never
+  # touched this repository, MSYS2, LLVM, CMake, or Ninja - can download
+  # the real Windows ZIP, extract it, and compile/run real KAI programs
+  # after installing exactly one independently-obtained host C toolchain.
+  # Depends on compiler-windows and vscode-windows-package only to
+  # consume their SAME-COMMIT outputs (spec §29/§31) - it never rebuilds
+  # kaicc/the runtime/the extension itself.
+  windows-fresh-user:
+    name: Windows fresh-user smoke (M5)
+    needs: [compiler-windows, vscode-windows-package]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        # Ordinary PowerShell (Core, pre-installed on windows-latest) -
+        # never MSYS2 bash - because this job represents a normal Windows
+        # user's environment, not KAI's own build environment (spec §3).
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the same-commit Windows ZIP (CI-scoped, not an official release)
+        uses: actions/download-artifact@v4
+        with:
+          name: kai-windows-zip-ci-${{ github.sha }}
+          path: fresh-user-input/kai-zip
+
+      - name: Download the same-commit Windows VSIX (CI-scoped, not an official release)
+        uses: actions/download-artifact@v4
+        with:
+          name: kai-language-win32-x64-ci-${{ github.sha }}
+          path: fresh-user-input/vsix
+
+      - name: Download and verify the pinned WinLibs GCC archive (SHA-256, M5.1)
+        # WINDOWS FRESH-USER M5 spec §11: NOT the KAI build's own MSYS2
+        # UCRT64 environment - a separately maintained, separately built
+        # distribution (winlibs_mingw, by Brecht Sanders). M5.1: a
+        # versioned URL alone is not an immutable-byte guarantee, so the
+        # downloaded bytes are hashed and compared against
+        # scripts/windows-fresh-user-pins.json (the single source of
+        # truth for URL/version/SHA-256 - never duplicated here) BEFORE
+        # anything extracts or executes this archive; a mismatch fails
+        # the job immediately.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path fresh-user-input -Force | Out-Null
+          $pins = Get-Content scripts/windows-fresh-user-pins.json -Raw | ConvertFrom-Json
+          Invoke-WebRequest -Uri $pins.winlibs.url -OutFile fresh-user-input/toolchain.zip
+          ./scripts/verify-pinned-download.ps1 -Path fresh-user-input/toolchain.zip -Component winlibs
+
+      - name: Download and verify the pinned VS Code archive (SHA-256, M5.1)
+        # spec §27 option A: a small, pinned, official Microsoft archive -
+        # never an interactive installer, never the maintainer's/runner's
+        # own profile. Same SHA-256 verification as WinLibs above, same
+        # single source of truth.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pins = Get-Content scripts/windows-fresh-user-pins.json -Raw | ConvertFrom-Json
+          Invoke-WebRequest -Uri $pins.vscode.url -OutFile fresh-user-input/vscode.zip
+          ./scripts/verify-pinned-download.ps1 -Path fresh-user-input/vscode.zip -Component vscode
+
+      - name: Run the Windows fresh-user smoke test
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kaiZip = Get-ChildItem -Path fresh-user-input/kai-zip -Filter *.zip | Select-Object -First 1
+          $vsix = Get-ChildItem -Path fresh-user-input/vsix -Filter *.vsix | Select-Object -First 1
+          if (-not $kaiZip) { throw 'no KAI Windows ZIP found in the downloaded artifact' }
+          if (-not $vsix) { throw 'no Windows VSIX found in the downloaded artifact' }
+          ./scripts/test-windows-fresh-user.ps1 `
+            -KaiZipPath $kaiZip.FullName `
+            -ToolchainZipPath (Resolve-Path fresh-user-input/toolchain.zip) `
+            -VsixPath $vsix.FullName `
+            -VSCodeZipPath (Resolve-Path fresh-user-input/vscode.zip)
