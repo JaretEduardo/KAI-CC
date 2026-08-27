@@ -67,6 +67,48 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # AI-NATIVE BENCHMARK - ISOLATION M1/M2: validates the containerized
+  # trial sandbox (network-disabled, non-root, read-only rootfs, no
+  # repo/HOME mount, safe result collection) and the enforced condition-
+  # specific tool boundary (raw kaicc never sandbox-visible; a host-side
+  # broker is the actual enforcement point, not wrapper naming). This is
+  # infrastructure validation only - it runs no formal agent trial and
+  # produces no benchmark score. `needs: compiler` because it reuses the
+  # SAME commit's freshly-built portable compiler artifact (never the
+  # official vX.Y.Z release asset) rather than re-deriving a second build
+  # recipe. GitHub-hosted Ubuntu runners provide Docker (not Podman) -
+  # this is the first real validation of the Docker engine path; M1/M2
+  # were developed and verified locally only on Fedora/rootless Podman.
+  benchmark-isolation:
+    name: AI-native benchmark isolation (M1/M2)
+    needs: compiler
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the compiler job's portable artifact (same commit, not a release)
+        uses: actions/download-artifact@v4
+        with:
+          name: kai-cc-ci-linux-x86_64-${{ github.sha }}
+          path: dist/kai-linux-x86_64
+
+      - name: Restore executable permission on the staged compiler
+        # GitHub Actions artifact upload/download does not reliably
+        # preserve every Unix file mode bit. This restores +x ONLY on
+        # this workflow's own downloaded COPY under dist/ - it never
+        # touches, and cannot affect, the official release artifact,
+        # which is built and published entirely separately by the
+        # repository owner.
+        run: chmod +x dist/kai-linux-x86_64/bin/kaicc
+
+      - name: Run Isolation M1 tests (filesystem/network sandbox, safe collection)
+        run: benchmarks/ai-native/v1/scripts/test-isolation.sh
+
+      - name: Run Isolation M2 tests (enforced tool boundary)
+        run: benchmarks/ai-native/v1/scripts/test-tool-boundary.sh --compiler-root dist/kai-linux-x86_64
+
   # Independent of the compiler job - it does not need a real kaicc build,
   # so it must not wait on one. Uses the committed package-lock.json via
   # `npm ci` (never `npm install`) for a reproducible dependency tree.
