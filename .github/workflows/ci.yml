@@ -67,10 +67,19 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # WINDOWS M1: proves the SAME source tree also builds and runs its
-  # CTest suite natively on Windows x86_64 - a portability BASELINE, not
-  # yet the portable Windows release/packaging milestone (no install
-  # step, no bundling, no artifact upload, no version/tag change here).
+  # WINDOWS M1 proved the SAME source tree builds and runs its CTest
+  # suite natively on Windows x86_64 (a portability BASELINE). WINDOWS
+  # PORTABLE PACKAGE M2 evolves this SAME job into build -> test ->
+  # package (spec §24 option A), rather than adding a second
+  # `windows-package` job that would need its own `msys2/setup-msys2`
+  # environment (the actual expensive part of a Windows CI job - package
+  # downloads/installation - not the C++ build itself) - see this job's
+  # own "Build, test, and package" step below, which now does everything
+  # the old separate configure/build/ctest/smoke-test/DLL-report steps
+  # did, and more (install, curated-example verification against the
+  # INSTALLED tree, full recursive DLL closure), via
+  # scripts/build-release-windows-x86_64.sh - the SAME script a
+  # maintainer runs locally (spec §26: never a CI-only build recipe).
   # Independent of the "compiler" job above - it builds its own fresh
   # kaicc.exe on windows-latest rather than reusing the Linux job's
   # artifact, since the two are different native binaries for different
@@ -81,10 +90,14 @@ jobs:
   # Linux userspace inside Windows, not a test of KAI-CC's own Windows
   # portability, and a second (MSVC) configuration is explicitly out of
   # scope for this milestone.
+  #
+  # No GitHub Release is published here (spec §24/§30) - this job's own
+  # upload-artifact step below is explicitly CI-scoped, exactly like the
+  # "compiler" job's Linux artifact.
   compiler-windows:
-    name: Compiler (Windows x86_64 build/test baseline)
+    name: Compiler (Windows x86_64 build/test/package)
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     defaults:
       run:
         # Every step below runs inside the MSYS2 UCRT64 shell that
@@ -124,6 +137,11 @@ jobs:
           #                  this UCRT64 LLVM build does depend on it -
           #                  never assumed, only audited (WINDOWS M1
           #                  spec §10/§17)
+          # `zip`/`unzip` are MSYS2 BASE packages (no
+          # mingw-w64-ucrt-x86_64- prefix - see
+          # scripts/build-release-windows-x86_64.sh's own header comment)
+          # - `zip` produces the release archive, `unzip` is used only by
+          # this job's own clean-directory smoke-test step below.
           install: >-
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-clang
@@ -131,54 +149,99 @@ jobs:
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-z3
+            zip
+            unzip
 
-      - name: Configure
-        # LLVM_DIR is passed explicitly (WINDOWS M1 spec §2/§3: "use the
-        # correct LLVM_DIR discovered from MSYS2 if required") via
-        # llvm-config itself, rather than assumed to be found implicitly -
-        # this is the exact same find_package(LLVM CONFIG REQUIRED) call
-        # every platform uses (CMakeLists.txt is not forked - spec §4),
-        # just told explicitly where THIS platform's LLVM package put its
-        # CMake config.
+      - name: Build, test, and package the portable Windows x86_64 release
+        # WINDOWS PORTABLE PACKAGE M2/M2.1: configures a Release build,
+        # builds, runs the full CTest suite (including
+        # native_compilation_tests - the real .kai -> object -> host
+        # linker -> .exe -> execute pipeline, with the WINDOWS M1.1
+        # LF-only stdout fix), installs to dist/kai-windows-x86_64/,
+        # verifies the curated examples AND the semantic-tooling commands
+        # from that installed tree, computes the recursive non-system DLL
+        # closure, verifies every bundled DLL has a known license mapping
+        # (failing closed on an unaudited dependency - M2.1 spec §12/§13),
+        # and produces the versioned .zip + its SHA-256. See that script's
+        # own header comment for the full list of what it produces.
+        run: scripts/build-release-windows-x86_64.sh
+
+      - name: Clean-directory smoke test of the produced ZIP (sanitized PATH)
+        # WINDOWS PORTABLE PACKAGE M2 spec §16/§17: extracts the ACTUAL
+        # produced .zip into a fresh directory outside the repo/build
+        # tree, then runs from there with $MINGW_PREFIX/bin deliberately
+        # removed from PATH - proving kaicc.exe itself (starting up,
+        # resolving its own bundled DLLs from bin/, locating
+        # ../lib/kai/libkai_runtime.a, and every semantic-query command)
+        # needs no LLVM/MSYS2 installation. The host linker is
+        # INTENTIONALLY re-added to PATH only for the two steps that
+        # actually compile a .kai file (spec §15/§29: linking a compiled
+        # KAI program still needs a host C toolchain, exactly like the
+        # Linux release - this is not hidden, it is the one explicitly
+        # documented remaining requirement).
         run: |
           set -e
-          LLVM_CMAKE_DIR="$(llvm-config --cmakedir)"
-          echo "LLVM_DIR: ${LLVM_CMAKE_DIR}"
-          cmake -B build -S . -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DLLVM_DIR="${LLVM_CMAKE_DIR}"
+          KAICC_VERSION="$(./dist/kai-windows-x86_64/bin/kaicc.exe --version | awk '{print $2}')"
+          ZIP_PATH="dist/kai-${KAICC_VERSION}-windows-x86_64.zip"
+          SMOKE_DIR="${RUNNER_TEMP}/kai-windows-smoke"
+          rm -rf "${SMOKE_DIR}"
+          mkdir -p "${SMOKE_DIR}"
+          unzip -q "${ZIP_PATH}" -d "${SMOKE_DIR}"
+          PKG="${SMOKE_DIR}/kai-windows-x86_64"
 
-      - name: Build
-        run: cmake --build build
+          SANITIZED_PATH="/usr/bin:/bin"
+          echo "== sanitized PATH (no \$MINGW_PREFIX/bin): ${SANITIZED_PATH} =="
 
-      - name: Test (CTest, including native .kai -> object -> link -> execute suites)
-        run: ctest --test-dir build --output-on-failure
+          echo "-- kaicc.exe --version --"
+          PATH="${SANITIZED_PATH}" "${PKG}/bin/kaicc.exe" --version
 
-      - name: Native .kai -> kaicc.exe -> hello.exe smoke test
-        # WINDOWS M1 spec §12: the real, required end-to-end pipeline -
-        # not merely CTest's own in-tree native_compilation_tests, but
-        # the actual `kaicc.exe <file> -o <output>` CLI contract a real
-        # Windows user would run, including the `.exe`-suffix behavior
-        # documented in kai::cli::resolveNativeExecutablePath().
-        run: |
-          set -e
-          printf 'fn main() {\n    print("Hello from KAI on Windows")\n}\n' > windows_m1_hello.kai
-          ./build/bin/kaicc.exe windows_m1_hello.kai -o windows_m1_hello
-          test -f windows_m1_hello.exe
-          ./windows_m1_hello.exe
+          echo "-- kaicc.exe --help --"
+          PATH="${SANITIZED_PATH}" "${PKG}/bin/kaicc.exe" --help >/dev/null
 
-      - name: Report kaicc.exe's runtime DLL dependencies (WINDOWS M1 spec §10 - informational only)
-        # Packaging/bundling decisions are explicitly OUT OF SCOPE for
-        # this milestone (spec §10: "Do NOT decide final Windows bundling
-        # yet") - this step only records the dependency list as a CI log
-        # artifact for the future Windows M3 packaging milestone to use;
-        # it never fails the build and never copies/bundles any DLL.
-        if: always()
-        run: |
-          echo "== kaicc.exe DLL dependencies (objdump -p) =="
-          objdump -p ./build/bin/kaicc.exe | grep -i 'DLL Name' || true
+          check_smoke_example() {
+              local name="$1" bin="$2" expected="$3"
+              PATH="${SANITIZED_PATH}:${MINGW_PREFIX}/bin" "${PKG}/bin/kaicc.exe" \
+                  "${PKG}/examples/${name}" -o "${SMOKE_DIR}/${bin}"
+              test -f "${SMOKE_DIR}/${bin}.exe"
+              local actual
+              actual="$(PATH="${SANITIZED_PATH}" "${SMOKE_DIR}/${bin}.exe")"
+              if [ "${actual}" != "${expected}" ]; then
+                  echo "error: ${name} smoke test produced unexpected output" >&2
+                  printf "  expected: %s\n" "${expected}" >&2
+                  printf "  actual:   %s\n" "${actual}" >&2
+                  exit 1
+              fi
+              echo "  ${name}: OK"
+          }
+
+          echo "-- compile + run curated examples (host linker re-added to PATH) --"
+          check_smoke_example "hello.kai" "hello" "$(printf 'Hello from KAI')"
+          check_smoke_example "functions.kai" "functions" "$(printf 'Hello\nKAI\n42\n84')"
+          check_smoke_example "conditions.kai" "conditions" "$(printf 'adult\npositive\nnegative\nzero')"
+          check_smoke_example "variables.kai" "variables" "$(printf 'KAI\n0.1\n2026\n1')"
+
+          echo "-- semantic tooling smoke (sanitized PATH) --"
+          PATH="${SANITIZED_PATH}" "${PKG}/bin/kaicc.exe" inspect "${PKG}/examples/functions.kai" --json \
+              | grep -q '"kind":"function"'
+          PATH="${SANITIZED_PATH}" "${PKG}/bin/kaicc.exe" references "${PKG}/examples/functions.kai" \
+              --line 15 --column 13 --json | grep -q '"line"'
+          PATH="${SANITIZED_PATH}" "${PKG}/bin/kaicc.exe" call-graph "${PKG}/examples/functions.kai" --json \
+              | grep -q '"add"'
+
+          echo "All clean-directory smoke checks passed."
+
+      - name: Upload CI build artifact (not an official KAI release)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          # Same convention as the "compiler" job's Linux artifact above:
+          # the unpacked staging tree, never the versioned .zip (that
+          # filename pattern is reserved for an official GitHub Release
+          # asset) - explicitly CI-scoped name, no version string.
+          name: kai-windows-x86_64-ci-${{ github.sha }}
+          path: dist/kai-windows-x86_64/
+          if-no-files-found: error
+          retention-days: 7
 
   # AI-NATIVE BENCHMARK - ISOLATION M1/M2/M3A: validates the containerized
   # trial sandbox (network-disabled, non-root, read-only rootfs, no
