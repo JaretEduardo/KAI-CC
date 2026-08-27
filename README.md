@@ -221,8 +221,10 @@ scripts/build-release-windows-x86_64.sh
 
 Run from inside an MSYS2 UCRT64 shell (never WSL, never a plain `cmd.exe`/PowerShell prompt), this configures a
 Release build, runs the full CTest suite, installs to a staging tree, discovers and bundles `kaicc.exe`'s actual
-recursive non-system DLL dependencies (never guessed - see the script's own dependency-manifest output), copies
-the same curated examples as the Linux release, and produces:
+recursive non-system DLL dependencies (never guessed - see the script's own dependency-manifest output), verifies
+every bundled DLL has a known license/attribution mapping (failing the build rather than shipping an unaudited
+dependency - see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)), copies the same curated examples as the
+Linux release, and produces:
 
 ```
 dist/kai-windows-x86_64/
@@ -234,17 +236,24 @@ with the layout:
 ```
 kai-windows-x86_64/
   bin/kaicc.exe
-  bin/<bundled non-system DLLs, if any>
+  bin/libgcc_s_seh-1.dll, libstdc++-6.dll, libwinpthread-1.dll, zlib1.dll, libzstd.dll
   lib/kai/libkai_runtime.a
   examples/*.kai        (same curated set as the Linux release)
 ```
 
+The five bundled DLLs are MSYS2 UCRT64 runtime dependencies of `kaicc.exe` (GCC's runtime, mingw-w64's
+winpthreads, zlib, and zstd) - confirmed empirically from the built binary's own PE import table, not assumed.
+`kaicc.exe` does **not** depend on a separate LLVM or Z3 DLL - LLVM object code is statically incorporated into
+`kaicc.exe` itself (same as the Linux release), and Z3 is not linked at all on this platform. This closure can
+change if the underlying MSYS2 toolchain packages change; the packaging script re-discovers and re-audits it on
+every run rather than hard-coding this list.
+
 `kaicc.exe` itself needs no separate LLVM/MSYS2 installation to start or to answer semantic queries
-(`inspect`/`references`/`call-graph`/...) - required non-system DLLs, if any, ship in `bin/` alongside it, and
-Windows' own executable-directory DLL search resolves them with no `PATH` changes. **Native compilation still
-requires a working host C toolchain on `PATH`** (a `clang`/`gcc`-compatible driver `kaicc.exe` shells out to for
-the final link step), exactly as the Linux release requires `gcc`/`clang` + `libc6-dev` - this is a real,
-documented remaining requirement for this alpha, not an oversight.
+(`inspect`/`references`/`call-graph`/...) - the bundled DLLs above ship in `bin/` alongside it, and Windows' own
+executable-directory DLL search resolves them with no `PATH` changes. **Native compilation still requires a
+working host C toolchain on `PATH`** (a `clang`/`gcc`-compatible driver `kaicc.exe` shells out to for the final
+link step), exactly as the Linux release requires `gcc`/`clang` + `libc6-dev` - this is a real, documented
+remaining requirement for this alpha, not an oversight.
 
 **This is a development milestone, not yet a public download.** No `v0.1.0-alpha.2` release exists yet; this
 `.zip` is produced and validated by CI as build evidence, not published anywhere.

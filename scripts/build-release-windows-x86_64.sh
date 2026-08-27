@@ -239,6 +239,51 @@ done
 echo "==> Dependency manifest written to ${MANIFEST}"
 cat "${MANIFEST}"
 
+echo "==> Verifying legal/license material for every bundled DLL (WINDOWS"
+echo "    PORTABLE PACKAGE M2.1 spec §12/§13 - fail closed, never ship an"
+echo "    unaudited dependency silently)"
+# Explicit, audited mapping from a bundled DLL's exact filename to the
+# third_party/licenses/ file(s) it requires - kept intentionally small and
+# hand-maintained (spec §12: "do not build a giant generic license-
+# scanning framework") rather than derived automatically from anything.
+# If the MSYS2 toolchain packages change and introduce a DLL not listed
+# here, this is exactly the "unknown bundled DLL" case spec §13 requires
+# to fail the build rather than ship it unreviewed.
+declare -A DLL_LICENSE_FILES=(
+    ["libgcc_s_seh-1.dll"]="GCC-COPYING3.txt GCC-RUNTIME-LIBRARY-EXCEPTION.txt"
+    ["libstdc++-6.dll"]="GCC-COPYING3.txt GCC-RUNTIME-LIBRARY-EXCEPTION.txt"
+    ["libwinpthread-1.dll"]="WINPTHREADS-COPYING.txt"
+    ["zlib1.dll"]="ZLIB-LICENSE.txt"
+    ["libzstd.dll"]="ZSTD-LICENSE.txt ZSTD-COPYING.txt"
+)
+
+# LLVM-LICENSE.txt ships unconditionally (not DLL-keyed): kaicc.exe
+# statically incorporates LLVM object code on Windows exactly like the
+# Linux release (WINDOWS PORTABLE PACKAGE M2 confirmed no libLLVM*.dll in
+# the closure - see THIRD_PARTY_NOTICES.md's LLVM section), so the notice
+# applies regardless of which DLLs happen to be bundled. Z3-LICENSE.txt/
+# Z3-COPYRIGHT.txt are deliberately NOT in this list - the Windows build
+# does not link Z3 at all (no libz3*.dll in the closure), so shipping
+# Z3's license here would misrepresent what this artifact contains.
+LEGAL_FILES_NEEDED=("LLVM-LICENSE.txt")
+
+for name in "${!BUNDLED[@]}"; do
+    key="$(echo "${name}" | tr '[:upper:]' '[:lower:]')"
+    mapped="${DLL_LICENSE_FILES[${key}]:-}"
+    if [ -z "${mapped}" ]; then
+        echo "error: bundled DLL '${name}' has no known license/attribution mapping." >&2
+        echo "       Refusing to ship an unaudited third-party dependency silently." >&2
+        echo "       Add it to DLL_LICENSE_FILES in this script (with the correct" >&2
+        echo "       upstream license file(s) staged under third_party/licenses/)" >&2
+        echo "       and to THIRD_PARTY_NOTICES.md before packaging can include it." >&2
+        exit 1
+    fi
+    for f in ${mapped}; do
+        LEGAL_FILES_NEEDED+=("${f}")
+    done
+done
+echo "  legal material required for this build: ${LEGAL_FILES_NEEDED[*]}"
+
 echo "==> Copying curated release examples"
 # WINDOWS PORTABLE PACKAGE M2 spec §2: same curated set as the Linux
 # release (examples/README.md) - each compiled AND RUN against the
@@ -302,14 +347,41 @@ cp "${REPO_ROOT}/LICENSE" "${DEST}/LICENSE"
 cp "${REPO_ROOT}/README.md" "${DEST}/README.md"
 cp "${REPO_ROOT}/THIRD_PARTY_NOTICES.md" "${DEST}/THIRD_PARTY_NOTICES.md"
 mkdir -p "${DEST}/third_party/licenses"
-cp "${REPO_ROOT}/third_party/licenses/"*.txt "${DEST}/third_party/licenses/"
+# WINDOWS PORTABLE PACKAGE M2.1 spec §2/§11: copy ONLY the license files
+# this specific Windows build actually needs (LEGAL_FILES_NEEDED, computed
+# above from the real DLL closure) - deliberately NOT a blanket `cp *.txt`
+# of the whole third_party/licenses/ directory, since that directory also
+# holds Z3's license material for the Linux release, and the Windows
+# package must never claim to bundle Z3 (it doesn't - see
+# THIRD_PARTY_NOTICES.md's Z3 section).
+declare -A _legal_file_seen=()
+for f in "${LEGAL_FILES_NEEDED[@]}"; do
+    if [ -n "${_legal_file_seen[${f}]+x}" ]; then
+        continue
+    fi
+    _legal_file_seen[${f}]=1
+    src="${REPO_ROOT}/third_party/licenses/${f}"
+    if [ ! -f "${src}" ]; then
+        echo "error: required license file missing from source tree: third_party/licenses/${f}" >&2
+        echo "       (needed for one of the DLLs this build actually bundles - see" >&2
+        echo "       the dependency manifest above)" >&2
+        exit 1
+    fi
+    cp "${src}" "${DEST}/third_party/licenses/${f}"
+done
 
 echo "==> Verifying required release documentation/notice files are present"
+# WINDOWS PORTABLE PACKAGE M2.1 spec §18: verify presence IN THE STAGED
+# ARTIFACT itself, not just that the source tree had the file - this is
+# what actually ends up in the ZIP.
 REQUIRED_FILES=(
     "LICENSE"
     "README.md"
     "THIRD_PARTY_NOTICES.md"
 )
+for f in "${LEGAL_FILES_NEEDED[@]}"; do
+    REQUIRED_FILES+=("third_party/licenses/${f}")
+done
 for f in "${REQUIRED_FILES[@]}"; do
     if [ ! -f "${DEST}/${f}" ]; then
         echo "error: required release file missing: ${f}" >&2

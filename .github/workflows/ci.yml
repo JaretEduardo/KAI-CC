@@ -153,15 +153,17 @@ jobs:
             unzip
 
       - name: Build, test, and package the portable Windows x86_64 release
-        # WINDOWS PORTABLE PACKAGE M2: configures a Release build, builds,
-        # runs the full CTest suite (including native_compilation_tests -
-        # the real .kai -> object -> host linker -> .exe -> execute
-        # pipeline, with the WINDOWS M1.1 LF-only stdout fix), installs to
-        # dist/kai-windows-x86_64/, verifies the curated examples AND the
-        # semantic-tooling commands from that installed tree, computes the
-        # recursive non-system DLL closure, and produces the versioned
-        # .zip + its SHA-256. See that script's own header comment for the
-        # full list of what it produces.
+        # WINDOWS PORTABLE PACKAGE M2/M2.1: configures a Release build,
+        # builds, runs the full CTest suite (including
+        # native_compilation_tests - the real .kai -> object -> host
+        # linker -> .exe -> execute pipeline, with the WINDOWS M1.1
+        # LF-only stdout fix), installs to dist/kai-windows-x86_64/,
+        # verifies the curated examples AND the semantic-tooling commands
+        # from that installed tree, computes the recursive non-system DLL
+        # closure, verifies every bundled DLL has a known license mapping
+        # (failing closed on an unaudited dependency - M2.1 spec §12/§13),
+        # and produces the versioned .zip + its SHA-256. See that script's
+        # own header comment for the full list of what it produces.
         run: scripts/build-release-windows-x86_64.sh
 
       - name: Clean-directory smoke test of the produced ZIP (sanitized PATH)
