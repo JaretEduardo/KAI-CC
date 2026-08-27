@@ -326,3 +326,277 @@ jobs:
 
       - name: Test
         run: npm test
+
+  # VS CODE WINDOWS M4 spec §21: packages the REAL Linux x64 VSIX from the
+  # SAME-COMMIT portable Linux compiler artifact (never the official
+  # vX.Y.Z release) - proves scripts/stage-compiler.mjs's target-aware
+  # staging and `vsce package --target linux-x64` end-to-end against a
+  # real release-shaped tree, not just the pure-logic unit tests the
+  # `vscode` job above already runs. Symmetric with vscode-windows-package
+  # below (added together once the staging script became target-aware -
+  # spec §21: "at minimum no Linux regression", and this was easy to add).
+  vscode-linux-package:
+    name: VS Code extension (Linux x64 VSIX)
+    needs: compiler
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the compiler job's portable artifact (same commit, not a release)
+        uses: actions/download-artifact@v4
+        with:
+          name: kai-cc-ci-linux-x86_64-${{ github.sha }}
+          path: dist/kai-linux-x86_64
+
+      - name: Restore executable permission on the staged compiler
+        # See the benchmark-isolation job's identical step for why this is
+        # needed (artifact upload/download does not reliably preserve
+        # Unix file mode bits).
+        run: chmod +x dist/kai-linux-x86_64/bin/kaicc
+        working-directory: .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Compile and run unit tests
+        run: npm run compile && npm test
+
+      - name: Stage the real Linux x64 release compiler
+        run: KAI_RELEASE_ROOT="${{ github.workspace }}/dist/kai-linux-x86_64" npm run stage-compiler
+
+      - name: Verify staged content (Linux payload only, no Windows leakage)
+        run: |
+          set -e
+          test -f bin/kaicc
+          test -f lib/kai/libkai_runtime.a
+          test -f LICENSE
+          test -f THIRD_PARTY_NOTICES.md
+          ! test -e bin/kaicc.exe
+          ! test -e bin/libgcc_s_seh-1.dll
+
+      - name: Real build/run smoke through the extension's own compiler.ts/paths.ts/process.ts logic
+        # VS CODE WINDOWS M4 spec §25: exercises the ACTUAL compiled
+        # helper functions Build/Run Current File use, against the real
+        # staged compiler - not a mock, not a pure string-path assertion.
+        #
+        # FIRST REAL CI FAILURE FIX: the expected value MUST be a
+        # $'...'-quoted (ANSI-C) string literal, never `"$(printf ...)"` -
+        # POSIX command substitution `$(...)` unconditionally strips ALL
+        # trailing newlines from its output, so a `$(printf 'Hello from
+        # KAI')` argument can never carry the trailing LF hello.kai's real
+        # stdout actually ends with (WINDOWS M1.1's deterministic LF-only
+        # contract), and extension-smoke.mjs's exact-equality check then
+        # (correctly) fails. `$'...'` is a real, literal shell string with
+        # no subshell/substitution involved, so its trailing `\n` survives
+        # untouched into argv - confirmed identical in both GitHub's
+        # Ubuntu bash and MSYS2 UCRT64's bash (both are genuine GNU bash).
+        run: |
+          expected=$'Hello from KAI\n'
+          node ./scripts/extension-smoke.mjs . ../../examples/hello.kai "$expected"
+
+      - name: Compute the deterministic VSIX filename
+        # CI PORTABILITY FIX ROUND 2 (Failure A): `vsce package --target
+        # <t>` actually names its output `<name>-<target>-<version>.vsix`
+        # (confirmed by a real local run: "kai-language-linux-x64-0.5.0.vsix",
+        # not "kai-language-0.5.0-linux-x64.vsix" as the previous
+        # `kai-language-*-linux-x64.vsix` glob assumed) - rather than
+        # depend on vsce's naming convention a second time via a fragile
+        # wildcard, compute the EXACT name once here (version read from
+        # package.json, the single authoritative source - never a second
+        # hard-coded "0.5.0" literal), pass it to `vsce package` via
+        # `--out` so the package step can't produce anything else, and
+        # reuse this SAME value from $GITHUB_ENV in every later step
+        # (inspect, upload) - package/inspect/upload can never disagree.
+        run: |
+          set -e
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "VSIX_NAME=kai-language-linux-x64-${VERSION}.vsix" >> "$GITHUB_ENV"
+
+      - name: Package the Linux x64 VSIX
+        run: npx @vscode/vsce package --target linux-x64 --out "${VSIX_NAME}"
+
+      - name: Inspect VSIX contents (spec §18/§22)
+        run: |
+          set -e
+          echo "Produced: ${VSIX_NAME}"
+          test -f "${VSIX_NAME}"
+          unzip -l "${VSIX_NAME}"
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/kaicc$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/lib/kai/libkai_runtime.a$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/LICENSE'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/THIRD_PARTY_NOTICES.md$'
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'kaicc\.exe')
+          ! (unzip -l "${VSIX_NAME}" | grep -q '\.dll$')
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'node_modules/')
+          ! (unzip -l "${VSIX_NAME}" | grep -qi '\.git/')
+          ! (unzip -l "${VSIX_NAME}" | grep -q '^\s*extension/src/')
+
+      - name: Upload the packaged VSIX as a CI artifact (not a release)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kai-language-linux-x64-ci-${{ github.sha }}
+          path: editors/vscode/${{ env.VSIX_NAME }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # VS CODE WINDOWS M4: packages the REAL Windows x64 VSIX from the
+  # SAME-COMMIT portable Windows compiler artifact produced by
+  # compiler-windows above (never the official alpha.1 release, per spec
+  # §20). Runs inside the SAME MSYS2 UCRT64 shell/toolchain that job
+  # already builds/tests kaicc.exe with (`path-type: inherit` keeps the
+  # Node.js `actions/setup-node` installs visible from that shell TOO,
+  # rather than MSYS2's default "minimal" PATH replacement hiding it) -
+  # spec §26: this is what actually gives the extension smoke test below
+  # a real host clang/gcc linker on PATH, proving extension integration,
+  # not (yet) a toolchain-free end-user Windows setup.
+  vscode-windows-package:
+    name: VS Code extension (Windows x64 VSIX)
+    needs: compiler-windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: msys2 {0}
+        working-directory: editors/vscode
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Set up MSYS2 UCRT64 (host linker for the extension smoke test below)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          # inherit (not the default "minimal"): keeps the Windows-native
+          # Node.js actions/setup-node just installed visible from this
+          # MSYS2 shell too, alongside the UCRT64 toolchain below - both
+          # are needed in the SAME steps (npm invoking a Node script that
+          # shells out to clang as the host linker).
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-clang
+            unzip
+
+      - name: Download the compiler-windows job's portable artifact (same commit, not a release)
+        uses: actions/download-artifact@v4
+        with:
+          name: kai-windows-x86_64-ci-${{ github.sha }}
+          path: dist/kai-windows-x86_64
+        # download-artifact is a JS action - runs regardless of the job's
+        # default shell.
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Compile and run unit tests
+        run: npm run compile && npm test
+
+      - name: Stage the real Windows x64 release compiler
+        # `github.workspace` is already a Windows-style path on this
+        # runner (e.g. "D:\a\KAI-CC\KAI-CC") - appending a forward-slash
+        # relative tail is still a valid Windows path (Node/Windows treat
+        # "/" and "\" interchangeably), so this needs no cygpath/pwd -W
+        # conversion, exactly like the Linux job's equivalent step.
+        run: KAI_RELEASE_ROOT="${{ github.workspace }}/dist/kai-windows-x86_64" npm run stage-compiler
+
+      - name: Verify staged content (Windows payload only, no Linux leakage)
+        run: |
+          set -e
+          test -f bin/kaicc.exe
+          test -f bin/libgcc_s_seh-1.dll
+          test -f bin/libstdc++-6.dll
+          test -f bin/libwinpthread-1.dll
+          test -f bin/zlib1.dll
+          test -f bin/libzstd.dll
+          test -f lib/kai/libkai_runtime.a
+          test -f LICENSE
+          test -f THIRD_PARTY_NOTICES.md
+          ! test -e bin/kaicc
+          ! test -e lib/kai/libz3.so.4
+
+      - name: Real build/run smoke through the extension's own compiler.ts/paths.ts/process.ts logic
+        # VS CODE WINDOWS M4 spec §25: proves, with the REAL bundled
+        # kaicc.exe - resolveCompilerPath() picks it, computeOutputPath()
+        # appends .exe, the compile actually runs (DLLs resolve from
+        # kaicc.exe's own directory, the host clang on PATH links it,
+        # libkai_runtime.a resolves via ../lib/kai with KAI_RUNTIME_LIB
+        # unset), and hello.exe launches and prints the exact expected
+        # LF-only stdout (WINDOWS M1.1).
+        #
+        # FIRST REAL CI FAILURE FIX: `$'...'` (ANSI-C quoting), never
+        # `"$(printf ...)"` - command substitution strips the trailing LF
+        # that hello.kai's real stdout actually ends with, which then
+        # fails extension-smoke.mjs's intentionally-exact equality check.
+        # Confirmed identical in MSYS2 UCRT64's bash (a genuine GNU bash,
+        # same as GitHub's Ubuntu runners use for `run:` steps).
+        run: |
+          expected=$'Hello from KAI\n'
+          node ./scripts/extension-smoke.mjs . ../../examples/hello.kai "$expected"
+
+      - name: Compute the deterministic VSIX filename
+        # See the vscode-linux-package job's identical step for the full
+        # rationale (CI PORTABILITY FIX ROUND 2, Failure A) - same
+        # mechanism, same authoritative version source (package.json),
+        # just the win32-x64 target's own naming.
+        run: |
+          set -e
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "VSIX_NAME=kai-language-win32-x64-${VERSION}.vsix" >> "$GITHUB_ENV"
+
+      - name: Package the Windows x64 VSIX
+        run: npx @vscode/vsce package --target win32-x64 --out "${VSIX_NAME}"
+
+      - name: Inspect VSIX contents (spec §18/§22)
+        run: |
+          set -e
+          echo "Produced: ${VSIX_NAME}"
+          test -f "${VSIX_NAME}"
+          unzip -l "${VSIX_NAME}"
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/kaicc\.exe$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/libgcc_s_seh-1\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/libstdc++-6\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/libwinpthread-1\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/zlib1\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/libzstd\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/lib/kai/libkai_runtime\.a$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/LICENSE'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/THIRD_PARTY_NOTICES.md$'
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/kaicc$')
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'libz3')
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'node_modules/')
+          ! (unzip -l "${VSIX_NAME}" | grep -qi '\.git/')
+
+      - name: Upload the packaged VSIX as a CI artifact (not a release)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kai-language-win32-x64-ci-${{ github.sha }}
+          path: editors/vscode/${{ env.VSIX_NAME }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Bundled kaicc.exe --version (informational)
+        # spec §24: expected to still report 0.1.0-alpha.1 during this
+        # milestone - no version bump happens here.
+        run: ./bin/kaicc.exe --version

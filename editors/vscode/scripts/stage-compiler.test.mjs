@@ -28,6 +28,39 @@ function setupLegalFiles(root, { licenseContent = 'fake-license', noticesContent
     fs.writeFileSync(path.join(licenseDir, 'Z3-LICENSE.txt'), 'fake-z3-license');
 }
 
+// VS CODE WINDOWS M4: builds a fake win32-x64 release root
+// (bin/kaicc.exe + the 5 required MSYS2 DLLs, lib/kai/libkai_runtime.a,
+// legal files) - the Windows analog of the Linux fake-release-root setup
+// already used by the pre-existing tests below.
+const WIN32_REQUIRED_DLLS = ['libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll', 'zlib1.dll', 'libzstd.dll'];
+
+function setupWin32ReleaseRoot(releaseRoot, { includeAllDlls = true } = {}) {
+    const bin = path.join(releaseRoot, 'bin');
+    const lib = path.join(releaseRoot, 'lib', 'kai');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(lib, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'kaicc.exe'), 'fake-windows-kaicc-exe');
+    fs.writeFileSync(path.join(lib, 'libkai_runtime.a'), 'fake-archive-contents');
+    const dlls = includeAllDlls ? WIN32_REQUIRED_DLLS : WIN32_REQUIRED_DLLS.slice(0, 2);
+    for (const dll of dlls) {
+        fs.writeFileSync(path.join(bin, dll), `fake-${dll}`);
+    }
+    setupLegalFiles(releaseRoot);
+    return { bin, lib };
+}
+
+function setupLinuxReleaseRoot(releaseRoot) {
+    const bin = path.join(releaseRoot, 'bin');
+    const lib = path.join(releaseRoot, 'lib', 'kai');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(lib, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'kaicc'), 'fake-linux-kaicc-elf');
+    fs.chmodSync(path.join(bin, 'kaicc'), 0o755);
+    fs.writeFileSync(path.join(lib, 'libkai_runtime.a'), 'fake-archive-contents');
+    setupLegalFiles(releaseRoot);
+    return { bin, lib };
+}
+
 function testStagesBothFilesToExpectedPaths() {
     const repoRoot = makeTempDir('kai-stage-test-repo-');
     const extensionRoot = makeTempDir('kai-stage-test-ext-');
@@ -44,13 +77,14 @@ function testStagesBothFilesToExpectedPaths() {
         fs.writeFileSync(path.join(buildLib, 'libkai_runtime.a'), 'fake-archive-contents');
         setupLegalFiles(repoRoot);
 
-        const result = stageCompiler({ repoRoot, extensionRoot });
+        const result = stageCompiler({ repoRoot, extensionRoot, target: 'linux-x64' });
 
         const expectedKaicc = path.join(extensionRoot, 'bin', 'kaicc');
         const expectedRuntime = path.join(extensionRoot, 'lib', 'kai', 'libkai_runtime.a');
 
         assert.strictEqual(result.kaiccPath, expectedKaicc);
         assert.strictEqual(result.runtimePath, expectedRuntime);
+        assert.strictEqual(result.target, 'linux-x64');
 
         assert.ok(fs.existsSync(expectedKaicc), 'staged kaicc should exist');
         assert.ok(fs.existsSync(expectedRuntime), 'staged libkai_runtime.a should exist');
@@ -58,8 +92,24 @@ function testStagesBothFilesToExpectedPaths() {
         assert.strictEqual(fs.readFileSync(expectedKaicc, 'utf8'), fakeKaiccContent);
         assert.strictEqual(fs.readFileSync(expectedRuntime, 'utf8'), 'fake-archive-contents');
 
-        const mode = fs.statSync(expectedKaicc).mode;
-        assert.ok((mode & 0o111) !== 0, 'staged kaicc must remain executable');
+        // VS CODE WINDOWS M4 EXECUTABLE-PERMISSION PORTABILITY FIX:
+        // distinguish TARGET-platform semantics (this fixture stages the
+        // linux-x64 target, which always means something) from TEST-HOST
+        // filesystem semantics (POSIX chmod/mode bits are only a real,
+        // checkable guarantee when the machine actually RUNNING this
+        // assertion has a POSIX filesystem). NTFS does not implement
+        // Unix permission bits at all - Node's chmod()/stat().mode calls
+        // on Windows do not reliably reflect execute permission - so
+        // `mode & 0o111` proves nothing there regardless of which target
+        // was staged, and a Windows machine could never run a staged
+        // linux-x64 kaicc anyway. Skip only when the TEST HOST is
+        // Windows; this still runs (and still means something) on every
+        // POSIX host that actually cares about this guarantee (Fedora
+        // dev, GitHub Ubuntu CI).
+        if (process.platform !== 'win32') {
+            const mode = fs.statSync(expectedKaicc).mode;
+            assert.ok((mode & 0o111) !== 0, 'staged kaicc must remain executable');
+        }
 
         // bin/ and lib/kai/ must be siblings under extensionRoot - this is
         // the exact shape NativeLinker's relative lookup depends on.
@@ -77,7 +127,7 @@ function testFailsClearlyWhenBuildArtifactsAreMissing() {
     const extensionRoot = makeTempDir('kai-stage-test-ext-empty-');
 
     try {
-        assert.throws(() => stageCompiler({ repoRoot, extensionRoot }), /kaicc not found/);
+        assert.throws(() => stageCompiler({ repoRoot, extensionRoot, target: 'linux-x64' }), /kaicc not found/);
     } finally {
         fs.rmSync(repoRoot, { recursive: true, force: true });
         fs.rmSync(extensionRoot, { recursive: true, force: true });
@@ -118,6 +168,9 @@ function testStagesFromReleaseRootWhenProvided() {
         const result = stageCompiler({ repoRoot, extensionRoot, releaseRoot });
 
         assert.strictEqual(result.source, 'release');
+        // No explicit target given - must be DETECTED from releaseRoot's
+        // own contents (bin/kaicc, not bin/kaicc.exe), never from the host.
+        assert.strictEqual(result.target, 'linux-x64');
         assert.strictEqual(fs.readFileSync(result.kaiccPath, 'utf8'), portableKaiccContent);
         assert.strictEqual(fs.readFileSync(result.runtimePath, 'utf8'), 'portable-release-archive');
 
@@ -160,7 +213,7 @@ function testDefaultSourceIsBuildWhenReleaseRootOmitted() {
         fs.writeFileSync(path.join(buildLib, 'libkai_runtime.a'), 'local-build-archive');
         setupLegalFiles(repoRoot);
 
-        const result = stageCompiler({ repoRoot, extensionRoot });
+        const result = stageCompiler({ repoRoot, extensionRoot, target: 'linux-x64' });
 
         assert.strictEqual(result.source, 'build');
 
@@ -188,7 +241,7 @@ function testFailsClearlyWhenReleaseRootIsInvalid() {
     try {
         assert.throws(
             () => stageCompiler({ repoRoot, extensionRoot, releaseRoot }),
-            /KAI_RELEASE_ROOT/,
+            /could not determine a single bundled target/,
         );
     } finally {
         fs.rmSync(repoRoot, { recursive: true, force: true });
@@ -246,9 +299,10 @@ function testNoExtraLibrariesStagedFromOrdinaryBuildTree() {
         fs.writeFileSync(path.join(buildLib, 'libkai_runtime.a'), 'local-build-archive');
         setupLegalFiles(repoRoot);
 
-        const result = stageCompiler({ repoRoot, extensionRoot });
+        const result = stageCompiler({ repoRoot, extensionRoot, target: 'linux-x64' });
 
         assert.deepStrictEqual(result.extraLibraries, []);
+        assert.deepStrictEqual(result.extraBinFiles, []);
     } finally {
         fs.rmSync(repoRoot, { recursive: true, force: true });
         fs.rmSync(extensionRoot, { recursive: true, force: true });
@@ -284,6 +338,149 @@ function testFailsClearlyWhenLegalMaterialIsMissing() {
     }
 }
 
+// ===== VS CODE WINDOWS M4 =====
+
+// The Windows analog of testStagesBothFilesToExpectedPaths: stages
+// kaicc.exe + the 5 required DLLs from a fake win32-x64 release root.
+function testStagesWin32X64FromReleaseRoot() {
+    const repoRoot = makeTempDir('kai-stage-test-repo-win-');
+    const releaseRoot = makeTempDir('kai-stage-test-release-win-');
+    const extensionRoot = makeTempDir('kai-stage-test-ext-win-');
+
+    try {
+        setupWin32ReleaseRoot(releaseRoot);
+
+        const result = stageCompiler({ repoRoot, extensionRoot, releaseRoot });
+
+        // No explicit target given - must be DETECTED from releaseRoot's
+        // own contents (bin/kaicc.exe present), never from the host
+        // (this test runs on Linux CI/dev machines).
+        assert.strictEqual(result.target, 'win32-x64');
+        assert.strictEqual(result.kaiccPath, path.join(extensionRoot, 'bin', 'kaicc.exe'));
+        // A Windows .exe's executability is governed by the OS
+        // recognizing its PE format/extension, never POSIX mode bits
+        // (see the linux-x64 test above) - so the meaningful assertion
+        // here is that it staged as a real regular file, not a directory
+        // or something else gone wrong. Whether it can actually be
+        // spawned is proven separately, for real, by this CI job's own
+        // extension-smoke.mjs step against the genuine kaicc.exe.
+        assert.ok(fs.existsSync(result.kaiccPath), 'staged kaicc.exe should exist');
+        assert.ok(fs.statSync(result.kaiccPath).isFile(), 'staged kaicc.exe should be a regular file');
+        assert.ok(fs.existsSync(path.join(extensionRoot, 'lib', 'kai', 'libkai_runtime.a')));
+
+        for (const dll of WIN32_REQUIRED_DLLS) {
+            assert.ok(fs.existsSync(path.join(extensionRoot, 'bin', dll)), `${dll} should be staged into bin/`);
+        }
+        assert.deepStrictEqual([...result.extraBinFiles].sort(), [...WIN32_REQUIRED_DLLS].sort());
+
+        // §6: must NOT contain any Linux-only payload.
+        assert.ok(!fs.existsSync(path.join(extensionRoot, 'bin', 'kaicc')), 'must not stage the Linux ELF kaicc');
+        assert.ok(
+            !fs.existsSync(path.join(extensionRoot, 'lib', 'kai', 'libz3.so.4')),
+            'must not stage Linux-only libz3.so.4 into a Windows target',
+        );
+    } finally {
+        fs.rmSync(repoRoot, { recursive: true, force: true });
+        fs.rmSync(releaseRoot, { recursive: true, force: true });
+        fs.rmSync(extensionRoot, { recursive: true, force: true });
+    }
+}
+
+// spec §18: an incomplete Windows release root (missing DLLs) must be
+// rejected clearly, never silently packaged.
+function testFailsClearlyWhenWin32X64DllsAreMissing() {
+    const repoRoot = makeTempDir('kai-stage-test-repo-win-incomplete-');
+    const releaseRoot = makeTempDir('kai-stage-test-release-win-incomplete-');
+    const extensionRoot = makeTempDir('kai-stage-test-ext-win-incomplete-');
+
+    try {
+        setupWin32ReleaseRoot(releaseRoot, { includeAllDlls: false });
+
+        assert.throws(
+            () => stageCompiler({ repoRoot, extensionRoot, releaseRoot, target: 'win32-x64' }),
+            /missing required runtime DLL/,
+        );
+    } finally {
+        fs.rmSync(repoRoot, { recursive: true, force: true });
+        fs.rmSync(releaseRoot, { recursive: true, force: true });
+        fs.rmSync(extensionRoot, { recursive: true, force: true });
+    }
+}
+
+// spec §6/§16: an explicit target that does not match what the release
+// root actually contains must fail clearly, never silently stage the
+// wrong platform's binary (or nothing at all).
+function testFailsClearlyWhenExplicitTargetMismatchesReleaseRoot() {
+    const repoRoot = makeTempDir('kai-stage-test-repo-mismatch-');
+    const releaseRoot = makeTempDir('kai-stage-test-release-mismatch-');
+    const extensionRoot = makeTempDir('kai-stage-test-ext-mismatch-');
+
+    try {
+        setupLinuxReleaseRoot(releaseRoot);
+
+        assert.throws(
+            () => stageCompiler({ repoRoot, extensionRoot, releaseRoot, target: 'win32-x64' }),
+            /kaicc\.exe not found/,
+        );
+    } finally {
+        fs.rmSync(repoRoot, { recursive: true, force: true });
+        fs.rmSync(releaseRoot, { recursive: true, force: true });
+        fs.rmSync(extensionRoot, { recursive: true, force: true });
+    }
+}
+
+// spec §6: re-staging a DIFFERENT target into the SAME extensionRoot must
+// never leave stale cross-platform files behind (a Linux VSIX build
+// directory reused, or vice versa, for a later Windows package run).
+function testRestagingDifferentTargetCleansPreviousPlatformFiles() {
+    const repoRoot = makeTempDir('kai-stage-test-repo-restage-');
+    const linuxReleaseRoot = makeTempDir('kai-stage-test-release-restage-linux-');
+    const winReleaseRoot = makeTempDir('kai-stage-test-release-restage-win-');
+    const extensionRoot = makeTempDir('kai-stage-test-ext-restage-');
+
+    try {
+        setupLinuxReleaseRoot(linuxReleaseRoot);
+        const linuxResult = stageCompiler({ repoRoot, extensionRoot, releaseRoot: linuxReleaseRoot });
+        assert.strictEqual(linuxResult.target, 'linux-x64');
+        assert.ok(fs.existsSync(path.join(extensionRoot, 'bin', 'kaicc')));
+
+        setupWin32ReleaseRoot(winReleaseRoot);
+        const winResult = stageCompiler({ repoRoot, extensionRoot, releaseRoot: winReleaseRoot });
+        assert.strictEqual(winResult.target, 'win32-x64');
+
+        assert.ok(fs.existsSync(path.join(extensionRoot, 'bin', 'kaicc.exe')), 'kaicc.exe should now be staged');
+        assert.ok(
+            !fs.existsSync(path.join(extensionRoot, 'bin', 'kaicc')),
+            'the STALE Linux kaicc from the previous stage must be removed',
+        );
+        for (const dll of WIN32_REQUIRED_DLLS) {
+            assert.ok(fs.existsSync(path.join(extensionRoot, 'bin', dll)));
+        }
+    } finally {
+        fs.rmSync(repoRoot, { recursive: true, force: true });
+        fs.rmSync(linuxReleaseRoot, { recursive: true, force: true });
+        fs.rmSync(winReleaseRoot, { recursive: true, force: true });
+        fs.rmSync(extensionRoot, { recursive: true, force: true });
+    }
+}
+
+// An explicit target always wins over release-root auto-detection.
+function testExplicitTargetIsHonoredOverDetection() {
+    const repoRoot = makeTempDir('kai-stage-test-repo-explicit-');
+    const releaseRoot = makeTempDir('kai-stage-test-release-explicit-');
+    const extensionRoot = makeTempDir('kai-stage-test-ext-explicit-');
+
+    try {
+        setupWin32ReleaseRoot(releaseRoot);
+        const result = stageCompiler({ repoRoot, extensionRoot, releaseRoot, target: 'win32-x64' });
+        assert.strictEqual(result.target, 'win32-x64');
+    } finally {
+        fs.rmSync(repoRoot, { recursive: true, force: true });
+        fs.rmSync(releaseRoot, { recursive: true, force: true });
+        fs.rmSync(extensionRoot, { recursive: true, force: true });
+    }
+}
+
 testStagesBothFilesToExpectedPaths();
 testFailsClearlyWhenBuildArtifactsAreMissing();
 testStagesFromReleaseRootWhenProvided();
@@ -292,5 +489,10 @@ testFailsClearlyWhenReleaseRootIsInvalid();
 testStagesExtraBundledLibraryFromReleaseRoot();
 testNoExtraLibrariesStagedFromOrdinaryBuildTree();
 testFailsClearlyWhenLegalMaterialIsMissing();
+testStagesWin32X64FromReleaseRoot();
+testFailsClearlyWhenWin32X64DllsAreMissing();
+testFailsClearlyWhenExplicitTargetMismatchesReleaseRoot();
+testRestagingDifferentTargetCleansPreviousPlatformFiles();
+testExplicitTargetIsHonoredOverDetection();
 
 console.log('stage-compiler.test.mjs: all tests passed');

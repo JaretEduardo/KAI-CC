@@ -56,6 +56,29 @@ async function getActiveKaiFile(): Promise<ActiveKaiFile | undefined> {
     return { sourcePath: document.uri.fsPath };
 }
 
+/**
+ * VS CODE WINDOWS M4 spec §14/§15: a short, platform-neutral hint for
+ * exit codes that a real bundled-compiler user is likely to hit -
+ * without ever obscuring or replacing the real compiler stderr already
+ * appended above it (docs/CLI.md's exit-code table is the source of
+ * truth for what each code means). `undefined` for any other code -
+ * kaicc's own stderr is already the right explanation for the rest.
+ */
+function explainExitCode(exitCode: number): string | undefined {
+    switch (exitCode) {
+        case 9:
+            return (
+                'KAI: compiling a KAI program requires a working host C compiler driver ' +
+                '(clang, gcc, or cc) on PATH, in addition to the bundled kaicc. Install one for your ' +
+                'platform (e.g. LLVM/Clang or a MinGW-w64 toolchain on Windows) and try again.'
+            );
+        case 10:
+            return 'KAI: the bundled KAI runtime library (libkai_runtime.a) could not be located. The extension package may be corrupt - try reinstalling it.';
+        default:
+            return undefined;
+    }
+}
+
 function appendProcessOutput(output: vscode.OutputChannel, result: ProcessResult): void {
     if (result.stdout) {
         output.append(result.stdout);
@@ -93,7 +116,7 @@ export async function buildCurrentFile(
         return undefined;
     }
 
-    const outputPath = computeOutputPath(active.sourcePath);
+    const outputPath = computeOutputPath(active.sourcePath, process.platform);
 
     output.clear();
     output.appendLine(`$ ${located.kaiccPath} ${active.sourcePath} -o ${outputPath}`);
@@ -110,6 +133,10 @@ export async function buildCurrentFile(
 
     if (result.exitCode !== 0) {
         output.appendLine(`kaicc exited with code ${result.exitCode}`);
+        const hint = result.exitCode !== null ? explainExitCode(result.exitCode) : undefined;
+        if (hint) {
+            output.appendLine(hint);
+        }
         output.show(true);
         vscode.window.showErrorMessage(`KAI: build failed (exit code ${result.exitCode}). See the "KAI" output channel.`);
         return undefined;

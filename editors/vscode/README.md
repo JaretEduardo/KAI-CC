@@ -138,41 +138,67 @@ planned once the compiler commits to a stable diagnostic format (see
 
 ## Platform support
 
-- **Now (bundled compiler, verified)**: Linux x64 only. The bundled
-  `kaicc`/runtime are built for this platform; on any other
-  `process.platform`/`process.arch`, both commands show: *"Bundled KAI
-  compiler is currently available only for Linux x64."*
+- **Now (bundled compiler, verified)**: Linux x64 and Windows x64, each as its
+  own separate `.vsix` (one VSIX never bundles both platforms' compilers - see
+  "Packaging" below). On any other `process.platform`/`process.arch`
+  (macOS, ARM64, ...), both commands show a clear error naming the
+  supported platforms rather than guessing.
+- **Compiling KAI programs still requires a working host C toolchain** (a
+  `clang`/`gcc`-compatible driver) on `PATH`, on either platform - the
+  bundled `kaicc`/`kaicc.exe` itself needs no separate LLVM/MSYS2
+  installation to run, but the final native link step shells out to a host
+  compiler driver exactly like the portable CLI releases do (see the root
+  `README.md`'s "Portable Linux release"/"Portable Windows release"
+  sections). If it's missing, the build fails with a clear message rather
+  than an obscure linker error.
 - **Development override**: set the `kai.compilerPath` setting to point at
-  any other `kaicc` binary (e.g. a local build for testing) - this is an
-  explicit opt-in, never a silent `PATH` search, so packaged behavior stays
-  deterministic.
+  any other `kaicc`/`kaicc.exe` binary (e.g. a local build for testing) -
+  this is an explicit opt-in, never a silent `PATH` search, so packaged
+  behavior stays deterministic.
 - Syntax highlighting/snippets/language configuration remain fully
   platform-independent (declarative only).
 
-No Windows/macOS native compiler support is claimed. No Language Server
+No macOS native compiler support is claimed. No Language Server
 Protocol support (completion, hover, go-to-definition, rename, semantic
 tokens) is implemented - planned post-MVP once the compiler exposes a
 queryable semantic model (see `COMPILER_ARCHITECTURE.md` §9).
 
 ## Bundled compiler
 
-The packaged extension bundles the native compiler/runtime at:
+Each platform-specific `.vsix` bundles ONE platform's native compiler/runtime:
 
 ```
-bin/kaicc
+bin/kaicc                       (Linux x64 VSIX)
+lib/kai/libkai_runtime.a
+lib/kai/libz3.so.4              (if the underlying LLVM build depends on it)
+```
+
+```
+bin/kaicc.exe                   (Windows x64 VSIX)
+bin/libgcc_s_seh-1.dll
+bin/libstdc++-6.dll
+bin/libwinpthread-1.dll
+bin/zlib1.dll
+bin/libzstd.dll
 lib/kai/libkai_runtime.a
 ```
 
-kept as SIBLINGS deliberately: `kaicc`'s own runtime-library lookup
-(`NativeLinker::findDefaultRuntimeLibrary()`, see
+`bin/` and `lib/kai/` are kept as SIBLINGS deliberately: `kaicc`'s own
+runtime-library lookup (`NativeLinker::findDefaultRuntimeLibrary()`, see
 `compiler/include/kai/codegen/NativeLinker.hpp`) looks for
 `<kaicc's own directory>/../lib/kai/libkai_runtime.a` relative to
 wherever it is actually running - this layout is exactly what makes that
 lookup succeed from inside an installed extension directory, with zero
-extra configuration.
+extra configuration. The Windows DLLs sit directly beside `kaicc.exe` in
+`bin/` for the same reason: Windows always searches an executable's own
+directory for its DLL dependencies first, so no `PATH` changes are needed
+there either.
 
-These two files are **build artifacts, not source** - they are
-`.gitignore`'d and must be staged locally before packaging (see below).
+These files are **build artifacts, not source** - they are `.gitignore`'d
+and must be staged locally before packaging (see below). The exact staged
+set always comes from the corresponding portable release root
+(`dist/kai-linux-x86_64/` or `dist/kai-windows-x86_64/`), never
+hand-picked or reconstructed independently - see `scripts/stage-compiler.mjs`.
 
 ## Local development
 
@@ -203,16 +229,13 @@ npm test
 
 ## Packaging
 
-From the repository root, build the compiler first:
+**Ordinary local development** (stages your own host's `build/` tree - Linux
+only, since that's what a plain local `cmake --build build` produces):
 
 ```sh
-cmake -B build -S .
+cmake -B build -S .   # from the repository root
 cmake --build build
-```
-
-Then, from `editors/vscode/`:
-
-```sh
+cd editors/vscode
 npm install
 npm run compile        # TypeScript -> out/*.js
 npm run stage-compiler # copies build/bin/kaicc + build/lib/kai/libkai_runtime.a
@@ -220,11 +243,33 @@ npm run stage-compiler # copies build/bin/kaicc + build/lib/kai/libkai_runtime.a
 npm run package         # tsc + stage-compiler + vsce package -> a .vsix file
 ```
 
-(`npm run package` runs all three steps together.) Install the result
-locally with:
+**A real, portable, platform-specific release VSIX** is built from the
+corresponding portable release root instead - never from a raw local build
+tree or a hand-picked set of binaries (see the root `README.md`'s
+"Portable Linux release"/"Portable Windows release" sections for how those
+release roots themselves are produced):
 
 ```sh
-code --install-extension kai-language-<version>.vsix --force
+# Linux x64 VSIX, from dist/kai-linux-x86_64/:
+KAI_RELEASE_ROOT=/path/to/dist/kai-linux-x86_64 npm run package:linux-x64
+
+# Windows x64 VSIX, from dist/kai-windows-x86_64/ (run inside an MSYS2
+# UCRT64 shell, or with KAI_RELEASE_ROOT pointing at a copy of it):
+KAI_RELEASE_ROOT=/path/to/dist/kai-windows-x86_64 npm run package:win32-x64
+```
+
+Each produces its own separate `.vsix` (`vsce package --target linux-x64` /
+`--target win32-x64`) - a single VSIX never bundles both platforms' ~20 MB
+compilers; a user's VS Code selects the right one automatically based on
+their own platform. `KAI_RELEASE_ROOT` is the only thing that changes
+between the two commands; the staging script (`scripts/stage-compiler.mjs`)
+detects which target a given release root actually contains and rejects a
+mismatched/incomplete one rather than guessing.
+
+Install a produced VSIX locally with:
+
+```sh
+code --install-extension kai-language-<version>-<target>.vsix --force
 ```
 
 Not implemented: marketplace publication. `.vsix` files, the staged
