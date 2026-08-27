@@ -406,31 +406,49 @@ jobs:
           expected=$'Hello from KAI\n'
           node ./scripts/extension-smoke.mjs . ../../examples/hello.kai "$expected"
 
+      - name: Compute the deterministic VSIX filename
+        # CI PORTABILITY FIX ROUND 2 (Failure A): `vsce package --target
+        # <t>` actually names its output `<name>-<target>-<version>.vsix`
+        # (confirmed by a real local run: "kai-language-linux-x64-0.5.0.vsix",
+        # not "kai-language-0.5.0-linux-x64.vsix" as the previous
+        # `kai-language-*-linux-x64.vsix` glob assumed) - rather than
+        # depend on vsce's naming convention a second time via a fragile
+        # wildcard, compute the EXACT name once here (version read from
+        # package.json, the single authoritative source - never a second
+        # hard-coded "0.5.0" literal), pass it to `vsce package` via
+        # `--out` so the package step can't produce anything else, and
+        # reuse this SAME value from $GITHUB_ENV in every later step
+        # (inspect, upload) - package/inspect/upload can never disagree.
+        run: |
+          set -e
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "VSIX_NAME=kai-language-linux-x64-${VERSION}.vsix" >> "$GITHUB_ENV"
+
       - name: Package the Linux x64 VSIX
-        run: npx @vscode/vsce package --target linux-x64
+        run: npx @vscode/vsce package --target linux-x64 --out "${VSIX_NAME}"
 
       - name: Inspect VSIX contents (spec §18/§22)
         run: |
           set -e
-          VSIX=$(ls kai-language-*-linux-x64.vsix)
-          echo "Produced: ${VSIX}"
-          unzip -l "${VSIX}"
-          unzip -l "${VSIX}" | grep -q 'extension/bin/kaicc$'
-          unzip -l "${VSIX}" | grep -q 'extension/lib/kai/libkai_runtime.a$'
-          unzip -l "${VSIX}" | grep -q 'extension/LICENSE'
-          unzip -l "${VSIX}" | grep -q 'extension/THIRD_PARTY_NOTICES.md$'
-          ! (unzip -l "${VSIX}" | grep -q 'kaicc\.exe')
-          ! (unzip -l "${VSIX}" | grep -q '\.dll$')
-          ! (unzip -l "${VSIX}" | grep -q 'node_modules/')
-          ! (unzip -l "${VSIX}" | grep -qi '\.git/')
-          ! (unzip -l "${VSIX}" | grep -q '^\s*extension/src/')
+          echo "Produced: ${VSIX_NAME}"
+          test -f "${VSIX_NAME}"
+          unzip -l "${VSIX_NAME}"
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/kaicc$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/lib/kai/libkai_runtime.a$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/LICENSE'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/THIRD_PARTY_NOTICES.md$'
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'kaicc\.exe')
+          ! (unzip -l "${VSIX_NAME}" | grep -q '\.dll$')
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'node_modules/')
+          ! (unzip -l "${VSIX_NAME}" | grep -qi '\.git/')
+          ! (unzip -l "${VSIX_NAME}" | grep -q '^\s*extension/src/')
 
       - name: Upload the packaged VSIX as a CI artifact (not a release)
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kai-language-linux-x64-ci-${{ github.sha }}
-          path: editors/vscode/kai-language-*-linux-x64.vsix
+          path: editors/vscode/${{ env.VSIX_NAME }}
           if-no-files-found: error
           retention-days: 7
 
@@ -536,35 +554,45 @@ jobs:
           expected=$'Hello from KAI\n'
           node ./scripts/extension-smoke.mjs . ../../examples/hello.kai "$expected"
 
+      - name: Compute the deterministic VSIX filename
+        # See the vscode-linux-package job's identical step for the full
+        # rationale (CI PORTABILITY FIX ROUND 2, Failure A) - same
+        # mechanism, same authoritative version source (package.json),
+        # just the win32-x64 target's own naming.
+        run: |
+          set -e
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "VSIX_NAME=kai-language-win32-x64-${VERSION}.vsix" >> "$GITHUB_ENV"
+
       - name: Package the Windows x64 VSIX
-        run: npx @vscode/vsce package --target win32-x64
+        run: npx @vscode/vsce package --target win32-x64 --out "${VSIX_NAME}"
 
       - name: Inspect VSIX contents (spec §18/§22)
         run: |
           set -e
-          VSIX=$(ls kai-language-*-win32-x64.vsix)
-          echo "Produced: ${VSIX}"
-          unzip -l "${VSIX}"
-          unzip -l "${VSIX}" | grep -q 'extension/bin/kaicc\.exe$'
-          unzip -l "${VSIX}" | grep -q 'extension/bin/libgcc_s_seh-1\.dll$'
-          unzip -l "${VSIX}" | grep -q 'extension/bin/libstdc++-6\.dll$'
-          unzip -l "${VSIX}" | grep -q 'extension/bin/libwinpthread-1\.dll$'
-          unzip -l "${VSIX}" | grep -q 'extension/bin/zlib1\.dll$'
-          unzip -l "${VSIX}" | grep -q 'extension/bin/libzstd\.dll$'
-          unzip -l "${VSIX}" | grep -q 'extension/lib/kai/libkai_runtime\.a$'
-          unzip -l "${VSIX}" | grep -q 'extension/LICENSE'
-          unzip -l "${VSIX}" | grep -q 'extension/THIRD_PARTY_NOTICES.md$'
-          ! (unzip -l "${VSIX}" | grep -q 'extension/bin/kaicc$')
-          ! (unzip -l "${VSIX}" | grep -q 'libz3')
-          ! (unzip -l "${VSIX}" | grep -q 'node_modules/')
-          ! (unzip -l "${VSIX}" | grep -qi '\.git/')
+          echo "Produced: ${VSIX_NAME}"
+          test -f "${VSIX_NAME}"
+          unzip -l "${VSIX_NAME}"
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/kaicc\.exe$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/libgcc_s_seh-1\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/libstdc++-6\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/libwinpthread-1\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/zlib1\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/libzstd\.dll$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/lib/kai/libkai_runtime\.a$'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/LICENSE'
+          unzip -l "${VSIX_NAME}" | grep -q 'extension/THIRD_PARTY_NOTICES.md$'
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'extension/bin/kaicc$')
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'libz3')
+          ! (unzip -l "${VSIX_NAME}" | grep -q 'node_modules/')
+          ! (unzip -l "${VSIX_NAME}" | grep -qi '\.git/')
 
       - name: Upload the packaged VSIX as a CI artifact (not a release)
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kai-language-win32-x64-ci-${{ github.sha }}
-          path: editors/vscode/kai-language-*-win32-x64.vsix
+          path: editors/vscode/${{ env.VSIX_NAME }}
           if-no-files-found: error
           retention-days: 7
 
