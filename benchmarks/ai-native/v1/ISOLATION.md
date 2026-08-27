@@ -1,14 +1,16 @@
-# AI-Native Benchmark v1 — Isolation Threat Model (Isolation M1)
+# AI-Native Benchmark v1 — Isolation Threat Model (Isolation M1 + M2)
 
 This document is the isolation/threat-model reference for the containerized
 sandbox substrate under `scripts/prepare-isolated-trial.sh`,
-`scripts/sandbox-exec.sh`, `scripts/cleanup-isolated-trials.sh`, and
-`scripts/test-isolation.sh`. It supplements, and does not replace,
-`README.md`'s existing "Isolation" section, which still governs the
-original, uncontained workflow (`scripts/prepare-run.sh` +
-`scripts/validate-run.py`).
+`scripts/sandbox-exec.sh`, `scripts/cleanup-isolated-trials.sh`,
+`scripts/collect-isolated-trial.sh`, `scripts/test-isolation.sh` (M1), and
+`scripts/tool-sandbox-exec.sh`, `scripts/isolation/{stage-toolchain.sh,
+broker.py, generate-tool-surface.sh}`, `scripts/test-tool-boundary.sh`
+(M2). It supplements, and does not replace, `README.md`'s existing
+"Isolation" section, which still governs the original, uncontained
+workflow (`scripts/prepare-run.sh` + `scripts/validate-run.py`).
 
-**Status: infrastructure only.** As of Isolation M1, no formal benchmark
+**Status: infrastructure only.** As of Isolation M2, no formal benchmark
 trial has been run. Formal trial counts remain:
 
 ```
@@ -16,9 +18,13 @@ textual  = 0
 semantic = 0
 ```
 
-This milestone exists to build and verify a sandbox substrate a future
-agent adapter can safely use — it does not itself run an agent, and it
-does not change those counts.
+Both milestones exist to build and verify a sandbox substrate a future
+agent adapter can safely use — neither runs an agent itself, and neither
+changes those counts. M1 established filesystem/network isolation and
+safe result collection; M2 adds the enforced, condition-specific tool
+boundary (see "Isolation M2" below) — the piece that makes a formal
+trial's textual-vs-semantic comparison technically meaningful rather than
+merely a naming convention.
 
 ## Why a second isolation layer
 
@@ -93,30 +99,33 @@ unmodified.
   addressed by disabling the sandbox's network entirely
   (`--network=none`), not merely by hiding files on disk
 
-## E. Threats Isolation M1 does NOT yet solve
+## E. Threats neither M1 nor M2 solves
 
 Stated explicitly, per the project's own convention of never claiming
-stronger isolation than implemented:
+stronger isolation than implemented. (Textual-vs-semantic tool
+enforcement — previously listed here as M1's single biggest gap — is now
+implemented; see "Isolation M2" below.)
 
 - **Model-provider training contamination cannot be controlled.** A model
   may already have memorized KAI's public repository, including
   `reference/`/`expected/`, from its training data. Filesystem/network
   sandboxing isolates trial-visible **tools and context**, not what a
   model already "knows." See "Explicit limitations" below.
-- **A future agent adapter's own network needs are unsolved.** A real
-  Claude/OpenAI/other adapter needs authenticated API access to reach its
-  model provider. This milestone deliberately does not solve that
-  transport problem — the intended architecture keeps a host-side model
+- **No agent adapter exists yet.** M2 hardens the tool boundary a future
+  agent will use; it does not itself integrate Claude/OpenAI/Codex/
+  Copilot/MCP. A real adapter needs authenticated API access to reach its
+  model provider — the intended architecture keeps that host-side model
   adapter *outside* the networkless execution sandbox, relaying only
-  narrowly-defined tool requests in, per the milestone's own instructions.
-  Designing that boundary precisely is future work.
+  narrowly-defined tool requests in. Designing and building that adapter
+  is future work (see "Recommended next milestone" territory).
 - **Model nondeterminism** is unaffected by this sandbox and is out of
   scope here.
 - **Token accounting differences between providers** are unaffected by
   this sandbox.
-- **Textual-vs-semantic tool enforcement is NOT yet implemented** — see
-  "Current textual-vs-semantic enforcement status" below. This is the
-  single most important remaining gap before a formal trial is credible.
+- **Broker transcript sequence numbers are per-invocation, not
+  per-trial.** See Isolation M2's "Host-only tool transcript" section for
+  what this means in practice and how a future long-lived session avoids
+  it.
 
 ## Directory layout
 
@@ -124,10 +133,45 @@ stronger isolation than implemented:
 /tmp/kai-ai-native-v1/isolated/<trial-id>/
     host/
         orchestration.json    # host-only; NEVER mounted into the sandbox
-    workspace/
+        result/                # M1 - collector output; NEVER mounted
+        broker/                 # M2 - host-only; NEVER mounted
+            scratch/              # per-request TOCTOU-safe copies
+            transcript.jsonl       # append-only tool-call audit log
+    workspace/                  # bind-mounted read-write as /workspace
         TASK.md
         benchmark.kai
-        trial.json             # sandbox-visible manifest
+        trial.json              # sandbox-visible manifest
+        benchmark_out            # M2 - appears after a successful compile
+    tools/                      # M2 - bind-mounted READ-ONLY as /tools
+        _client.py                # generic transport, both conditions
+        kai-compile                # both conditions, byte-identical
+        kai-inspect                # semantic only
+        kai-definition              # semantic only
+        kai-references              # semantic only
+        kai-callers                  # semantic only
+        kai-callees                   # semantic only
+        kai-call-graph                 # semantic only
+
+/tmp/kai-ai-native-v1/toolchains/<staged-id>/   # M2 - staged, verified
+                                                  # kaicc; NEVER mounted
+/tmp/kai-ai-native-v1/sockets/<trial-id>.sock    # M2 - the ONE file
+                                                   # bind-mounted into the
+                                                   # sandbox, as
+                                                   # /run/kai-tool-bridge.sock
+                                                   # (a top-level, short,
+                                                   # flat path - AF_UNIX
+                                                   # socket paths are
+                                                   # limited to ~108 bytes
+                                                   # on Linux, and nesting
+                                                   # it under the
+                                                   # read-only /tools
+                                                   # mount was found to
+                                                   # leave a container-
+                                                   # privileged,
+                                                   # host-unremovable
+                                                   # directory behind
+                                                   # under rootless
+                                                   # Podman)
 ```
 
 `/tmp/kai-ai-native-v1/isolated/` is a **sibling** of, never inside,
@@ -218,42 +262,223 @@ is never mounted into the sandbox.
   directory copy — so no `.git`/`.gitmodules`/worktree metadata can ever
   end up inside it, verified directly (see automated tests below).
 
-## Tooling surface (M1 — not yet condition-specific)
+## Isolation M2: enforced condition-specific tool boundary
 
-M1 does not need to solve the final textual-vs-semantic compiler
-capability boundary. It documents where a future tool adapter would be
-provided: a controlled `/tools/`-style mount point, populated by first
-staging the **minimum portable compiler installation** (e.g. a copy of
-`dist/kai-linux-x86_64/`) to a location **outside the repository**, then
-bind-mounting that staged copy **read-only**. The sandbox must never gain
-access to compiler *source*, and must never mount `build/`, `dist/`, or
-the repository directly "for convenience."
+**Status: implemented.** M1 left the textual/semantic split enforced only
+by "what the human operator chooses to make available" — a wrapper-naming
+convention, not a technical barrier. Isolation M2 closes that gap: **a
+textual trial is now technically unable to invoke KAI semantic queries**,
+regardless of what it discovers about its own tooling or how cleverly it
+tries to bypass it.
 
-## Current textual-vs-semantic enforcement status
+### Architecture
 
-**Not yet implemented — filesystem/network isolation only.** `trial.json`
-records a `toolPolicyId` (`textual-v1` or `semantic-v1`) as a **label**,
-but nothing in this milestone technically prevents a process inside the
-sandbox from invoking a semantic query command if one happened to be
-present. Today, the textual/semantic split is still enforced only by
-*what the human operator chooses to make available* (per the original
-benchmark's own fairness protocol in `README.md`), exactly as it was
-before this milestone.
+```
+sandbox tool client (/tools/kai-* or /tools/_client.py)
+        |
+        | JSON over a Unix-domain socket (/run/kai-tool-bridge.sock)
+        v
+HOST-SIDE broker (scripts/isolation/broker.py) <-- THE enforcement boundary
+        |
+        v
+staged, verified kaicc (scripts/isolation/stage-toolchain.sh output,
+                         under /tmp/kai-ai-native-v1/toolchains/ - NEVER
+                         mounted into any sandbox)
+```
 
-**Isolation M2 must expose condition-specific tooling technically, not
-just by instruction:**
+**Raw `kaicc` never enters the sandbox.** It is staged and verified
+entirely on the host (see "Compiler staging" below) and invoked only by
+the broker process, which also runs entirely on the host. Nothing the
+sandbox can do reaches the compiler binary directly - confirmed by
+`scripts/test-tool-boundary.sh`'s search for `kaicc`/
+`libkai_runtime.a`/`libz3.so*` anywhere reasonable inside a running
+sandbox (finds nothing, in both conditions).
 
-- **textual:** compile/run + basic diagnostics only
-- **semantic:** the same, **plus** `inspect`, `definition`, `references`,
-  `callers`, `callees`, `call-graph`, and any future structured
-  diagnostics/type queries
+### The authoritative condition source
 
-A textual trial must eventually be **technically unable** to invoke
-semantic queries (e.g. by mounting a restricted wrapper binary/PATH that
-simply doesn't expose them), not merely instructed not to use them.
-Implementing that correctly was assessed as significant enough scope to
-belong to Isolation M2, per this milestone's own instructions, rather than
-being half-done here.
+The broker reads a trial's condition **exactly once, at broker startup**,
+from `<trial>/host/orchestration.json` — the same host-only file M1
+already established as authoritative, never mounted into any sandbox.
+**It never reads `workspace/trial.json` for this purpose.** That file is
+sandbox-visible and sandbox-writable, and is therefore untrusted input,
+used only for display/audit.
+
+Tested directly: editing a prepared textual trial's
+`workspace/trial.json` from `"textual"` to `"semantic"` and then
+requesting a semantic operation is still denied — the running broker's
+authorization decision was fixed at startup from the host-only file and
+cannot be changed by anything the sandbox does afterward.
+
+### Why a wrapper name alone is not enforcement
+
+The generated `/tools/_client.py` is a dumb, **condition-blind** JSON
+transport client, present identically in both conditions. It has no
+authorization logic at all - it will forward whatever operation name it
+is asked to send. This is intentional, not an oversight: the security
+boundary is the **host broker's** own condition check, not which wrapper
+scripts happen to exist. Both are tested explicitly:
+
+- a textual trial invoking `/tools/_client.py inspect` directly (bypassing
+  the absent `kai-inspect` wrapper) is **denied by the broker**
+- a textual trial that hand-crafts the raw wire protocol over the socket
+  itself, without using `_client.py` at all, requesting `call-graph`, is
+  **also denied by the broker**, with the identical reason
+
+Absence of a `kai-inspect` wrapper in a textual trial's `/tools/` is
+convenience/UX for the common case — it means a well-behaved agent never
+even sees a semantic command to try. It is not what actually stops a
+determined one.
+
+### Compiler staging
+
+`scripts/isolation/stage-toolchain.sh --compiler-root <portable-install>`
+copies a portable KAI-CC release tree (e.g. `dist/kai-linux-x86_64/`) to
+`/tmp/kai-ai-native-v1/toolchains/<staged-id>/` — outside the repository,
+never mounted into any sandbox — after confirming the source actually has
+the expected `bin/kaicc` + `lib/kai/libkai_runtime.a` shape (refuses
+`build/`, `compiler/`, or anything else that isn't a real portable
+release). It then verifies the staged copy by actually running
+`kaicc --version` (never assuming any particular version string) and
+records a host-only manifest: `stagedId`, `sourceRoot`, `stagedRoot`,
+`compilerVersion`, and SHA-256 of `bin/kaicc` and every `lib/kai/*` file
+present (including `libz3.so.4` when the source build bundled it).
+`scripts/tool-sandbox-exec.sh` re-stages and re-verifies fresh on every
+invocation, so the broker never operates on a copy whose integrity it
+merely assumes.
+
+### Condition-specific tool surface
+
+`scripts/isolation/generate-tool-surface.sh` writes, per trial, into
+`<trial>/tools/` (bind-mounted **read-only** as `/tools`):
+
+| File | Textual | Semantic |
+|---|---|---|
+| `_client.py` (generic transport, no authorization logic) | present | present |
+| `kai-compile` | present | present, **byte-identical** to textual's copy |
+| `kai-inspect` | absent | present |
+| `kai-definition` | absent | present |
+| `kai-references` | absent | present |
+| `kai-callers` | absent | present |
+| `kai-callees` | absent | present |
+| `kai-call-graph` | absent | present |
+
+`kai-compile` being byte-identical between conditions is verified
+directly (`scripts/isolation/generate-tool-surface.sh`'s own logic writes
+it from one shared code path regardless of condition) - the semantic
+condition never receives a nicer or different compile interface, only
+additional capability on top of the identical baseline.
+
+### Wire protocol (schemaVersion 1)
+
+One JSON object per Unix-stream connection, client sends then shuts down
+its write side, broker responds then closes:
+
+```json
+// request
+{"schemaVersion": 1, "operation": "inspect", "params": {}}
+// request (position-based)
+{"schemaVersion": 1, "operation": "definition", "params": {"line": 14, "column": 4}}
+// response
+{"schemaVersion": 1, "operation": "inspect", "allowed": true,
+ "exitCode": 0, "stdout": "...", "stderr": ""}
+// response (denied)
+{"schemaVersion": 1, "operation": "call-graph", "allowed": false,
+ "exitCode": null, "stdout": "", "stderr": "",
+ "error": "operation 'call-graph' is not permitted for this trial's condition ('textual')"}
+```
+
+Known operations: `compile`, `inspect`, `definition`, `references`,
+`callers`, `callees`, `call-graph` — the exact set the real `kaicc` CLI
+supports today (see `docs/CLI.md`), no hypothetical future commands. The
+client can **never name an arbitrary path** — every operation always
+operates on that trial's own `workspace/benchmark.kai`.
+
+**Params are schema-validated per operation, not merely read** —
+`validate_params()` rejects unknown/extra keys, missing required keys,
+and wrong types outright, before the source is even read:
+
+| Operation | Accepted `params` |
+|---|---|
+| `compile`, `inspect`, `call-graph` | none (`{}` only) |
+| `definition`, `references`, `callers`, `callees` | exactly `{"line": <positive int>, "column": <positive int>}` |
+
+A request with any other key — `path`, `source`, `workspace`, `trialId`,
+`condition`, `executable`, `command`, `env`, an output path, or anything
+else — is rejected with `invalid params`, never silently ignored and
+never executed. Tested directly: injecting `path`/`trialId`/`condition`
+into `params` cannot select a different source file, another trial, or a
+different condition.
+
+Hardening: requests over 64 KiB are rejected — the broker stops reading
+immediately upon detecting the overrun, drains and discards the
+remainder off the socket (so the connection closes cleanly rather than
+being TCP-reset, which was observed to otherwise prevent the client from
+ever seeing the rejection response) without holding, parsing, or logging
+any of the oversized payload, and continues serving further requests
+normally; malformed (non-JSON) requests are rejected; unknown operation
+names are rejected distinctly from "known but not permitted for this
+condition"; every `subprocess.run(...)` invocation of `kaicc` uses
+`shell=False` with an explicit argument list (never a shell string, never
+`eval`); each invocation has a bounded timeout (30s compile, 15s
+queries); the subprocess environment is an explicit allowlist (`PATH`,
+`LANG`, `LC_ALL` only) — never the broker's own inherited environment.
+The host-only transcript entry for any rejected request (oversized,
+malformed, or invalid params) is exactly as small as any other entry —
+`normalizedArgs` only ever contains a clean `{line, column}` pair or
+`{}`, never an echo of arbitrary client-supplied keys/values — so a
+malicious payload can never turn into unbounded or unsafe transcript
+data. All of the above is exercised by real socket-level tests in
+`scripts/test-tool-boundary.sh`, not by inspecting `broker.py`'s source.
+
+### Symlink/special-file defense at tool-invocation time
+
+M1's collector protects a one-shot, post-exit file copy. M2's broker
+faces a **live** trial that can make many requests over the sandbox's
+whole lifetime, so the same defense is applied on **every single
+operation**, not just once: before reading `workspace/benchmark.kai` for
+any `compile`/semantic-query request, the broker `lstat()`s it on the
+host, refuses anything that is not a genuine regular file (symlink, FIFO,
+socket, device, directory), confirms the resolved real parent directory
+is still the workspace, and opens it with `O_NOFOLLOW` as a second,
+TOCTOU-resistant check — the identical mechanism and rationale as
+`scripts/collect-isolated-trial.sh` (see "Result collection" above).
+Tested directly: an absolute symlink to a real host file, a relative
+symlink escaping the workspace, and a FIFO are all refused before
+`kaicc` ever runs, and the FIFO case refuses immediately rather than
+blocking (opening a FIFO for reading blocks until a writer connects).
+
+### Host-only tool transcript
+
+Every broker request — allowed or denied — is appended to
+`<trial>/host/broker/transcript.jsonl` (never inside `workspace/`, never
+sandbox-visible): `schemaVersion`, `sequence`, `timestamp`, `trialId`,
+`condition`, `operation`, `normalizedArgs` (e.g. `{"line":14,"column":4}`
+— never a host path), `allowed`, `exitCode`, `durationMs`, `stdoutBytes`/
+`stderrBytes` (byte counts only, never full output content, and never
+secrets). **Note:** `sequence` numbers restart at 1 for each separate
+`scripts/tool-sandbox-exec.sh` invocation (each one starts a fresh broker
+process for the one sandbox command it launches) — a real trial that
+needs a persistent multi-call session should run one long-lived command
+(e.g. an interactive shell) as that single invocation's command, so all
+of its tool calls share one broker process and one monotonic sequence.
+
+### A discovered SELinux interaction (Fedora/rootless Podman)
+
+Passing the bridge socket into the sandbox initially failed with
+`PermissionError: [Errno 13] Permission denied` on Fedora, even after
+podman's `:Z` correctly relabeled the socket's on-disk path to
+`container_file_t` (verified with `ls -Z` before/after) - SELinux's
+`unix_stream_socket connectto` check is evaluated against the *listening
+process's* own domain (the host broker, running unconfined), not solely
+the path's on-disk label, so relabeling the path alone could not fix it.
+The fix, `--security-opt label=disable` on the sandbox container, is the
+standard, narrowly-scoped mechanism for exactly this host↔container
+Unix-socket pattern: it affects **only** this container's SELinux (MAC)
+confinement for filesystem/socket access. `--network=none`,
+`--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--read-only`,
+non-root execution, and every mount restriction remain fully independent
+DAC/namespace controls and are unaffected. It is a no-op on non-SELinux
+hosts (e.g. Docker on Ubuntu GitHub Actions runners using AppArmor).
 
 ## Result collection and the validation boundary
 
@@ -385,6 +610,23 @@ files on disk plus the commands below — never by trusting a summary:
    `inputHashes` between the two trials' `trial.json` files for the same
    task — they must match exactly (see `scripts/test-isolation.sh`'s own
    "Section M" check, which asserts this automatically).
+9. **Exact compiler version/hash?**
+   `/tmp/kai-ai-native-v1/toolchains/<staged-id>.manifest.json`'s
+   `compilerVersion` and `sha256["bin/kaicc"]` — recorded by
+   `scripts/isolation/stage-toolchain.sh` from the actual staged binary,
+   never assumed.
+10. **Which tool operations were permitted, actually requested, and
+    denied, with exit codes/timing?**
+    `<trial>/host/broker/transcript.jsonl` — one JSON line per request,
+    `allowed`/`exitCode`/`durationMs` for every one, host-only.
+11. **Was raw `kaicc` trial-visible?** No — run
+    `scripts/tool-sandbox-exec.sh <trial-id> --compiler-root <root> --
+    bash -c 'which kaicc; find / -xdev -iname kaicc'` and confirm both
+    print nothing.
+12. **Could a textual trial elevate itself?** No — see the "Isolation M2"
+    section's own tested cases (direct client bypass, raw-protocol
+    bypass, `trial.json` tampering), all denied by the host broker
+    independent of anything sandbox-visible.
 
 ## Explicit limitations
 

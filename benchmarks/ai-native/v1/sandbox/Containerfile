@@ -1,12 +1,14 @@
 # AI-NATIVE BENCHMARK - ISOLATION M1: minimal trial sandbox image.
 #
 # Deliberately NOT the heavy LLVM release-builder image
-# (release/linux-x86_64/Containerfile) - M1's isolation smoke tests only
-# need a shell, coreutils, and git (to prove git metadata is absent from,
-# and unreachable from, inside the sandbox); no compiler is required yet.
-# See ../ISOLATION.md's "Tooling surface" section for how a future
-# condition-specific compiler/tool adapter would be staged in - never by
-# mounting this repository or its build tree directly.
+# (release/linux-x86_64/Containerfile) - the compiler itself never runs
+# inside this sandbox; it needs only a shell, coreutils, and git (M1 - to
+# prove git metadata is absent from, and unreachable from, inside the
+# sandbox), plus python3 (ISOLATION M2 - the generated /tools client
+# scripts speak JSON over a Unix socket to the HOST-side tool broker; see
+# ../ISOLATION.md's "Isolation M2" section). No compiler is ever staged
+# or mounted into this image - see ../ISOLATION.md's "Tooling surface"
+# section for why raw kaicc must remain host-only.
 #
 # Base is pinned by exact manifest digest (not just the mutable "12-slim"
 # tag, which Debian periodically rebuilds in place with security patches
@@ -24,6 +26,7 @@ RUN apt-get update \
         coreutils \
         git \
         ca-certificates \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # A synthetic, non-root default user/home - never the actual invoking
