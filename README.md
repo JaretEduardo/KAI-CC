@@ -258,6 +258,35 @@ remaining requirement for this alpha, not an oversight.
 **This is a development milestone, not yet a public download.** No `v0.1.0-alpha.2` release exists yet; this
 `.zip` is produced and validated by CI as build evidence, not published anywhere.
 
+### Windows quickstart (for someone who has never touched this repository)
+
+This is the exact, minimal sequence a Windows x86_64 user follows once a KAI Windows `.zip` is actually
+published - **no MSYS2, no LLVM, no CMake/Ninja, no source build** is needed for any of it:
+
+1. Download and extract `kai-<version>-windows-x86_64.zip` anywhere (an ordinary `Downloads` folder is fine -
+   this works even from a path containing spaces, e.g. `C:\Users\Jane Doe\Downloads\kai-windows-x86_64\`).
+2. Install a host C toolchain - **only needed to compile KAI programs, not to run `kaicc.exe` itself.** The
+   one route this project actually tests is
+   [WinLibs GCC](https://github.com/brechtsanders/winlibs_mingw) (a standalone build of GCC/MinGW-w64,
+   distributed as a plain `.zip` - no installer): download the UCRT runtime, `x86_64`, `.zip` variant, and
+   **extract it to a directory whose path does not contain spaces** (e.g. `C:\Tools\winlibs`) - this specific
+   toolchain distribution does not tolerate being relocated into a space-containing install prefix (confirmed
+   directly: its own linker fails there). This is a limitation of that toolchain, not of KAI - KAI itself, your
+   `.kai` source files, and your compiled output may all live under a path containing spaces without issue (see
+   step 1). Add the extracted `mingw64\bin` folder to your `PATH` (or set `KAI_CC` to the full path of
+   `gcc.exe` inside it - see `docs/CLI.md`). This project does not yet test any other route (Visual
+   Studio/MSVC is out of scope for this alpha); advanced users may try another Clang/GCC-compatible driver on
+   `PATH`/`KAI_CC` at their own risk.
+3. Open PowerShell (or Command Prompt) in the extracted `kai-windows-x86_64\` folder.
+4. `.\bin\kaicc.exe --version` - this alone works with **no toolchain installed at all**; so do
+   `inspect`/`references`/`call-graph` (see `docs/CLI.md`) - only the final native link step needs the
+   toolchain from step 2.
+5. `.\bin\kaicc.exe .\examples\hello.kai -o hello` produces `hello.exe`.
+6. `.\hello.exe` prints `Hello from KAI`.
+
+If step 2 is skipped, step 5 fails with a clear `no usable host C compiler driver found` error (exit code 9,
+see `docs/CLI.md`) rather than a confusing crash or DLL error - this is expected, not a bug.
+
 ---
 
 ## Examples
