@@ -150,6 +150,22 @@ ordinary broad filesystem search, which would contaminate the trial.
   - the agent must reach the correct output by actually solving the task,
     and validation happens afterward, outside the agent's view.
 
+### Isolation M1: containerized sandbox (infrastructure only)
+
+The steps above isolate a trial at the *directory* level, which is not
+sufficient on its own now that this repository is public - a trial
+environment with network access could simply fetch `reference/`/
+`expected/` from GitHub. **Isolation M1** adds a network-disabled
+container sandbox on top of this directory-level isolation:
+`scripts/prepare-isolated-trial.sh`, `scripts/sandbox-exec.sh`,
+`scripts/cleanup-isolated-trials.sh`, and `scripts/test-isolation.sh`. See
+[`ISOLATION.md`](ISOLATION.md) for the full threat model, exact isolation
+mechanism, and its explicit current limitations (most importantly:
+condition-specific tool enforcement is not yet technical - see
+`ISOLATION.md`'s "Current textual-vs-semantic enforcement status"). No
+formal trial has been run through this sandbox yet; this is
+infrastructure, not a result.
+
 ## Preparing a run
 
 ```sh

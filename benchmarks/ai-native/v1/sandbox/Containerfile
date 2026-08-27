@@ -1,0 +1,38 @@
+# AI-NATIVE BENCHMARK - ISOLATION M1: minimal trial sandbox image.
+#
+# Deliberately NOT the heavy LLVM release-builder image
+# (release/linux-x86_64/Containerfile) - M1's isolation smoke tests only
+# need a shell, coreutils, and git (to prove git metadata is absent from,
+# and unreachable from, inside the sandbox); no compiler is required yet.
+# See ../ISOLATION.md's "Tooling surface" section for how a future
+# condition-specific compiler/tool adapter would be staged in - never by
+# mounting this repository or its build tree directly.
+#
+# Base is pinned by exact manifest digest (not just the mutable "12-slim"
+# tag, which Debian periodically rebuilds in place with security patches
+# under the same tag) for a genuinely reproducible sandbox image. This is
+# the amd64 manifest digest for docker.io/library/debian:12-slim as
+# resolved and verified working (`podman pull
+# docker.io/library/debian@sha256:...`) on 2026-08-27 - re-resolve and
+# update this digest periodically to pick up upstream security patches;
+# it will not update itself the way a bare tag would.
+FROM docker.io/library/debian@sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba13fc1b2b867
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        coreutils \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# A synthetic, non-root default user/home - never the actual invoking
+# host user's real $HOME. scripts/sandbox-exec.sh always overrides the
+# runtime UID/GID (via scripts/isolation/container-engine.sh) to match
+# the host user that owns the bind-mounted trial workspace, so this
+# baked-in user is a defense-in-depth default for anyone who runs this
+# image directly without going through that wrapper.
+RUN useradd --create-home --uid 10001 --shell /bin/bash sandbox
+USER sandbox
+ENV HOME=/home/sandbox
+WORKDIR /workspace
