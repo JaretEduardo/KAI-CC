@@ -83,6 +83,13 @@ preserved byte-for-byte end to end, since KAI's runtime tracks byte length expli
 C-string termination. The target invariant is that `str` always holds valid UTF-8, but the compiler does not
 yet enforce this by validating string contents - it preserves whatever bytes the source file contained.
 
+**Output byte semantics (WINDOWS M1.1):** every `print` call's line terminator is exactly one LF byte (`0x0A`),
+identically on every supported platform, including Windows - never the host-native line ending. The KAI runtime
+(`runtime/kai_runtime.c`) explicitly puts Windows' stdout into binary mode before writing, since Windows' C
+runtime otherwise silently rewrites `LF` to `CRLF` on output. This is a deliberate, permanent KAI contract, not
+an incidental detail of the current implementation: deterministic byte-identical output across platforms is
+easier to test and easier for tools/agents to consume reliably.
+
 **Semantic tooling:** `kaicc` can answer structural questions about a `.kai` file directly from its own
 resolved semantic model - see "Semantic tooling" below.
 
