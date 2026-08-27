@@ -32,13 +32,26 @@ function testExplicitConfiguredPathFailsCleanlyWhenMissing(): void {
 function testWhitespaceOnlyConfiguredPathIsTreatedAsUnset(): void {
     // A configured-but-blank setting must not be treated as "explicitly
     // configured" - it should fall through to bundled-compiler lookup.
+    //
+    // VS CODE WINDOWS M4 FIRST REAL CI FAILURE FIX: the expected value
+    // MUST be built with path.join(), not a hand-written "/ext/bin/kaicc"
+    // POSIX literal. resolveCompilerPath() joins extensionPath with the
+    // bundled binary's relative path using the REAL, platform-native
+    // `path` module (see paths.ts) - on a real Windows host that module
+    // is path.win32, which normalizes ANY input (even one that "looks
+    // POSIX", like the '/ext' fixture below) to backslash-separated
+    // output. A literal forward-slash expected string is therefore only
+    // ever correct on a POSIX test host; using path.join() on both sides
+    // keeps the assertion correct on whichever host actually runs it -
+    // this was a test-authoring bug, not a resolveCompilerPath() bug (see
+    // this milestone's report for the full analysis).
     const result = resolveCompilerPath('/ext', '   ', 'linux', 'x64', alwaysExists);
-    assert.deepStrictEqual(result, { ok: true, kaiccPath: '/ext/bin/kaicc' });
+    assert.deepStrictEqual(result, { ok: true, kaiccPath: path.join('/ext', 'bin', 'kaicc') });
 }
 
 function testBundledPathUsedOnLinuxX64WhenPresent(): void {
     const result = resolveCompilerPath('/ext', undefined, 'linux', 'x64', alwaysExists);
-    assert.deepStrictEqual(result, { ok: true, kaiccPath: '/ext/bin/kaicc' });
+    assert.deepStrictEqual(result, { ok: true, kaiccPath: path.join('/ext', 'bin', 'kaicc') });
 }
 
 function testBundledPathMissingFailsCleanly(): void {
@@ -97,12 +110,30 @@ function testWin32Arm64FailsCleanly(): void {
     }
 }
 
+// VS CODE WINDOWS M4 FIRST REAL CI FAILURE FIX: these two tests call
+// computeOutputPath() WITHOUT an explicit `pathImpl` override, so they
+// exercise the REAL default (the platform-native `path` module) - on a
+// real Windows test host that default is path.win32, which normalizes
+// path.join()'s output to backslashes even when fed a forward-slash
+// input (path.dirname()/path.basename() do NOT normalize separators,
+// but path.join() - used internally by computeOutputPath() - always
+// does). A hand-written forward-slash literal fixture/expectation would
+// therefore only ever be self-consistent on a POSIX host. Building BOTH
+// the source-path fixture AND the expected value via this file's own
+// imported (also platform-native) `path.join()` keeps these assertions
+// correct on whichever host actually runs them, while still exercising
+// the real ".kai"-stripping/nested-directory/dot-in-directory-name logic
+// the tests are actually about.
 function testComputeOutputPathStripsKaiExtensionInSameDirectory(): void {
-    assert.strictEqual(computeOutputPath('/project/src/hello.kai', 'linux'), '/project/src/hello');
+    const sourcePath = path.join('project', 'src', 'hello.kai');
+    const expected = path.join('project', 'src', 'hello');
+    assert.strictEqual(computeOutputPath(sourcePath, 'linux'), expected);
 }
 
 function testComputeOutputPathHandlesNestedDirectoriesAndDots(): void {
-    assert.strictEqual(computeOutputPath('/a/b.c/d/my.program.kai', 'linux'), '/a/b.c/d/my.program');
+    const sourcePath = path.join('a', 'b.c', 'd', 'my.program.kai');
+    const expected = path.join('a', 'b.c', 'd', 'my.program');
+    assert.strictEqual(computeOutputPath(sourcePath, 'linux'), expected);
 }
 
 // VS CODE WINDOWS M4 spec §8: on win32, the computed output path must
@@ -119,7 +150,11 @@ function testComputeOutputPathNeverDoubleSuffixesExe(): void {
 }
 
 function testComputeOutputPathDoesNotAppendExeOnLinuxEvenForExeNamedSource(): void {
-    assert.strictEqual(computeOutputPath('/project/src/hello.exe.kai', 'linux'), '/project/src/hello.exe');
+    // Same host-native-fixture reasoning as the two tests above - no
+    // explicit pathImpl override here either.
+    const sourcePath = path.join('project', 'src', 'hello.exe.kai');
+    const expected = path.join('project', 'src', 'hello.exe');
+    assert.strictEqual(computeOutputPath(sourcePath, 'linux'), expected);
 }
 
 // VS CODE WINDOWS M4 spec §10/§11: exercise REAL Windows-style path

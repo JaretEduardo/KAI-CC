@@ -390,7 +390,21 @@ jobs:
         # VS CODE WINDOWS M4 spec §25: exercises the ACTUAL compiled
         # helper functions Build/Run Current File use, against the real
         # staged compiler - not a mock, not a pure string-path assertion.
-        run: node ./scripts/extension-smoke.mjs . ../../examples/hello.kai "$(printf 'Hello from KAI')"
+        #
+        # FIRST REAL CI FAILURE FIX: the expected value MUST be a
+        # $'...'-quoted (ANSI-C) string literal, never `"$(printf ...)"` -
+        # POSIX command substitution `$(...)` unconditionally strips ALL
+        # trailing newlines from its output, so a `$(printf 'Hello from
+        # KAI')` argument can never carry the trailing LF hello.kai's real
+        # stdout actually ends with (WINDOWS M1.1's deterministic LF-only
+        # contract), and extension-smoke.mjs's exact-equality check then
+        # (correctly) fails. `$'...'` is a real, literal shell string with
+        # no subshell/substitution involved, so its trailing `\n` survives
+        # untouched into argv - confirmed identical in both GitHub's
+        # Ubuntu bash and MSYS2 UCRT64's bash (both are genuine GNU bash).
+        run: |
+          expected=$'Hello from KAI\n'
+          node ./scripts/extension-smoke.mjs . ../../examples/hello.kai "$expected"
 
       - name: Package the Linux x64 VSIX
         run: npx @vscode/vsce package --target linux-x64
@@ -511,7 +525,16 @@ jobs:
         # libkai_runtime.a resolves via ../lib/kai with KAI_RUNTIME_LIB
         # unset), and hello.exe launches and prints the exact expected
         # LF-only stdout (WINDOWS M1.1).
-        run: node ./scripts/extension-smoke.mjs . ../../examples/hello.kai "$(printf 'Hello from KAI')"
+        #
+        # FIRST REAL CI FAILURE FIX: `$'...'` (ANSI-C quoting), never
+        # `"$(printf ...)"` - command substitution strips the trailing LF
+        # that hello.kai's real stdout actually ends with, which then
+        # fails extension-smoke.mjs's intentionally-exact equality check.
+        # Confirmed identical in MSYS2 UCRT64's bash (a genuine GNU bash,
+        # same as GitHub's Ubuntu runners use for `run:` steps).
+        run: |
+          expected=$'Hello from KAI\n'
+          node ./scripts/extension-smoke.mjs . ../../examples/hello.kai "$expected"
 
       - name: Package the Windows x64 VSIX
         run: npx @vscode/vsce package --target win32-x64
