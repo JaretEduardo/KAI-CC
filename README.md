@@ -83,6 +83,13 @@ preserved byte-for-byte end to end, since KAI's runtime tracks byte length expli
 C-string termination. The target invariant is that `str` always holds valid UTF-8, but the compiler does not
 yet enforce this by validating string contents - it preserves whatever bytes the source file contained.
 
+**Output byte semantics (WINDOWS M1.1):** every `print` call's line terminator is exactly one LF byte (`0x0A`),
+identically on every supported platform, including Windows - never the host-native line ending. The KAI runtime
+(`runtime/kai_runtime.c`) explicitly puts Windows' stdout into binary mode before writing, since Windows' C
+runtime otherwise silently rewrites `LF` to `CRLF` on output. This is a deliberate, permanent KAI contract, not
+an incidental detail of the current implementation: deterministic byte-identical output across platforms is
+easier to test and easier for tools/agents to consume reliably.
+
 **Semantic tooling:** `kaicc` can answer structural questions about a `.kai` file directly from its own
 resolved semantic model - see "Semantic tooling" below.
 
@@ -222,7 +229,14 @@ Parses and/or type-checks in some form, but explicitly **not** backend-lowerable
 - string concatenation, equality, slicing, and indexing
 - modules/packages
 
-Platform: **Linux x86_64 only**. No Windows or macOS support exists or is claimed.
+Platform: **Linux x86_64 only** for the released/distributed compiler. No macOS support exists or is claimed.
+
+A native **Windows x86_64 build and test baseline** (MSYS2 UCRT64, Clang/LLVM 22.1.8 - see the
+`compiler-windows` CI job and `COMPILER_ARCHITECTURE.md`'s "WINDOWS M1" note) is under active, in-progress
+development: the same source tree builds `kaicc.exe` and runs its CTest suite on Windows. This is a
+**development-only portability milestone, not a supported or released platform yet** - there is no packaged
+Windows distribution, no bundled VS Code compiler for Windows, and no Windows entry in a GitHub Release. Do not
+rely on Windows support until a future packaging milestone says otherwise here.
 
 ---
 

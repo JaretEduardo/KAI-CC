@@ -23,8 +23,10 @@
 #include "support/check.hpp"
 
 #include <array>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -35,6 +37,53 @@ using kai::FileId;
 using kai::SourceManager;
 
 namespace {
+
+// WINDOWS M1.1: a captured stdout mismatch used to report only the two
+// std::string values via KAI_CHECK's own `#expr` text - unreadable for a
+// byte-level difference like Windows CRT text-mode LF -> CRLF
+// translation (every byte printable ASCII except the exact byte that
+// differs). Prints each byte as its literal character when printable
+// ASCII, otherwise as `\xHH` - deliberately not a raw hex dump (these
+// captures are always a handful of bytes - M1.1 spec §9 "avoid dumping
+// enormous buffers" - and an escaped form makes the CRLF/NUL story
+// visible at a glance, e.g. "42\x0d\x0a" immediately reads as a CR
+// before the expected LF, or "a\x00b\x0a" immediately reads as the
+// embedded NUL surviving intact).
+std::string escapeBytesForDiagnostic(const std::string& bytes) {
+    std::ostringstream out;
+    for (const unsigned char byte : bytes) {
+        if (byte >= 0x20 && byte < 0x7F) {
+            out << static_cast<char>(byte);
+        } else {
+            out << "\\x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(byte)
+                << std::dec;
+        }
+    }
+    return out.str();
+}
+
+// Reports a captured-stdout mismatch with both byte counts and the
+// escaped byte content of each side (M1.1 spec §1/§9) before delegating
+// to the same failure-counting mechanism every other KAI_CHECK uses -
+// never a second, separate pass/fail bookkeeping scheme.
+void checkStdoutBytes(const std::string& actual, const std::string& expected, const char* exprText, const char* file,
+                      int line) {
+    if (actual == expected) {
+        return;
+    }
+    kai::test::reportFailure(exprText, file, line);
+    std::cerr << "    expected (" << expected.size() << " bytes): \"" << escapeBytesForDiagnostic(expected)
+               << "\"\n";
+    std::cerr << "    actual   (" << actual.size() << " bytes): \"" << escapeBytesForDiagnostic(actual) << "\"\n";
+}
+
+// Drop-in replacement for `KAI_CHECK(actual == expected)` specifically
+// for captured-stdout comparisons - same pass/fail semantics and exit
+// code, plus the escaped byte dump above on failure. Every other
+// KAI_CHECK in this file (exit codes, byte counts, boolean results)
+// is unaffected.
+#define KAI_CHECK_STDOUT_BYTES(actual, expected)                                                                    \
+    checkStdoutBytes((actual), (expected), #actual " == " #expected, __FILE__, __LINE__)
 
 std::filesystem::path writeTempSource(const std::string& baseName, const std::string& contents) {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / baseName;
@@ -84,8 +133,15 @@ CompileAndRunResult compileAndRun(const std::string& kaiSourceName, const std::s
 
     const std::filesystem::path sourcePath = writeTempSource(kaiSourceName, source);
     const std::filesystem::path outputPath = std::filesystem::temp_directory_path() / (kaiSourceName + ".out");
+    // WINDOWS M1 spec §7: the file runCompileCommand() actually produces -
+    // on every platform except Windows this is `outputPath` itself
+    // unchanged; on Windows a missing `.exe` is filled in. Every caller
+    // that needs the real produced filename uses this exact function
+    // (kai::cli::resolveNativeExecutablePath()'s own doc comment) rather
+    // than assuming `outputPath` is the literal produced file.
+    const std::filesystem::path nativeOutputPath = kai::cli::resolveNativeExecutablePath(outputPath);
     std::error_code ignored;
-    std::filesystem::remove(outputPath, ignored);
+    std::filesystem::remove(nativeOutputPath, ignored);
 
     SourceManager sm;
     std::ostringstream err;
@@ -97,10 +153,10 @@ CompileAndRunResult compileAndRun(const std::string& kaiSourceName, const std::s
         return result;
     }
 
-    result.runExitCode = runAndCaptureStdout(outputPath, result.stdoutText);
+    result.runExitCode = runAndCaptureStdout(nativeOutputPath, result.stdoutText);
 
     std::filesystem::remove(sourcePath, ignored);
-    std::filesystem::remove(outputPath, ignored);
+    std::filesystem::remove(nativeOutputPath, ignored);
     return result;
 }
 
@@ -113,7 +169,7 @@ void testHelloPrint42EndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "42\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "42\n");
 }
 
 // REQUIRED E2E (M7 spec §24): factorial(5) via recursion + if/else +
@@ -136,7 +192,7 @@ void testFactorialEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "120\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "120\n");
 }
 
 // OPTIONAL (M7 spec §25): while-loop native integration.
@@ -156,7 +212,7 @@ void testWhileLoopEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "0\n1\n2\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "0\n1\n2\n");
 }
 
 // FRONTEND/BACKEND FAILURE BEHAVIOR (M7 spec §18/§19): no executable is
@@ -306,7 +362,14 @@ void testNativeLinkerProducesRunnableExecutable() {
     SourceManager sm;
     const std::filesystem::path sourcePath = writeTempSource("kai_link_test.kai", "fn main() {\n    print(7)\n}");
     const std::filesystem::path objectPath = std::filesystem::temp_directory_path() / "kai_link_test.o";
-    const std::filesystem::path outputPath = std::filesystem::temp_directory_path() / "kai_link_test.out";
+    // NativeLinker::link() itself has no output-naming policy - it links
+    // to exactly the path it is given (that policy lives one layer up, in
+    // kai::cli::resolveNativeExecutablePath() - see CompileCommand.cpp).
+    // This test applies the same resolution a real caller would, so it
+    // asks the host driver to produce a path it will actually create on
+    // every platform (WINDOWS M1 spec §7).
+    const std::filesystem::path outputPath =
+        kai::cli::resolveNativeExecutablePath(std::filesystem::temp_directory_path() / "kai_link_test.out");
     std::error_code ignored;
     std::filesystem::remove(objectPath, ignored);
     std::filesystem::remove(outputPath, ignored);
@@ -353,7 +416,7 @@ void testNativeLinkerProducesRunnableExecutable() {
     std::string stdoutText;
     const int exitCode = runAndCaptureStdout(outputPath, stdoutText);
     KAI_CHECK(exitCode == 0);
-    KAI_CHECK(stdoutText == "7\n");
+    KAI_CHECK_STDOUT_BYTES(stdoutText, "7\n");
 
     std::filesystem::remove(sourcePath, ignored);
     std::filesystem::remove(objectPath, ignored);
@@ -371,7 +434,7 @@ void testPrintStringLiteralEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "Hello, KAI!\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "Hello, KAI!\n");
 }
 
 // M8 REQUIRED consistency case (spec §1): once a string literal has a
@@ -387,7 +450,7 @@ void testPrintInferredStringLocalEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "Welcome to KAI\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "Welcome to KAI\n");
 }
 
 // M8 REQUIRED (spec §15): escape decoding - \n \" \\ \t all produce their
@@ -412,7 +475,7 @@ void testStringEscapeDecodingEndToEnd() {
     KAI_CHECK(result.runExitCode == 0);
 
     const std::string expected = std::string("a\nb\n") + "quote: \"\n" + "slash: \\\n" + "tab:\t\n";
-    KAI_CHECK(result.stdoutText == expected);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, expected);
 }
 
 // M8 REQUIRED regression (spec §14): print("a\0b") must produce the EXACT
@@ -435,7 +498,7 @@ void testEmbeddedNulExactBytesEndToEnd() {
     }
     KAI_CHECK(result.runExitCode == 0);
     KAI_CHECK(result.stdoutText.size() == 4);
-    KAI_CHECK(result.stdoutText == std::string("a\0b\n", 4));
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, std::string("a\0b\n", 4));
 }
 
 // M8 REQUIRED (spec §16): a non-ASCII UTF-8 literal prints its exact
@@ -453,7 +516,7 @@ void testUtf8ExactBytesEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "KAI ✓\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "KAI ✓\n");
 }
 
 // SPELLABLE STR + PARAMETERS/RETURNS MVP (M9 spec §27): a str parameter.
@@ -466,7 +529,7 @@ void testStrParameterEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "Hello, KAI!\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "Hello, KAI!\n");
 }
 
 // M9 spec §27: a function returning a static str literal.
@@ -479,7 +542,7 @@ void testStrReturnEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "KAI\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "KAI\n");
 }
 
 // M9 spec §27: single-str-parameter passthrough return.
@@ -493,7 +556,7 @@ void testStrEchoEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "hello\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "hello\n");
 }
 
 // M9 spec §27: explicit `str` local annotation.
@@ -506,7 +569,7 @@ void testExplicitStrLocalEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "typed\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "typed\n");
 }
 
 // M9 spec §27: forwarding a str parameter through at least two functions.
@@ -521,7 +584,7 @@ void testStrForwardingThroughTwoFunctionsEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "forwarded\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "forwarded\n");
 }
 
 // M9 REQUIRED regression (spec §27.6): embedded NUL through a function
@@ -544,7 +607,7 @@ fn main() {
     }
     KAI_CHECK(result.runExitCode == 0);
     KAI_CHECK(result.stdoutText.size() == 4);
-    KAI_CHECK(result.stdoutText == std::string("a\0b\n", 4));
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, std::string("a\0b\n", 4));
 }
 
 // M9 REQUIRED regression (spec §27.7): UTF-8 bytes through a function
@@ -559,7 +622,7 @@ void testStrUtf8ThroughFunctionBoundaryEndToEnd() {
         return;
     }
     KAI_CHECK(result.runExitCode == 0);
-    KAI_CHECK(result.stdoutText == "KAI ✓\n");
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "KAI ✓\n");
 }
 
 } // namespace

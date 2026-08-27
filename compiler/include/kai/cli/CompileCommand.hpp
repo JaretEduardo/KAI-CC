@@ -7,6 +7,24 @@
 
 namespace kai::cli {
 
+/// WINDOWS M1: decides the actual final native-executable path kaicc
+/// produces for a given `-o <output>` argument, rather than leaving that
+/// decision to the host C compiler driver's own (undocumented, toolchain-
+/// and-version-dependent) output-naming behavior. On every platform
+/// except Windows, `requestedOutputPath` is returned completely
+/// unchanged - this is a no-op on Linux (M1 spec §7). On Windows, if
+/// `requestedOutputPath` does not already end in `.exe` (case-
+/// insensitively), `.exe` is appended; an already-suffixed path (e.g. an
+/// explicit `-o hello.exe`) is returned unchanged on every platform, so
+/// an explicit output path is never broken or double-suffixed.
+///
+/// `runCompileCommand()` itself calls this to decide the executable path
+/// it actually links to; any other caller that needs to know the real
+/// produced filename (tests, editor integrations) MUST call this exact
+/// function too, rather than re-deriving the naming rule a second time -
+/// see NativeCompilationTests.cpp for the canonical example.
+std::filesystem::path resolveNativeExecutablePath(const std::filesystem::path& requestedOutputPath);
+
 /// LLVM CODEGEN MILESTONE 7: the real end-to-end `kaicc <input.kai> -o
 /// <output>` pipeline - CLI orchestration only (M7 spec §4/§17), calling
 /// into the exact same frontend/backend components every other command
@@ -25,7 +43,9 @@ namespace kai::cli {
 /// regardless of outcome (M7 spec §20).
 ///
 /// Returns the process exit code for this command:
-///   0  - `outputPath` now exists and is the requested native executable
+///   0  - the executable now exists at resolveNativeExecutablePath(outputPath)
+///        - on every platform except Windows this is `outputPath` itself
+///        unchanged (WINDOWS M1 spec §7)
 ///   2  - the source file failed to load
 ///   4  - the source failed to parse
 ///   5  - semantic analysis/type checking/control-flow checking reported

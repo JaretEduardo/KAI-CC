@@ -7,6 +7,17 @@
 #include <array>
 #include <cstdlib>
 #include <system_error>
+#include <vector>
+
+#ifdef _WIN32
+// WINDOWS M1: the only platform-conditional #include in the whole
+// compiler source tree - kept as narrowly scoped as possible (this one
+// translation unit, guarded, used only inside currentExecutablePath()
+// below). windows.h defines a `min`/`max` macro pair that can shadow
+// std::min/std::max in a translation unit that includes both; this file
+// never uses either name, so no NOMINMAX/undef dance is needed here.
+#include <windows.h>
+#endif
 
 namespace kai::codegen {
 
@@ -68,12 +79,39 @@ NativeLinker::findDefaultRuntimeLibrary(const std::filesystem::path& kaiccExecut
 }
 
 std::filesystem::path NativeLinker::currentExecutablePath() {
+#ifdef _WIN32
+    // WINDOWS M1: GetModuleFileNameW gives no advance way to know the
+    // required buffer length - it silently truncates and returns a
+    // length equal to the buffer size (with no separate "too small"
+    // error signal until Windows Vista's ERROR_INSUFFICIENT_BUFFER, which
+    // this keeps using as the definitive retry signal rather than relying
+    // on the truncation heuristic alone). Grows the buffer and retries
+    // rather than guessing one large-enough fixed size up front.
+    std::vector<wchar_t> buffer(MAX_PATH);
+    for (;;) {
+        const DWORD length = ::GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length == 0) {
+            return {};
+        }
+        if (length < buffer.size() && ::GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+            return std::filesystem::path(std::wstring(buffer.data(), length));
+        }
+        if (buffer.size() >= 32768) {
+            // A Win32 path can never legitimately need more than the
+            // long-path limit; treat this as failure rather than growing
+            // forever.
+            return {};
+        }
+        buffer.resize(buffer.size() * 2);
+    }
+#else
     std::error_code readError;
     std::filesystem::path resolved = std::filesystem::read_symlink("/proc/self/exe", readError);
     if (readError) {
         return {};
     }
     return resolved;
+#endif
 }
 
 bool NativeLinker::link(const std::string& compilerDriverPath, const std::filesystem::path& objectPath,

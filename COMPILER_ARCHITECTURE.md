@@ -89,6 +89,19 @@ Still unimplemented: `for` loop codegen, arrays/slices, strings/`Char` as backen
 ownership/borrowing, structs/enums/generics, `panic`/`assert` lowering, optimization passes, HIR, an LSP, and
 the higher-level `kai` CLI wrapper described in §14 (only `kaicc` itself exists today).
 
+**WINDOWS M1 (portability baseline, in progress):** the same source tree also builds and runs its CTest suite
+natively on Windows x86_64, targeting exactly one Windows toolchain baseline - MSYS2 UCRT64 with Clang/LLVM
+22.1.8 (never MSVC, never WSL) - via a dedicated `compiler-windows` CI job. This is a build/test portability
+milestone only, not a packaged Windows release: no Windows tag/release/version bump has happened, and
+README.md's platform claim is not updated until a packaging milestone actually validates end-to-end Windows
+distribution. The only native-code changes this required were `NativeLinker::currentExecutablePath()` (Windows
+has no `/proc/self/exe`; uses `GetModuleFileNameW` instead) and `kai::cli::resolveNativeExecutablePath()` (a
+small, Windows-only `.exe`-suffix decision for `-o <output>`, since MinGW-style host compiler drivers' own
+output-naming behavior around a missing extension is not something to depend on implicitly) - everything else
+in the pipeline (CMake's own `WIN32`/executable-suffix handling, LLVM's host-triple object emission, the
+`cc`/`clang`/`gcc` driver search, the `libkai_runtime.a` static-archive naming) already worked unmodified,
+since this baseline deliberately avoids MSVC's differing conventions (`.lib`, `cl.exe`) entirely.
+
 ---
 
 ## 3. Future Pipeline
