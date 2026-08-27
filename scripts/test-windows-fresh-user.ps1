@@ -280,10 +280,40 @@ function New-SanitizedEnvironment {
     }
 }
 
-function Test-CommandAbsent([string]$CommandName, $Sanitized, [string]$WorkingDirectory) {
+# Returns { Absent: bool; ResolvedPaths: string[] } - `where.exe` can print
+# more than one match (one per line), so every match is captured, not just
+# whether it succeeded.
+function Test-CommandResolution([string]$CommandName, $Sanitized, [string]$WorkingDirectory) {
     $whereExe = Join-Path $env:SystemRoot 'System32/where.exe'
     $result = Invoke-Native -FilePath $whereExe -ArgumentList @($CommandName) -WorkingDirectory $WorkingDirectory -Sanitized $Sanitized
-    return ($result.ExitCode -ne 0)
+    if ($result.ExitCode -ne 0) {
+        return [PSCustomObject]@{ Absent = $true; ResolvedPaths = @() }
+    }
+    $paths = @($result.Stdout -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+    return [PSCustomObject]@{ Absent = $false; ResolvedPaths = $paths }
+}
+
+function Test-CommandAbsent([string]$CommandName, $Sanitized, [string]$WorkingDirectory) {
+    return (Test-CommandResolution -CommandName $CommandName -Sanitized $Sanitized -WorkingDirectory $WorkingDirectory).Absent
+}
+
+# ---------------------------------------------------------------------
+# BASH ABSENCE CHECK CLASSIFICATION FIX: the real release-gate invariant
+# is "KAI must not be accidentally using the MSYS2/MinGW development
+# environment that built it" - NOT "no executable named bash may exist
+# anywhere on the machine". A real Windows run found `bash` DOES resolve
+# under the sanitized environment (System32 is - correctly - part of the
+# sanitized PATH allowlist, and Windows installations with WSL enabled,
+# including GitHub's own hosted runners, place a `bash.exe` WSL-launcher
+# stub directly under %SystemRoot%\System32) - that is Windows/system-
+# provided tooling entirely unrelated to KAI's own build environment, not
+# evidence of MSYS2 leakage. This checks the RESOLVED PATH itself against
+# the same dev-environment name patterns already used elsewhere in this
+# script (msys64/ucrt64/mingw64/mingw32), never the mere fact that a
+# command named "bash" resolves to something.
+# ---------------------------------------------------------------------
+function Test-PathIsForbiddenDevEnvironment([string]$Path) {
+    return ($Path -match '(?i)msys64|ucrt64|mingw64|mingw32')
 }
 
 function Find-FileRecursive([string]$Root, [string]$Name) {
@@ -639,9 +669,28 @@ Write-Host '  of the third-party toolchain distribution, not of KAI).'
 # ======================================================================
 $sanitizedNoToolchain = New-SanitizedEnvironment
 Write-Section 'Dev-tool absence check (sanitized PATH, before adding the host toolchain)'
-foreach ($cmd in @('llvm-config', 'cmake', 'ninja', 'bash', 'clang', 'gcc', 'cc')) {
+# These have no legitimate Windows-system-provided identity at all - any
+# resolution of them under the sanitized PATH would itself be suspicious,
+# so the strict "must not resolve" check remains exactly as before.
+foreach ($cmd in @('llvm-config', 'cmake', 'ninja', 'clang', 'gcc', 'cc')) {
     Assert-True (Test-CommandAbsent -CommandName $cmd -Sanitized $sanitizedNoToolchain -WorkingDirectory $kaiRoot) "'$cmd' is NOT resolvable in the sanitized environment"
 }
+
+# 'bash' is classified, not blindly rejected (see Test-PathIsForbiddenDevEnvironment's
+# own comment): Windows itself can legitimately provide a bash.exe (the
+# WSL launcher stub under %SystemRoot%\System32 - present on GitHub's own
+# hosted Windows runners) that has nothing to do with KAI's own MSYS2/
+# MinGW build environment. Only fail if a resolved path actually points
+# into that forbidden dev-environment tree.
+$bashCheck = Test-CommandResolution -CommandName 'bash' -Sanitized $sanitizedNoToolchain -WorkingDirectory $kaiRoot
+if ($bashCheck.Absent) {
+    Write-Host '  bash: not resolvable in the sanitized environment'
+} else {
+    foreach ($p in $bashCheck.ResolvedPaths) { Write-Host "  bash resolved to: $p" }
+}
+$forbiddenBashPaths = @($bashCheck.ResolvedPaths | Where-Object { Test-PathIsForbiddenDevEnvironment $_ })
+Assert-True ($forbiddenBashPaths.Count -eq 0) 'resolved bash (if any) is not from KAI''s own MSYS2/MinGW development environment'
+
 Assert-True ($sanitizedNoToolchain.Vars.Path -notmatch '(?i)mingw|ucrt64|msys64') 'sanitized PATH contains no MSYS2/MinGW dev-environment directory'
 
 # ======================================================================
