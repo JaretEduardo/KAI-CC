@@ -347,6 +347,103 @@ function Test-TrivialCCompile {
     [PSCustomObject]@{ Success = $success; ExitCode = $result.ExitCode; Stderr = $result.Stderr }
 }
 
+# Prints at most $MaxChars of a captured stream, never the whole thing
+# unbounded (spec §1: "keep logs bounded").
+function Write-BoundedOutput([string]$Label, [string]$Text, [int]$MaxChars = 2000) {
+    if ([string]::IsNullOrEmpty($Text)) {
+        Write-Host "    ${Label}: (empty)"
+        return
+    }
+    $shown = $Text.Trim()
+    if ($shown.Length -gt $MaxChars) { $shown = $shown.Substring(0, $MaxChars) + '... [truncated]' }
+    Write-Host "    ${Label}: $shown"
+}
+
+# ---------------------------------------------------------------------
+# VS CODE CLI ISOLATED-INSTALL DIAGNOSIS: reads extension/package.json
+# directly out of the VSIX (an ordinary zip) to determine the exact
+# publisher/name/version this specific artifact declares, and the exact
+# "publisher.name@version" identifier `--list-extensions --show-versions`
+# is expected to print - never a hardcoded/guessed string, and never a
+# repack of the VSIX itself. Also records extension.vsixmanifest's
+# TargetPlatform attribute when present (best-effort - the install test
+# itself is the authoritative proof, this is corroborating evidence).
+# ---------------------------------------------------------------------
+function Test-VsixStructure {
+    param([Parameter(Mandatory = $true)][string]$VsixPath)
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($VsixPath)
+    try {
+        $packageJsonEntry = $zip.Entries | Where-Object { $_.FullName -eq 'extension/package.json' }
+        if (-not $packageJsonEntry) {
+            throw "VSIX structural check: 'extension/package.json' not found inside $VsixPath"
+        }
+        $reader = New-Object System.IO.StreamReader($packageJsonEntry.Open())
+        try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+
+        $targetPlatform = $null
+        $vsixManifestEntry = $zip.Entries | Where-Object { $_.FullName -eq 'extension.vsixmanifest' }
+        if ($vsixManifestEntry) {
+            $manifestReader = New-Object System.IO.StreamReader($vsixManifestEntry.Open())
+            try {
+                [xml]$vsixManifestXml = $manifestReader.ReadToEnd()
+                $identity = $vsixManifestXml.PackageManifest.Metadata.Identity
+                if ($identity -and $identity.TargetPlatform) { $targetPlatform = $identity.TargetPlatform }
+            } finally { $manifestReader.Dispose() }
+        }
+    } finally {
+        $zip.Dispose()
+    }
+
+    [PSCustomObject]@{
+        Publisher      = $manifest.publisher
+        Name           = $manifest.name
+        Version        = $manifest.version
+        ExpectedId     = "$($manifest.publisher).$($manifest.name)@$($manifest.version)"
+        TargetPlatform = $targetPlatform
+    }
+}
+
+# ---------------------------------------------------------------------
+# VS CODE CLI ISOLATED-INSTALL DIAGNOSIS: a VS Code-SPECIFIC sanitized
+# environment, built from the SAME base allowlist as KAI's own
+# (New-SanitizedEnvironment - no toolchain, no MSYS2/LLVM/CMake/Ninja),
+# plus exactly the additional variables inspecting the pinned VS Code
+# archive's own bin/code.cmd showed it needs, and a small set of
+# ordinary Windows user-profile variables (USERPROFILE/APPDATA/
+# LOCALAPPDATA/HOMEDRIVE/HOMEPATH) VS Code's own Electron/Node runtime
+# expects to exist even when --user-data-dir/--extensions-dir are given
+# explicitly. Every one of those points at a FRESH, isolated directory
+# under this invocation's own fresh-user tree - never the real
+# runner/maintainer profile, never reused across runs.
+# ---------------------------------------------------------------------
+function New-VSCodeSanitizedEnvironment {
+    param([Parameter(Mandatory = $true)][string]$IsolatedProfileRoot)
+
+    $userProfile = Join-Path $IsolatedProfileRoot 'profile'
+    $appDataRoaming = Join-Path $userProfile 'AppData/Roaming'
+    $appDataLocal = Join-Path $userProfile 'AppData/Local'
+    New-Item -ItemType Directory -Path $userProfile, $appDataRoaming, $appDataLocal -Force | Out-Null
+
+    $vars = (New-SanitizedEnvironment).Vars.Clone()
+    # bin/code.cmd's own contents (inspected directly from the pinned
+    # archive - see this milestone's report): sets exactly these two
+    # before invoking Code.exe as a plain Node process on its cli.js.
+    $vars['ELECTRON_RUN_AS_NODE'] = '1'
+    $vars['VSCODE_DEV'] = ''
+    # Ordinary, isolated Windows user-profile variables - not part of
+    # KAI's own compiler environment, added here only because VS Code's
+    # runtime needs them to start at all.
+    $vars['USERPROFILE'] = $userProfile
+    $vars['APPDATA'] = $appDataRoaming
+    $vars['LOCALAPPDATA'] = $appDataLocal
+    $vars['HOMEDRIVE'] = $env:SystemDrive
+    $vars['HOMEPATH'] = $userProfile.Substring(2)
+
+    [PSCustomObject]@{ Vars = $vars }
+}
+
 # ======================================================================
 # 0. Validate inputs up front - clear, specific failures (spec §40)
 # ======================================================================
@@ -601,32 +698,80 @@ Assert-True ($leaked.Count -eq 0) 'no captured kaicc.exe output references the K
 #    given, so this script degrades gracefully rather than pretending.
 # ======================================================================
 if ($VsixPath -and $VSCodeZipPath) {
+    $listResult = $null
+
+    Write-Section 'VSIX structural validation (before invoking VS Code at all)'
+    $vsixInfo = Test-VsixStructure -VsixPath $VsixPath
+    Write-Host "  publisher: $($vsixInfo.Publisher)"
+    Write-Host "  name:      $($vsixInfo.Name)"
+    Write-Host "  version:   $($vsixInfo.Version)"
+    Write-Host "  expected --list-extensions --show-versions entry: $($vsixInfo.ExpectedId)"
+    if ($vsixInfo.TargetPlatform) {
+        Write-Host "  vsixmanifest TargetPlatform: $($vsixInfo.TargetPlatform)"
+        Assert-True ($vsixInfo.TargetPlatform -eq 'win32-x64') 'VSIX manifest declares targetPlatform win32-x64'
+    } else {
+        Write-Host '  vsixmanifest TargetPlatform: (not present in manifest - not all vsce versions encode it; not treated as a failure)'
+    }
+
     Write-Section 'Installing the win32-x64 VSIX into an ISOLATED VS Code profile'
     $vscodeRoot = Join-Path $WorkDir 'VSCode'
     Expand-Archive -LiteralPath $VSCodeZipPath -DestinationPath $vscodeRoot -Force
-    $codeCmd = Find-FileRecursive -Root $vscodeRoot -Name 'code.cmd'
-    if (-not $codeCmd) {
-        Write-Host '  LIMITATION: code.cmd not found in the extracted VS Code archive - skipping VSIX install test.'
+
+    # VS CODE CLI ISOLATED-INSTALL DIAGNOSIS: bin/code.cmd (inspected
+    # directly from this exact pinned archive - see this milestone's
+    # report) is confirmed to be nothing more than:
+    #   set ELECTRON_RUN_AS_NODE=1
+    #   "<root>\Code.exe" "<root>\<build-hash>\resources\app\out\cli.js" %*
+    # Reproducing that directly - Code.exe run as a plain Node process on
+    # cli.js - avoids cmd.exe entirely: no "/c <string>" re-parsing, no
+    # cmd.exe quoting rules, true ArgumentList handling throughout,
+    # exactly like every other invocation in this script. The
+    # build-specific hash directory name is never hardcoded - cli.js is
+    # located the same way gcc.exe/code.cmd are (Find-FileRecursive), so
+    # this keeps working across VS Code versions.
+    $codeExe = Join-Path $vscodeRoot 'Code.exe'
+    $cliJs = Find-FileRecursive -Root $vscodeRoot -Name 'cli.js'
+    if (-not (Test-Path -LiteralPath $codeExe -PathType Leaf) -or -not $cliJs) {
+        Write-Host '  LIMITATION: Code.exe and/or cli.js not found in the extracted VS Code archive - skipping VSIX install test.'
         $script:FailureCount++
     } else {
         $userDataDir = Join-Path $WorkDir 'vscode-user-data'
         $extensionsDir = Join-Path $WorkDir 'vscode-extensions'
-        New-Item -ItemType Directory -Path $userDataDir, $extensionsDir -Force | Out-Null
+        $vscodeProfileRoot = Join-Path $WorkDir 'vscode-profile-env'
+        New-Item -ItemType Directory -Path $userDataDir, $extensionsDir, $vscodeProfileRoot -Force | Out-Null
+        $vscodeSanitized = New-VSCodeSanitizedEnvironment -IsolatedProfileRoot $vscodeProfileRoot
 
-        # code.cmd is a Windows batch script, not a native PE executable -
-        # Windows can only ever launch it through cmd.exe (this is a
-        # platform fact, not a design choice); the argument LIST below is
-        # still never joined into a shell string, so no injection/quoting
-        # risk is introduced. kaicc.exe itself is NEVER invoked this way
-        # anywhere in this script - only this one third-party CLI wrapper.
-        $cmdExe = Join-Path $env:SystemRoot 'System32/cmd.exe'
-        $installArgs = @('/c', $codeCmd, '--user-data-dir', $userDataDir, '--extensions-dir', $extensionsDir, '--install-extension', $VsixPath, '--force')
-        $installResult = Invoke-Native -FilePath $cmdExe -ArgumentList $installArgs -WorkingDirectory $WorkDir -Sanitized $sanitizedNoToolchain
-        Assert-True ($installResult.ExitCode -eq 0) "VSIX installed into an isolated --user-data-dir/--extensions-dir (exit $($installResult.ExitCode))"
+        # Preflight (spec §2): prove the CLI itself starts, using the
+        # EXACT same executable/environment/working directory as every
+        # later call, before ever touching --install-extension. A
+        # --version failure here means this is not a VSIX problem at all.
+        $versionCheck = Invoke-Native -FilePath $codeExe -ArgumentList @($cliJs, '--version') -WorkingDirectory $vscodeRoot -Sanitized $vscodeSanitized
+        Write-Host "  VS Code CLI --version: exit $($versionCheck.ExitCode)"
+        Write-BoundedOutput 'stdout' $versionCheck.Stdout
+        Write-BoundedOutput 'stderr' $versionCheck.Stderr
+        Assert-True ($versionCheck.ExitCode -eq 0) 'VS Code CLI starts (Code.exe + cli.js, --version)'
 
-        $listArgs = @('/c', $codeCmd, '--user-data-dir', $userDataDir, '--extensions-dir', $extensionsDir, '--list-extensions', '--show-versions')
-        $listResult = Invoke-Native -FilePath $cmdExe -ArgumentList $listArgs -WorkingDirectory $WorkDir -Sanitized $sanitizedNoToolchain
-        Assert-True ($listResult.Stdout -match 'kai-language@') "installed extension appears in --list-extensions --show-versions (output: $($listResult.Stdout.Trim()))"
+        if ($versionCheck.ExitCode -ne 0) {
+            Write-Host '  SKIPPING install/list - the VS Code CLI itself did not start (not a VSIX problem, see above)'
+        } else {
+            $installArgs = @($cliJs, '--user-data-dir', $userDataDir, '--extensions-dir', $extensionsDir, '--install-extension', $VsixPath, '--force')
+            $installResult = Invoke-Native -FilePath $codeExe -ArgumentList $installArgs -WorkingDirectory $vscodeRoot -Sanitized $vscodeSanitized
+            Write-Host "  --install-extension: exit $($installResult.ExitCode)"
+            Write-BoundedOutput 'stdout' $installResult.Stdout
+            Write-BoundedOutput 'stderr' $installResult.Stderr
+            Assert-True ($installResult.ExitCode -eq 0) "VSIX installed into an isolated --user-data-dir/--extensions-dir (exit $($installResult.ExitCode))"
+
+            if ($installResult.ExitCode -ne 0) {
+                Write-Host '  SKIPPING --list-extensions - install did not succeed (fail-fast; see stdout/stderr above)'
+            } else {
+                $listArgs = @($cliJs, '--user-data-dir', $userDataDir, '--extensions-dir', $extensionsDir, '--list-extensions', '--show-versions')
+                $listResult = Invoke-Native -FilePath $codeExe -ArgumentList $listArgs -WorkingDirectory $vscodeRoot -Sanitized $vscodeSanitized
+                Write-Host "  --list-extensions --show-versions: exit $($listResult.ExitCode)"
+                Write-BoundedOutput 'stdout' $listResult.Stdout
+                Write-BoundedOutput 'stderr' $listResult.Stderr
+                Assert-True ($listResult.Stdout -match [regex]::Escape($vsixInfo.ExpectedId)) "installed extension appears as exactly '$($vsixInfo.ExpectedId)' in --list-extensions --show-versions"
+            }
+        }
     }
 } else {
     Write-Section 'VSIX install test: SKIPPED (documented limitation)'
@@ -656,7 +801,7 @@ Write-Host "standalone host linker discovery: $(if ($gccVersionResult.ExitCode -
 Write-Host "host toolchain preflight (space-free prefix): $(if ($freeResult.Success) { 'PASS' } else { 'FAIL' })"
 Write-Host "curated native examples: $(if ($script:FailureCount -eq 0) { 'PASS' } else { 'SEE ABOVE' })"
 if ($VsixPath -and $VSCodeZipPath) {
-    Write-Host "VSIX installation: $(if ($listResult -and $listResult.Stdout -match 'kai-language@') { 'PASS' } else { 'FAIL' })"
+    Write-Host "VSIX installation: $(if ($listResult -and $vsixInfo -and $listResult.Stdout -match [regex]::Escape($vsixInfo.ExpectedId)) { 'PASS' } else { 'FAIL' })"
 } else {
     Write-Host 'VSIX installation: documented limitation (not attempted this invocation)'
 }
