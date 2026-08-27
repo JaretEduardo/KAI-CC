@@ -6,7 +6,7 @@
 # threat model this enforces (and, explicitly, does not yet enforce).
 #
 # Usage:
-#   sandbox-exec.sh <trial-id> [--root DIR] -- <command> [args...]
+#   sandbox-exec.sh <trial-id> [--root DIR] [--timeout SECONDS] -- <command> [args...]
 #
 # <trial-id> must correspond to a directory already prepared by
 # prepare-isolated-trial.sh under <root> (default
@@ -15,6 +15,18 @@
 # Only <root>/<trial-id>/workspace is ever bind-mounted into the
 # container - host/orchestration.json and the repository itself are never
 # visible inside the sandbox.
+#
+# --timeout SECONDS (optional, default: none - <command> runs to
+# completion exactly as before): if <command> has not finished within
+# SECONDS, the CONTAINER ITSELF is killed by name via the engine's own
+# `kill` (never merely by killing this script's own client process).
+# Killing only the client process was found NOT to stop the container -
+# podman/docker detach the running container from its own attached CLI
+# process (via conmon), so a plain `timeout`-wrapped or subprocess-killed
+# client leaves the container running as an orphan indefinitely. This
+# flag exists specifically so agent/orchestrator.py's `run` tool can
+# enforce a real, verified timeout on a non-terminating compiled KAI
+# program without ever leaking a container.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +40,7 @@ source "${SCRIPT_DIR}/isolation/container-engine.sh"
 source "${SCRIPT_DIR}/isolation/trial-id.sh"
 
 usage() {
-    echo "usage: sandbox-exec.sh <trial-id> [--root DIR] -- <command> [args...]" >&2
+    echo "usage: sandbox-exec.sh <trial-id> [--root DIR] [--timeout SECONDS] -- <command> [args...]" >&2
 }
 
 if [[ $# -lt 1 ]]; then
@@ -39,11 +51,20 @@ fi
 TRIAL_ID="$1"
 shift
 ROOT="${KAI_BENCH_ISOLATED_ROOT:-/tmp/kai-ai-native-v1/isolated}"
+RUN_TIMEOUT_SECONDS=""
 
-if [[ "${1:-}" == "--root" ]]; then
-    ROOT="$2"
-    shift 2
-fi
+while [[ "${1:-}" == "--root" || "${1:-}" == "--timeout" ]]; do
+    case "$1" in
+        --root)
+            ROOT="$2"
+            shift 2
+            ;;
+        --timeout)
+            RUN_TIMEOUT_SECONDS="$2"
+            shift 2
+            ;;
+    esac
+done
 
 if [[ "${1:-}" != "--" ]]; then
     echo "error: expected '--' before the command to run" >&2
@@ -90,7 +111,39 @@ echo "==> Building sandbox image (${IMAGE_TAG})" >&2
 #   --env ...                     an explicit allowlist of environment
 #                                  variables - no host environment is
 #                                  forwarded implicitly
-exec "${ENGINE}" run --rm \
+if [[ -z "${RUN_TIMEOUT_SECONDS}" ]]; then
+    exec "${ENGINE}" run --rm \
+        "${ENGINE_USER_ARGS[@]}" \
+        --network=none \
+        --cap-drop=ALL \
+        --security-opt=no-new-privileges \
+        --read-only \
+        --tmpfs /tmp:rw,size=64m,mode=1777 \
+        --tmpfs /home/sandbox:rw,size=16m,mode=1777 \
+        --env LANG=C.UTF-8 \
+        --env LC_ALL=C.UTF-8 \
+        --env PATH=/usr/bin:/bin \
+        --env HOME=/home/sandbox \
+        -v "${WORKSPACE_ABS}:/workspace:Z" \
+        -w /workspace \
+        "${IMAGE_TAG}" \
+        "$@"
+fi
+
+# --timeout path: a named container so a background watcher can kill the
+# CONTAINER ITSELF (not this script's own process) if it runs too long -
+# see this script's own header comment for why that distinction matters.
+CONTAINER_NAME="kai-run-$(date -u +%s)-$$-$(od -An -tx1 -N4 /dev/urandom | tr -d ' \n')"
+
+(
+    sleep "${RUN_TIMEOUT_SECONDS}"
+    "${ENGINE}" kill "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+) &
+WATCHER_PID=$!
+
+set +e
+"${ENGINE}" run --rm \
+    --name "${CONTAINER_NAME}" \
     "${ENGINE_USER_ARGS[@]}" \
     --network=none \
     --cap-drop=ALL \
@@ -106,3 +159,13 @@ exec "${ENGINE}" run --rm \
     -w /workspace \
     "${IMAGE_TAG}" \
     "$@"
+RUN_EXIT=$?
+set -e
+
+# The watcher is only useful while the run is in progress - once we reach
+# here the run has already finished (normally or via the watcher's kill),
+# so stop the watcher if it hasn't fired yet. Never leaves it running.
+kill "${WATCHER_PID}" 2>/dev/null || true
+wait "${WATCHER_PID}" 2>/dev/null || true
+
+exit "${RUN_EXIT}"
