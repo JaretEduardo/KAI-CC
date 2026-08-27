@@ -14,17 +14,34 @@
     Code ZIP) and never downloads anything itself, keeping the actual
     fresh-user smoke logic decoupled from network/CI concerns.
 
-    Everything runs from a FRESH directory under the Windows temp folder
-    whose name deliberately contains a space, entirely outside this
-    repository/any build tree/any MSYS2 installation. Every KAI process
-    (kaicc.exe and the programs it compiles) is launched via
-    System.Diagnostics.Process directly (UseShellExecute=$false, an argv
-    list, never a shell) - the PowerShell equivalent of the extension's own
-    shell-free spawnProcess(). The child's environment is constructed FRESH
-    per invocation from a small, explicit allowlist (see
+    Everything KAI-related (the extracted package, example sources, output
+    executables, VS Code's isolated user-data/extensions dirs) runs from a
+    FRESH directory under the Windows temp folder whose name deliberately
+    contains a space, entirely outside this repository/any build tree/any
+    MSYS2 installation.
+
+    FIRST REAL WINDOWS RUN FINDING (CI PORTABILITY FIX): the first real
+    Windows run found that the standalone WinLibs GCC distribution itself
+    does not tolerate being relocated into an install prefix containing a
+    space (ld.exe split the path at each space) - a limitation of that
+    third-party toolchain, not of KAI. The host toolchain is therefore
+    extracted to a SEPARATE, explicitly space-free location (see
+    Get-SpaceFreeDirectory/-ToolchainWorkDir below); the KAI package
+    itself, its examples, and every output executable still live under
+    the space-containing fresh-user root - this script keeps proving KAI
+    supports spaces, it just stops assuming the third-party toolchain
+    does too.
+
+    Every KAI process (kaicc.exe and the programs it compiles) is
+    launched via System.Diagnostics.Process directly
+    (UseShellExecute=$false, an argv list, never a shell) - the
+    PowerShell equivalent of the extension's own shell-free
+    spawnProcess(). The child's environment is constructed FRESH per
+    invocation from a small, explicit allowlist (see
     New-SanitizedEnvironment below) - the running PowerShell session's own
-    $env:PATH is never mutated, so this script needs no save/restore
-    dance to coexist with later CI steps.
+    $env:PATH is never mutated. Every invocation also requires an
+    EXPLICIT working directory inside the fresh-user tree (never the
+    repository checkout) - see Invoke-Native's repo-cwd guard.
 
 .PARAMETER KaiZipPath
     Path to the real, same-commit portable Windows ZIP
@@ -47,8 +64,17 @@
     Required together with VsixPath for the real isolated VSIX install test.
 
 .PARAMETER WorkDir
-    Optional override for the fresh test directory. If omitted, a unique
-    directory containing a literal space is created under $env:TEMP.
+    Optional override for the fresh, space-containing KAI test directory.
+    If omitted, a unique directory containing a literal space is created
+    under $env:TEMP.
+
+.PARAMETER ToolchainWorkDir
+    Optional override for where the standalone host toolchain is
+    extracted. MUST NOT contain whitespace (validated - see
+    Get-SpaceFreeDirectory). If omitted, a space-free directory is
+    derived automatically from a small set of known-safe roots
+    ($env:SystemDrive, $env:ProgramData, $env:TEMP), each checked
+    explicitly rather than assumed.
 #>
 
 [CmdletBinding()]
@@ -57,13 +83,24 @@ param(
     [Parameter(Mandatory = $true)][string]$ToolchainZipPath,
     [string]$VsixPath = $null,
     [string]$VSCodeZipPath = $null,
-    [string]$WorkDir = $null
+    [string]$WorkDir = $null,
+    [string]$ToolchainWorkDir = $null
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:FailureCount = 0
+
+# CI PORTABILITY FIX (repo-cwd guard, spec §7/§8): recorded BEFORE
+# creating any fresh-user directory - every Invoke-Native call below is
+# checked against this so a KAI user-operation can never silently
+# inherit the repository checkout as its working directory again (the
+# first real Windows run's secondary failure - "cannot find hello.exe" -
+# surfaced only because the compile step had actually run inside
+# D:\a\KAI-CC\KAI-CC, the GitHub Actions checkout).
+$script:ForbiddenCwdRoots = @((Get-Location).Path)
+if ($env:GITHUB_WORKSPACE) { $script:ForbiddenCwdRoots += $env:GITHUB_WORKSPACE }
 
 function Write-Section([string]$Title) {
     Write-Host ''
@@ -100,15 +137,32 @@ function Assert-Equal([string]$Actual, [string]$Expected, [string]$Message) {
 # never PowerShell's text pipeline (which can otherwise reinterpret line
 # endings) - this is what lets Assert-Equal prove KAI's exact LF-only
 # output byte-for-byte, with no normalization anywhere in this script.
+#
+# -WorkingDirectory is MANDATORY (CI PORTABILITY FIX, spec §7/§8): no
+# call site can silently omit it and fall through to inheriting this
+# script's own process cwd. It is additionally checked against
+# $script:ForbiddenCwdRoots - the repository checkout (and
+# $env:GITHUB_WORKSPACE, when set) - and rejected immediately if it
+# matches, so a KAI user-operation running inside the checkout directory
+# is a hard error here, not a silent correctness bug discovered later.
 # ---------------------------------------------------------------------
 function Invoke-Native {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string[]]$ArgumentList = @(),
-        [string]$WorkingDirectory = $null,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)]$Sanitized,
         [hashtable]$ExtraEnv = @{}
     )
+
+    foreach ($forbidden in $script:ForbiddenCwdRoots) {
+        if ($WorkingDirectory.StartsWith($forbidden, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Invoke-Native: refusing to use a working directory under the repository checkout ($forbidden): $WorkingDirectory"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
+        throw "Invoke-Native: working directory does not exist: $WorkingDirectory"
+    }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FilePath
@@ -117,22 +171,20 @@ function Invoke-Native {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
-    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+    $psi.WorkingDirectory = $WorkingDirectory
 
     # ProcessStartInfo.Environment/EnvironmentVariables is pre-populated
     # (by .NET) as a COPY of this PowerShell process's own environment.
     # Deliberately do NOT try to selectively delete unwanted inherited
     # variables from that copy: a local test against the real .NET API
-    # this round showed that approach can leave a stale variable visible
-    # to the child even after Remove() reports success (confirmed via a
-    # standalone repro - see this milestone's report). Instead, clear the
-    # WHOLE inherited environment first and rebuild it from Sanitized.Vars
-    # (an explicit allowlist - see New-SanitizedEnvironment) - this is a
+    # showed that approach can leave a stale variable visible to the
+    # child even after Remove() reports success. Instead, clear the WHOLE
+    # inherited environment first and rebuild it from Sanitized.Vars (an
+    # explicit allowlist - see New-SanitizedEnvironment) - this is a
     # strictly stronger guarantee: nothing can leak through that wasn't
-    # explicitly added back, regardless of any dictionary-removal
-    # semantics on either platform. $env:PATH (and every other real
-    # variable in THIS PowerShell session) is never touched - only the
-    # copy handed to each child process.
+    # explicitly added back. $env:PATH (and every other real variable in
+    # THIS PowerShell session) is never touched - only the copy handed to
+    # each child process.
     $psi.EnvironmentVariables.Clear()
     foreach ($key in $Sanitized.Vars.Keys) { $psi.Environment[$key] = $Sanitized.Vars[$key] }
     foreach ($key in $ExtraEnv.Keys) { $psi.Environment[$key] = $ExtraEnv[$key] }
@@ -168,7 +220,11 @@ function Invoke-Native {
 # directories on PATH) can never leak into the fresh-user process,
 # regardless of what the CI runner or a maintainer's own dev shell
 # happens to have set - there is no scenario where an unlisted variable
-# survives, because nothing survives by default.
+# survives, because nothing survives by default. UNCHANGED by the CI
+# portability fix - the first real Windows run already proved this
+# design works; the WinLibs relocation limitation is a separate concern
+# handled entirely via WHERE the toolchain is extracted (see
+# Get-SpaceFreeDirectory), never by weakening this allowlist.
 #
 # The PATH itself contains only the handful of Windows system
 # directories an ordinary process needs to start at all, plus - once
@@ -210,9 +266,9 @@ function New-SanitizedEnvironment {
     }
 }
 
-function Test-CommandAbsent([string]$CommandName, $Sanitized) {
+function Test-CommandAbsent([string]$CommandName, $Sanitized, [string]$WorkingDirectory) {
     $whereExe = Join-Path $env:SystemRoot 'System32/where.exe'
-    $result = Invoke-Native -FilePath $whereExe -ArgumentList @($CommandName) -Sanitized $Sanitized
+    $result = Invoke-Native -FilePath $whereExe -ArgumentList @($CommandName) -WorkingDirectory $WorkingDirectory -Sanitized $Sanitized
     return ($result.ExitCode -ne 0)
 }
 
@@ -220,6 +276,75 @@ function Find-FileRecursive([string]$Root, [string]$Name) {
     $found = Get-ChildItem -Path $Root -Filter $Name -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $found) { return $null }
     return $found.FullName
+}
+
+# ---------------------------------------------------------------------
+# CI PORTABILITY FIX §3: constructs (or validates) a directory GUARANTEED
+# not to contain whitespace, for the standalone host toolchain only -
+# never assumed, always checked explicitly. Tries a small set of
+# well-known roots that are extremely unlikely to contain spaces
+# (%SystemDrive%\, %ProgramData%, then %TEMP% as a last resort) rather
+# than blindly trusting any single one - a real user's own profile
+# directory name (e.g. "C:\Users\John Doe\...") could otherwise
+# reintroduce exactly the bug this fix exists to avoid. Fails clearly if
+# none of them can be established as space-free, rather than silently
+# proceeding into the same failure mode observed on the first real
+# Windows run.
+# ---------------------------------------------------------------------
+function Get-SpaceFreeDirectory {
+    param([string]$PreferredPath = $null)
+
+    if ($PreferredPath) {
+        if ($PreferredPath -match '\s') {
+            throw "-ToolchainWorkDir must not contain whitespace: $PreferredPath"
+        }
+        New-Item -ItemType Directory -Path $PreferredPath -Force | Out-Null
+        return (Resolve-Path -LiteralPath $PreferredPath).Path
+    }
+
+    $candidateRoots = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemDrive)) { $candidateRoots += ($env:SystemDrive + '\') }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $candidateRoots += $env:ProgramData }
+    if (-not [string]::IsNullOrWhiteSpace($env:TEMP)) { $candidateRoots += $env:TEMP }
+    foreach ($root in $candidateRoots) {
+        if ($root -match '\s') { continue }
+        $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $candidate = Join-Path $root "kai-fresh-user-toolchain-$suffix"
+        if ($candidate -notmatch '\s') {
+            New-Item -ItemType Directory -Path $candidate -Force | Out-Null
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    throw 'Get-SpaceFreeDirectory: could not construct a space-free directory for the host toolchain from any known root (SystemDrive/ProgramData/TEMP) - pass -ToolchainWorkDir explicitly.'
+}
+
+# ---------------------------------------------------------------------
+# CI PORTABILITY FIX §5: compiles a trivial C program through the given
+# gcc.exe - used both as the root-cause A/B experiment (spaced vs
+# space-free toolchain prefix) and as the mandatory host-toolchain
+# preflight before any real KAI compilation. Deliberately compiles/links
+# from a caller-supplied WorkingDirectory (which MAY itself contain a
+# space, proving that only the TOOLCHAIN's own install prefix needs to
+# be space-free - its input/output/cwd do not).
+# ---------------------------------------------------------------------
+function Test-TrivialCCompile {
+    param(
+        [Parameter(Mandatory = $true)][string]$GccPath,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)]$Sanitized
+    )
+    $srcPath = Join-Path $WorkingDirectory 'kai_preflight.c'
+    $outputPath = Join-Path $WorkingDirectory 'kai_preflight'
+    $exePath = "$outputPath.exe"
+    Remove-Item -LiteralPath $exePath -ErrorAction SilentlyContinue
+    Set-Content -LiteralPath $srcPath -Value 'int main(void) { return 0; }' -NoNewline
+
+    $result = Invoke-Native -FilePath $GccPath -ArgumentList @($srcPath, '-o', $outputPath) -WorkingDirectory $WorkingDirectory -Sanitized $Sanitized
+    $success = ($result.ExitCode -eq 0) -and (Test-Path -LiteralPath $exePath -PathType Leaf)
+
+    Remove-Item -LiteralPath $srcPath, $exePath -ErrorAction SilentlyContinue
+
+    [PSCustomObject]@{ Success = $success; ExitCode = $result.ExitCode; Stderr = $result.Stderr }
 }
 
 # ======================================================================
@@ -244,17 +369,21 @@ if ($VsixPath) {
 }
 
 # ======================================================================
-# 1. Fresh directory OUTSIDE the repo/build tree/MSYS2, path with a space
-#    (spec §4/§19/§20)
+# 1. Fresh KAI directory OUTSIDE the repo/build tree/MSYS2, path with a
+#    space (spec §4/§19/§20) - this is the tree that MUST keep proving
+#    KAI supports spaces; only the host toolchain (below) moves elsewhere.
 # ======================================================================
-Write-Section 'Creating fresh test directory (outside repo/build/MSYS2, path contains a space)'
+Write-Section 'Creating fresh KAI test directory (outside repo/build/MSYS2, path contains a space)'
 if (-not $WorkDir) {
     $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
     $WorkDir = Join-Path $env:TEMP "KAI Fresh User $suffix"
 }
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
 Write-Host "  WorkDir: $WorkDir"
-Assert-True ($WorkDir -match ' ') 'fresh test directory path contains a space'
+Assert-True ($WorkDir -match ' ') 'KAI fresh-user root contains a space'
+foreach ($forbidden in $script:ForbiddenCwdRoots) {
+    Assert-True (-not $WorkDir.StartsWith($forbidden, [System.StringComparison]::OrdinalIgnoreCase)) "KAI fresh-user root is not under the repository checkout ($forbidden)"
+}
 
 # ======================================================================
 # 2. Extract the KAI ZIP using ordinary Windows facilities (spec §6)
@@ -264,6 +393,7 @@ $kaiExtractRoot = Join-Path $WorkDir 'kai-zip'
 Expand-Archive -LiteralPath $KaiZipPath -DestinationPath $kaiExtractRoot -Force
 $kaiRoot = Join-Path $kaiExtractRoot 'kai-windows-x86_64'
 Assert-True (Test-Path -LiteralPath $kaiRoot -PathType Container) 'archive root kai-windows-x86_64/ exists after extraction'
+$examplesDir = Join-Path $kaiRoot 'examples'
 
 $kaiccExe = Join-Path $kaiRoot 'bin/kaicc.exe'
 $runtimeArchive = Join-Path $kaiRoot 'lib/kai/libkai_runtime.a'
@@ -274,10 +404,10 @@ foreach ($check in @(
         @{ Path = $runtimeArchive; Label = 'lib/kai/libkai_runtime.a' },
         @{ Path = (Join-Path $kaiRoot 'LICENSE'); Label = 'LICENSE' },
         @{ Path = (Join-Path $kaiRoot 'THIRD_PARTY_NOTICES.md'); Label = 'THIRD_PARTY_NOTICES.md' },
-        @{ Path = (Join-Path $kaiRoot 'examples/hello.kai'); Label = 'examples/hello.kai' },
-        @{ Path = (Join-Path $kaiRoot 'examples/functions.kai'); Label = 'examples/functions.kai' },
-        @{ Path = (Join-Path $kaiRoot 'examples/conditions.kai'); Label = 'examples/conditions.kai' },
-        @{ Path = (Join-Path $kaiRoot 'examples/variables.kai'); Label = 'examples/variables.kai' }
+        @{ Path = (Join-Path $examplesDir 'hello.kai'); Label = 'examples/hello.kai' },
+        @{ Path = (Join-Path $examplesDir 'functions.kai'); Label = 'examples/functions.kai' },
+        @{ Path = (Join-Path $examplesDir 'conditions.kai'); Label = 'examples/conditions.kai' },
+        @{ Path = (Join-Path $examplesDir 'variables.kai'); Label = 'examples/variables.kai' }
     )) {
     if (-not (Test-Path -LiteralPath $check.Path -PathType Leaf)) {
         throw "malformed KAI release archive: expected file missing: $($check.Label)"
@@ -292,20 +422,65 @@ foreach ($dll in $requiredDlls) {
 Write-Host '  archive layout OK: kaicc.exe, libkai_runtime.a, 5 DLLs, legal files, curated examples all present'
 
 # ======================================================================
-# 3. Extract the independently-obtained host toolchain (never the KAI
-#    build's own MSYS2 environment - spec §11/§16)
+# 3. Root-cause investigation (CI PORTABILITY FIX spec §1): does the
+#    standalone WinLibs toolchain tolerate a space-containing install
+#    prefix, or not? Reproduced directly with gcc.exe - no KAI involved
+#    at all - BEFORE trusting the space-free relocation "fix" below.
 # ======================================================================
-Write-Section 'Extracting the independently-obtained host toolchain'
-$toolchainRoot = Join-Path $WorkDir 'Host Toolchain'
-Expand-Archive -LiteralPath $ToolchainZipPath -DestinationPath $toolchainRoot -Force
-$gccPath = Find-FileRecursive -Root $toolchainRoot -Name 'gcc.exe'
+Write-Section 'Investigation: does the host toolchain tolerate a space-containing install prefix?'
+$diagnosticSpacedRoot = Join-Path $WorkDir 'Toolchain Diagnostic With Spaces'
+Expand-Archive -LiteralPath $ToolchainZipPath -DestinationPath $diagnosticSpacedRoot -Force
+$diagnosticSpacedGcc = Find-FileRecursive -Root $diagnosticSpacedRoot -Name 'gcc.exe'
+if (-not $diagnosticSpacedGcc) {
+    throw 'invalid host toolchain archive: gcc.exe not found anywhere under the extracted tree (spaced-prefix diagnostic copy)'
+}
+
+$toolchainWorkDir = Get-SpaceFreeDirectory -PreferredPath $ToolchainWorkDir
+Expand-Archive -LiteralPath $ToolchainZipPath -DestinationPath $toolchainWorkDir -Force
+$gccPath = Find-FileRecursive -Root $toolchainWorkDir -Name 'gcc.exe'
 if (-not $gccPath) {
-    throw 'invalid host toolchain archive: gcc.exe not found anywhere under the extracted tree'
+    throw 'invalid host toolchain archive: gcc.exe not found anywhere under the extracted tree (space-free copy)'
 }
 $toolchainBinDir = Split-Path -Parent $gccPath
-Write-Host "  gcc.exe found at: $gccPath"
+Write-Host "  gcc.exe (space-free copy) found at: $gccPath"
 Assert-True ($toolchainBinDir -notlike '*msys64*' -and $toolchainBinDir -notlike '*ucrt64*') `
     'host toolchain path does not come from an MSYS2 tree (genuinely independent)'
+Assert-True ($toolchainWorkDir -notmatch '\s') 'host toolchain install prefix contains no whitespace'
+
+# Both diagnostic compiles deliberately run from the SAME (space-
+# containing) working directory - the only variable being isolated here
+# is the toolchain's OWN install prefix, not where it compiles/links.
+$diagnosticWorkArea = Join-Path $WorkDir 'preflight area'
+New-Item -ItemType Directory -Path $diagnosticWorkArea -Force | Out-Null
+$sanitizedForDiagnostic = New-SanitizedEnvironment -ToolchainBinDir $toolchainBinDir
+
+$spacedResult = Test-TrivialCCompile -GccPath $diagnosticSpacedGcc -WorkingDirectory $diagnosticWorkArea -Sanitized $sanitizedForDiagnostic
+Write-Host "  direct gcc compile, toolchain prefix CONTAINS a space: $(if ($spacedResult.Success) { 'SUCCESS' } else { 'FAILED' })"
+if (-not $spacedResult.Success) { Write-Host "    stderr: $($spacedResult.Stderr.Trim())" }
+
+Write-Section 'Host toolchain preflight (self-compile check, space-free prefix - spec §5)'
+$freeResult = Test-TrivialCCompile -GccPath $gccPath -WorkingDirectory $diagnosticWorkArea -Sanitized $sanitizedForDiagnostic
+Write-Host "  direct gcc compile, toolchain prefix is space-free: $(if ($freeResult.Success) { 'SUCCESS' } else { 'FAILED' })"
+if (-not $freeResult.Success) { Write-Host "    stderr: $($freeResult.Stderr.Trim())" }
+
+Remove-Item -LiteralPath $diagnosticSpacedRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+if ($spacedResult.Success) {
+    Write-Host ''
+    Write-Host 'UNEXPECTED: the standalone host toolchain compiled successfully even from a'
+    Write-Host 'space-containing install prefix. This contradicts the working hypothesis from'
+    Write-Host 'the first real Windows run (ld.exe path-splitting on the toolchain''s own'
+    Write-Host 'prefix). STOPPING here rather than assuming the space-prefix explanation -'
+    Write-Host 'the earlier failure needs further investigation before trusting this fix.'
+    exit 1
+}
+if (-not $freeResult.Success) {
+    throw "Selected host toolchain is not self-functional in its current installation path/environment, even from a space-free prefix - this is a DIFFERENT problem than the one previously observed. stderr: $($freeResult.Stderr.Trim())"
+}
+Write-Host ''
+Write-Host '  CONFIRMED: the standalone host toolchain requires a space-free install prefix'
+Write-Host '  (this is the root cause of the first real Windows run''s failure - a limitation'
+Write-Host '  of the third-party toolchain distribution, not of KAI).'
 
 # ======================================================================
 # 4. Sanitized environment WITHOUT the host toolchain yet (spec §7/§8)
@@ -313,33 +488,34 @@ Assert-True ($toolchainBinDir -notlike '*msys64*' -and $toolchainBinDir -notlike
 $sanitizedNoToolchain = New-SanitizedEnvironment
 Write-Section 'Dev-tool absence check (sanitized PATH, before adding the host toolchain)'
 foreach ($cmd in @('llvm-config', 'cmake', 'ninja', 'bash', 'clang', 'gcc', 'cc')) {
-    Assert-True (Test-CommandAbsent -CommandName $cmd -Sanitized $sanitizedNoToolchain) "'$cmd' is NOT resolvable in the sanitized environment"
+    Assert-True (Test-CommandAbsent -CommandName $cmd -Sanitized $sanitizedNoToolchain -WorkingDirectory $kaiRoot) "'$cmd' is NOT resolvable in the sanitized environment"
 }
 Assert-True ($sanitizedNoToolchain.Vars.Path -notmatch '(?i)mingw|ucrt64|msys64') 'sanitized PATH contains no MSYS2/MinGW dev-environment directory'
 
 # ======================================================================
 # 5. kaicc.exe starts and answers semantic queries with NO host linker
 #    exposed at all (spec §9/§10/§21 - the most important portability
-#    statement this milestone makes)
+#    statement this milestone makes). All run with cwd=$kaiRoot - inside
+#    the extracted package, never the repository checkout.
 # ======================================================================
 Write-Section 'kaicc.exe startup WITHOUT any host toolchain on PATH'
-$versionResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('--version') -Sanitized $sanitizedNoToolchain
+$versionResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('--version') -WorkingDirectory $kaiRoot -Sanitized $sanitizedNoToolchain
 Assert-True ($versionResult.ExitCode -eq 0) 'kaicc.exe --version exits 0 with no host toolchain present'
 Assert-True ($versionResult.Stdout -match '^KAI-CC 0\.1\.0-alpha\.1') "kaicc.exe --version reports the expected 'KAI-CC 0.1.0-alpha.1' (got: $($versionResult.Stdout.Trim()))"
 
-$helpResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('--help') -Sanitized $sanitizedNoToolchain
+$helpResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('--help') -WorkingDirectory $kaiRoot -Sanitized $sanitizedNoToolchain
 Assert-True ($helpResult.ExitCode -eq 0) 'kaicc.exe --help exits 0 with no host toolchain present'
 Assert-True ($helpResult.Stdout.Length -gt 0) 'kaicc.exe --help produced non-empty output'
 
 Write-Section 'Semantic tooling WITHOUT any host linker (no native link needed)'
-$functionsKai = Join-Path $kaiRoot 'examples/functions.kai'
-$inspectResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('inspect', $functionsKai, '--json') -Sanitized $sanitizedNoToolchain
+$functionsKai = Join-Path $examplesDir 'functions.kai'
+$inspectResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('inspect', $functionsKai, '--json') -WorkingDirectory $kaiRoot -Sanitized $sanitizedNoToolchain
 Assert-True ($inspectResult.ExitCode -eq 0 -and $inspectResult.Stdout -match '"kind":"function"') 'kaicc.exe inspect works without a host linker'
 
-$referencesResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('references', $functionsKai, '--line', '15', '--column', '13', '--json') -Sanitized $sanitizedNoToolchain
+$referencesResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('references', $functionsKai, '--line', '15', '--column', '13', '--json') -WorkingDirectory $kaiRoot -Sanitized $sanitizedNoToolchain
 Assert-True ($referencesResult.ExitCode -eq 0 -and $referencesResult.Stdout -match '"line"') 'kaicc.exe references works without a host linker'
 
-$callGraphResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('call-graph', $functionsKai, '--json') -Sanitized $sanitizedNoToolchain
+$callGraphResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('call-graph', $functionsKai, '--json') -WorkingDirectory $kaiRoot -Sanitized $sanitizedNoToolchain
 Assert-True ($callGraphResult.ExitCode -eq 0 -and $callGraphResult.Stdout -match '"add"') 'kaicc.exe call-graph works without a host linker'
 
 # ======================================================================
@@ -347,9 +523,9 @@ Assert-True ($callGraphResult.ExitCode -eq 0 -and $callGraphResult.Stdout -match
 #    before installing any toolchain at all
 # ======================================================================
 Write-Section 'Missing-linker diagnostic (deliberately no toolchain on PATH)'
-$helloKai = Join-Path $kaiRoot 'examples/hello.kai'
+$helloKai = Join-Path $examplesDir 'hello.kai'
 $missingLinkerOut = Join-Path $WorkDir 'hello-no-linker'
-$missingLinkerResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @($helloKai, '-o', $missingLinkerOut) -Sanitized $sanitizedNoToolchain
+$missingLinkerResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @($helloKai, '-o', $missingLinkerOut) -WorkingDirectory $kaiRoot -Sanitized $sanitizedNoToolchain
 Assert-True ($missingLinkerResult.ExitCode -eq 9) "compiling without a host linker fails with the documented exit code 9 (got $($missingLinkerResult.ExitCode))"
 Assert-True ($missingLinkerResult.Stderr -match 'no usable host C compiler driver') 'missing-linker stderr names the real problem clearly'
 Assert-True ($missingLinkerResult.Stderr -notmatch [regex]::Escape($WorkDir) ) 'missing-linker stderr does not leak the fresh-user temp path'
@@ -361,23 +537,37 @@ Assert-True (-not (Test-Path -LiteralPath "$missingLinkerOut.exe")) 'no partial/
 # ======================================================================
 $sanitizedWithToolchain = New-SanitizedEnvironment -ToolchainBinDir $toolchainBinDir
 Write-Section 'Standalone host toolchain now on PATH'
-$gccVersionResult = Invoke-Native -FilePath $gccPath -ArgumentList @('--version') -Sanitized $sanitizedWithToolchain
+$gccVersionResult = Invoke-Native -FilePath $gccPath -ArgumentList @('--version') -WorkingDirectory $kaiRoot -Sanitized $sanitizedWithToolchain
 $gccVersionLine = ($gccVersionResult.Stdout -split "`n")[0].Trim()
 Write-Host "  selected linker: $gccPath"
 Write-Host "  selected linker version: $gccVersionLine"
 
+# CI PORTABILITY FIX spec §6: compile and run are now two clearly
+# separate phases - if compile does not genuinely succeed (exit 0 AND
+# the .exe actually exists), the function returns immediately WITHOUT
+# attempting to launch the (nonexistent) executable. The earlier
+# cascading "cannot find hello.exe" secondary failure - which obscured
+# the real compiler error in the first real Windows run's log - cannot
+# recur: the real failure is reported once, clearly, and nothing else is
+# attempted for that example.
 function Invoke-CuratedExample([string]$Name, [string]$ExpectedStdout, $Sanitized, [hashtable]$ExtraEnv = @{}) {
-    $sourcePath = Join-Path $kaiRoot "examples/$Name"
+    $sourcePath = Join-Path $examplesDir $Name
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($Name)
-    $outputPath = Join-Path $kaiRoot "examples/$baseName"
+    $outputPath = Join-Path $examplesDir $baseName
     $exePath = "$outputPath.exe"
     Remove-Item -LiteralPath $exePath -ErrorAction SilentlyContinue
 
-    $compileResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @($sourcePath, '-o', $outputPath) -Sanitized $Sanitized -ExtraEnv $ExtraEnv
+    $compileResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @($sourcePath, '-o', $outputPath) -WorkingDirectory $examplesDir -Sanitized $Sanitized -ExtraEnv $ExtraEnv
+    $compileSucceeded = ($compileResult.ExitCode -eq 0) -and (Test-Path -LiteralPath $exePath -PathType Leaf)
     Assert-True ($compileResult.ExitCode -eq 0) "$Name compiles (exit 0) - stderr: $($compileResult.Stderr.Trim())"
     Assert-True (Test-Path -LiteralPath $exePath -PathType Leaf) "$baseName.exe was produced at the expected path"
 
-    $runResult = Invoke-Native -FilePath $exePath -ArgumentList @() -Sanitized $Sanitized
+    if (-not $compileSucceeded) {
+        Write-Host "  SKIPPING run of $baseName.exe - compile did not succeed (fail-fast; see stderr above)"
+        return
+    }
+
+    $runResult = Invoke-Native -FilePath $exePath -ArgumentList @() -WorkingDirectory $examplesDir -Sanitized $Sanitized
     Assert-True ($runResult.ExitCode -eq 0) "$baseName.exe exits 0"
     Assert-Equal $runResult.Stdout $ExpectedStdout "$baseName.exe produces the exact expected LF-only stdout"
 
@@ -431,11 +621,11 @@ if ($VsixPath -and $VSCodeZipPath) {
         # anywhere in this script - only this one third-party CLI wrapper.
         $cmdExe = Join-Path $env:SystemRoot 'System32/cmd.exe'
         $installArgs = @('/c', $codeCmd, '--user-data-dir', $userDataDir, '--extensions-dir', $extensionsDir, '--install-extension', $VsixPath, '--force')
-        $installResult = Invoke-Native -FilePath $cmdExe -ArgumentList $installArgs -Sanitized $sanitizedNoToolchain
+        $installResult = Invoke-Native -FilePath $cmdExe -ArgumentList $installArgs -WorkingDirectory $WorkDir -Sanitized $sanitizedNoToolchain
         Assert-True ($installResult.ExitCode -eq 0) "VSIX installed into an isolated --user-data-dir/--extensions-dir (exit $($installResult.ExitCode))"
 
         $listArgs = @('/c', $codeCmd, '--user-data-dir', $userDataDir, '--extensions-dir', $extensionsDir, '--list-extensions', '--show-versions')
-        $listResult = Invoke-Native -FilePath $cmdExe -ArgumentList $listArgs -Sanitized $sanitizedNoToolchain
+        $listResult = Invoke-Native -FilePath $cmdExe -ArgumentList $listArgs -WorkingDirectory $WorkDir -Sanitized $sanitizedNoToolchain
         Assert-True ($listResult.Stdout -match 'kai-language@') "installed extension appears in --list-extensions --show-versions (output: $($listResult.Stdout.Trim()))"
     }
 } else {
@@ -447,7 +637,10 @@ if ($VsixPath -and $VSCodeZipPath) {
 }
 
 # ======================================================================
-# Summary (spec §42) - concise, no marketing claims
+# Summary (spec §42, extended by CI PORTABILITY FIX spec §11) - concise,
+# no marketing claims. Explicitly distinguishes the KAI fresh-user root
+# (spaces supported) from the host toolchain prefix (must be space-free)
+# rather than a single blended "paths with spaces" claim.
 # ======================================================================
 Write-Host ''
 if ($script:FailureCount -eq 0) {
@@ -460,13 +653,15 @@ Write-Host "compiler startup without dev environment: $(if ($versionResult.ExitC
 Write-Host "semantic tooling without linker: $(if ($inspectResult.ExitCode -eq 0 -and $referencesResult.ExitCode -eq 0 -and $callGraphResult.ExitCode -eq 0) { 'PASS' } else { 'FAIL' })"
 Write-Host "missing-linker diagnostic: $(if ($missingLinkerResult.ExitCode -eq 9) { 'PASS' } else { 'FAIL' })"
 Write-Host "standalone host linker discovery: $(if ($gccVersionResult.ExitCode -eq 0) { 'PASS' } else { 'FAIL' })"
+Write-Host "host toolchain preflight (space-free prefix): $(if ($freeResult.Success) { 'PASS' } else { 'FAIL' })"
 Write-Host "curated native examples: $(if ($script:FailureCount -eq 0) { 'PASS' } else { 'SEE ABOVE' })"
 if ($VsixPath -and $VSCodeZipPath) {
     Write-Host "VSIX installation: $(if ($listResult -and $listResult.Stdout -match 'kai-language@') { 'PASS' } else { 'FAIL' })"
 } else {
     Write-Host 'VSIX installation: documented limitation (not attempted this invocation)'
 }
-Write-Host 'paths with spaces: PASS (entire test tree lived under a space-containing path)'
+Write-Host "KAI fresh-user root contains spaces: $(if ($WorkDir -match ' ') { 'PASS' } else { 'FAIL' })"
+Write-Host "host toolchain prefix contains spaces: $(if ($toolchainWorkDir -match '\s') { 'YES (unexpected)' } else { 'NO' })"
 Write-Host ''
 Write-Host "KAI Windows ZIP size: $kaiZipSizeMb MB"
 if ($VsixPath) { Write-Host "KAI Windows VSIX size: $vsixSizeMb MB" }
