@@ -75,7 +75,8 @@ compiles and runs the same way, printing `Hello` then `KAI`.
 
 **Expressions/statements:** literals, `let` (immutable) and `mut` (mutable) bindings, arithmetic, comparisons,
 logical `&&`/`||` (short-circuit), assignment, function calls, recursion, `if`/`else if`/`else`, `while`,
-explicit `return`.
+`for i in start..end` over a half-open integer range (KAI LANGUAGE M6, post-alpha.2 - see "Current limitations"
+below for exactly what `for` does *not* yet cover), explicit `return`.
 
 **Text:** string literals, explicit `str` local annotations, `str` function parameters and return types, and
 `print(str)`. `str` values (including those containing an embedded `\0` byte, which is valid UTF-8) are
@@ -302,10 +303,14 @@ design/future sketches that don't compile with the current backend yet.
 
 ## Current limitations
 
-Parses and/or type-checks in some form, but explicitly **not** backend-lowerable yet:
+`for i in start..end` over a half-open integer range is real, native, executable code (KAI LANGUAGE M6,
+post-alpha.2 - both endpoints must be the same concrete integer type, following the same contextual-literal-
+adaptation rules as arithmetic; no implicit widening/narrowing). KAI 0.1 still has no general iteration
+protocol, though: `for x in someCollection` over anything other than a literal `start..end` range is rejected
+as a semantic error, not silently ignored. Also parses and/or type-checks in some form, but explicitly **not**
+backend-lowerable yet:
 
-- `for` loops (LLVM code generation is not implemented)
-- arrays/slices as function parameter, return, or local types
+- arrays/slices as function parameter, return, or local types (and therefore `for` iteration over one)
 - structs, enums, generics, traits
 - `Result`, general references (`&T`), and advanced ownership/borrowing
 - an owned, dynamic `String` type (`str` today is a `Copy`, immutable, non-owning view only)

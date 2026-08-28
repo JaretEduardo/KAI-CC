@@ -38,6 +38,16 @@ enum class SemanticErrorKind : std::uint8_t {
     /// owned `String`/borrowed-view mechanism and a real return-provenance
     /// analysis can replace it (see TypeChecker.cpp's checkReturnStmt()).
     UnsupportedStrReturn,
+
+    /// KAI LANGUAGE M6 (`for` + integer ranges): a `for` statement's
+    /// iterable is not a literal `start..end` range expression (the
+    /// only iterable form M6 supports - see TypeChecker.cpp's
+    /// checkForStmt()). KAI 0.1 has no general iterable protocol/arrays/
+    /// iterators yet, so any other iterable shape (a bare identifier, a
+    /// literal, a call, ...) is rejected here explicitly rather than
+    /// silently left Unresolved and deferred to a confusing backend
+    /// failure later.
+    UnsupportedForIterable,
 };
 
 /// A minimal, message-free description of a semantic failure - the

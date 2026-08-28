@@ -300,7 +300,14 @@ void testWhileTrueReturnStillMissingReturn() {
 
 void testForReturnStillMissingReturn() {
     SourceManager sm;
-    Checked result = analyzeAndCheck(sm, "fn f(items: i32) -> i64 {\n    for item in items {\n        return 1\n    }\n}");
+    // KAI LANGUAGE M6: the iterable must be a literal integer range (a
+    // bare `items` identifier is now its own separate
+    // UnsupportedForIterable error) - `0..items` preserves this test's
+    // actual intent (a `for` loop can never be proven to execute even
+    // once, so a `return` only inside its body still leaves the
+    // function's return incomplete) without introducing an unrelated
+    // second error.
+    Checked result = analyzeAndCheck(sm, "fn f(items: i32) -> i64 {\n    for item in 0..items {\n        return 1\n    }\n}");
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
         return;

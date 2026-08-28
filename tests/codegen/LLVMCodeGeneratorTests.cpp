@@ -268,14 +268,21 @@ void testUnsupportedConstructDoesNotLeakAcrossGenerateCalls() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
 
-    // (1) a `for` statement sets unsupportedConstruct() on this call.
-    Generated first = compileToLLVM(sm, codegen, "fn main() {\n    for i in 0..3 {\n        print(i)\n    }\n}");
+    // (1) an unsupported (array/slice) RETURN type sets
+    // unsupportedConstruct() on this call. KAI LANGUAGE M6: `for`
+    // statements are no longer usable for this - a supported integer-
+    // range `for` now lowers successfully (see the M6 test group below),
+    // and an unsupported iterable shape is rejected by TypeChecker
+    // (SemanticErrorKind::UnsupportedForIterable) before codegen ever
+    // runs, so it can no longer exercise THIS unsupported-construct path
+    // either.
+    Generated first = compileToLLVM(sm, codegen, "fn f() -> [i32] {\n    return 0\n}");
     KAI_CHECK(first.model.errors().empty());
     KAI_CHECK(!first.generationSucceeded);
     KAI_CHECK(codegen.unsupportedConstruct().has_value());
     if (codegen.unsupportedConstruct().has_value()) {
         KAI_CHECK(codegen.unsupportedConstruct()->description ==
-                  "code generation is not yet supported for 'for' statements");
+                  "code generation is not yet supported for this function's return type");
     }
 
     // (2) a SUCCESSFUL, unrelated generate() call afterward must clear it
@@ -2253,18 +2260,243 @@ void testShadowingInsideIfBranch() {
 
 // FAILURE
 
-void testForStmtStillFailsCleanly() {
+// RETARGETED (KAI LANGUAGE M6): this test's original premise ("every
+// `for` statement fails codegen cleanly because iteration lowering does
+// not exist") is superseded outright by M6, which lowers a supported
+// integer-range `for` (see the M6 test group below). The one remaining
+// "still fails cleanly" shape M6 explicitly requires (spec #5) is
+// assignment TO THE LOOP VARIABLE ITSELF - SemanticAnalyzer declares it
+// immutable, so this is rejected at the FRONTEND
+// (AssignmentToImmutableBinding), before codegen ever runs; there is no
+// separate for-variable-specific diagnostic.
+void testForLoopVariableAssignmentFailsCleanly() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
-    Generated result =
-        compileToLLVM(sm, codegen, "fn f() -> i64 {\n    mut x: i64 = 0\n    for i in 0..10 {\n        x = i\n    }\n\n    return x\n}");
+    Generated result = compileToLLVM(sm, codegen, "fn f() -> i64 {\n    for i in 0..10 {\n        i = i + 1\n    }\n\n    return 0\n}");
 
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
         return;
     }
-    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.model.errors().size() == 1);
+    if (result.model.errors().size() == 1) {
+        KAI_CHECK(result.model.errors()[0].kind == kai::semantic::SemanticErrorKind::AssignmentToImmutableBinding);
+    }
     KAI_CHECK(!result.generationSucceeded);
+}
+
+// --- KAI LANGUAGE M6 (post-alpha.2, distinct from the LLVM codegen
+// milestone numbering elsewhere in this file): `for` + integer ranges ---
+
+// Structural CFG check, same technique as testWhileMutableCounterLoop():
+// a condition block ending in a conditional branch, a body block ending
+// in an unconditional back-edge to the condition block, and exactly one
+// conditional branch in the whole function (never relies on exact block
+// names, since LLVM may rename/uniquify them).
+void testForLoopBasicCFGStructure() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    for i in 0..3 {\n        print(i)\n    }\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    KAI_CHECK(!llvm::verifyModule(module));
+
+    const llvm::Function* fn = module.getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    const llvm::BasicBlock* conditionBlock = nullptr;
+    int condBrCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        if (const auto* br = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator())) {
+            if (br->isConditional()) {
+                conditionBlock = &block;
+                ++condBrCount;
+            }
+        }
+    }
+    KAI_CHECK(condBrCount == 1);
+    KAI_CHECK(conditionBlock != nullptr);
+    if (conditionBlock == nullptr) {
+        return;
+    }
+
+    bool sawBackEdge = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        if (const auto* br = llvm::dyn_cast<llvm::BranchInst>(block.getTerminator())) {
+            if (!br->isConditional() && br->getSuccessor(0) == conditionBlock) {
+                sawBackEdge = true;
+            }
+        }
+    }
+    KAI_CHECK(sawBackEdge);
+}
+
+// Signed element type (i32, the literal default) must compare via
+// CreateICmpSLT, never the unsigned predicate.
+void testForLoopSignedRangeUsesSignedComparison() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    for i in 0..3 {\n        print(i)\n    }\n}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    bool sawSignedLess = false;
+    bool sawUnsignedLess = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                sawSignedLess |= cmp->getPredicate() == llvm::ICmpInst::ICMP_SLT;
+                sawUnsignedLess |= cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT;
+            }
+        }
+    }
+    KAI_CHECK(sawSignedLess);
+    KAI_CHECK(!sawUnsignedLess);
+}
+
+// Unsigned element type (u32, via two explicitly-typed locals) must
+// compare via CreateICmpULT, never the signed predicate.
+void testForLoopUnsignedRangeUsesUnsignedComparison() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let start: u32 = 0\n"
+                                      "    let end: u32 = 3\n"
+                                      "    for i in start..end {\n"
+                                      "        print(i)\n"
+                                      "    }\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    bool sawSignedLess = false;
+    bool sawUnsignedLess = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                sawSignedLess |= cmp->getPredicate() == llvm::ICmpInst::ICMP_SLT;
+                sawUnsignedLess |= cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT;
+            }
+        }
+    }
+    KAI_CHECK(sawUnsignedLess);
+    KAI_CHECK(!sawSignedLess);
+}
+
+// M6 spec #1/#2/#12: `start`/`end` are each evaluated EXACTLY ONCE, in
+// the preheader - never re-lowered inside the loop. Structural proof (as
+// distinct from the observable-side-effect native integration test
+// below): a call to a side-effecting `end()` function used as the
+// range's upper bound must appear exactly once in the whole function,
+// never once per potential iteration.
+void testForLoopEndExpressionLoweredExactlyOnce() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn bound() -> i32 {\n    return 3\n}\n"
+                                      "fn main() {\n"
+                                      "    for i in 0..bound() {\n"
+                                      "        print(i)\n"
+                                      "    }\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    const llvm::Function* boundFn = module.getFunction("bound");
+    const llvm::Function* mainFn = module.getFunction("main");
+    KAI_CHECK(boundFn != nullptr);
+    KAI_CHECK(mainFn != nullptr);
+    if (boundFn == nullptr || mainFn == nullptr) {
+        return;
+    }
+
+    int callCount = 0;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                callCount += call->getCalledFunction() == boundFn ? 1 : 0;
+            }
+        }
+    }
+    KAI_CHECK(callCount == 1);
+}
+
+// Nested `for` loops (M6 spec #7) must still verify.
+void testForLoopNestedVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    for i in 0..2 {\n"
+                                      "        for j in 0..2 {\n"
+                                      "            print(j)\n"
+                                      "        }\n"
+                                      "    }\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// `return` inside a `for` body (M6 spec #8) must still verify, and the
+// loop's own exit block must remain reachable regardless (the loop may
+// execute zero times, so control can always reach the fallback `return`
+// after it) - same reasoning as testWhileBodyReturn().
+void testForLoopBodyReturnVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn f() -> i32 {\n"
+                                      "    for i in 0..10 {\n"
+                                      "        if i == 3 {\n"
+                                      "            return i\n"
+                                      "        }\n"
+                                      "    }\n"
+                                      "    return -1\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
 }
 
 // --- M6: minimal `print` builtin + runtime ABI ---
@@ -2695,7 +2927,14 @@ int main() {
 
     testShadowingInsideIfBranch();
 
-    testForStmtStillFailsCleanly();
+    testForLoopVariableAssignmentFailsCleanly();
+
+    testForLoopBasicCFGStructure();
+    testForLoopSignedRangeUsesSignedComparison();
+    testForLoopUnsignedRangeUsesUnsignedComparison();
+    testForLoopEndExpressionLoweredExactlyOnce();
+    testForLoopNestedVerifies();
+    testForLoopBodyReturnVerifies();
 
     testPrintLiteralI32SignExtendsToI64();
     testPrintVariableI64();

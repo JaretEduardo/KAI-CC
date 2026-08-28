@@ -215,6 +215,176 @@ void testWhileLoopEndToEnd() {
     KAI_CHECK_STDOUT_BYTES(result.stdoutText, "0\n1\n2\n");
 }
 
+// --- KAI LANGUAGE M6 (post-alpha.2): `for` + integer ranges, real
+// native execution ---
+
+// A. REQUIRED: `for i in 0..3 { print(i) }` -> "0\n1\n2\n" exactly.
+void testForLoopLiteralRangeEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    for i in 0..3 {\n"
+                                "        print(i)\n"
+                                "    }\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_for_literal.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "0\n1\n2\n");
+}
+
+// B. REQUIRED: `start == end` -> zero iterations, empty stdout.
+void testForLoopZeroIterationsWhenStartEqualsEndEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    for i in 3..3 {\n"
+                                "        print(i)\n"
+                                "    }\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_for_zero.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "");
+}
+
+// C. REQUIRED: `start > end` -> zero iterations, empty stdout - no
+// wrapping/reverse iteration.
+void testForLoopZeroIterationsWhenStartExceedsEndEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    for i in 5..2 {\n"
+                                "        print(i)\n"
+                                "    }\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_for_descending.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "");
+}
+
+// D. REQUIRED: range endpoints from variables (not just literals).
+void testForLoopRangeFromVariablesEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    let start: i32 = 1\n"
+                                "    let stop: i32 = 4\n"
+                                "    for i in start..stop {\n"
+                                "        print(i)\n"
+                                "    }\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_for_variables.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "1\n2\n3\n");
+}
+
+// E. REQUIRED: nested `for` loops.
+void testForLoopNestedEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    for i in 0..2 {\n"
+                                "        for j in 0..2 {\n"
+                                "            print(i)\n"
+                                "            print(j)\n"
+                                "        }\n"
+                                "    }\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_for_nested.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "0\n0\n0\n1\n1\n0\n1\n1\n");
+}
+
+// F. REQUIRED: `return` from inside a `for` body exits the enclosing
+// function immediately, never completing the remaining iterations.
+void testForLoopReturnInsideBodyEndToEnd() {
+    const std::string source = "fn find() -> i32 {\n"
+                                "    for i in 0..10 {\n"
+                                "        if i == 3 {\n"
+                                "            return i\n"
+                                "        }\n"
+                                "        print(i)\n"
+                                "    }\n"
+                                "    return -1\n"
+                                "}\n"
+                                "fn main() {\n"
+                                "    print(find())\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_for_return.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    // i=0,1,2 print before the i==3 return fires; iterations 3-9 never run.
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "0\n1\n2\n3\n");
+}
+
+// G. REQUIRED: an outer binding with the same name is shadowed inside
+// the loop body and is UNCHANGED after the loop ends.
+void testForLoopOuterVariableShadowingEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    let i: i32 = 99\n"
+                                "    for i in 0..3 {\n"
+                                "        print(i)\n"
+                                "    }\n"
+                                "    print(i)\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_for_shadow.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "0\n1\n2\n99\n");
+}
+
+// M6 spec #12: an OBSERVABLE regression test proving `start`/`end` are
+// evaluated EXACTLY ONCE before the loop, never once per iteration -
+// each endpoint is a function call with a visible print side effect, so
+// re-evaluation would print "100"/"200" more than once.
+void testForLoopEndpointsEvaluatedOnceEndToEnd() {
+    const std::string source = "fn start() -> i32 {\n"
+                                "    print(100)\n"
+                                "    return 0\n"
+                                "}\n"
+                                "\n"
+                                "fn end() -> i32 {\n"
+                                "    print(200)\n"
+                                "    return 3\n"
+                                "}\n"
+                                "\n"
+                                "fn main() {\n"
+                                "    for i in start()..end() {\n"
+                                "        print(i)\n"
+                                "    }\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_for_endpoints_once.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "100\n200\n0\n1\n2\n");
+}
+
 // FRONTEND/BACKEND FAILURE BEHAVIOR (M7 spec §18/§19): no executable is
 // ever produced from a failed attempt.
 
@@ -292,14 +462,19 @@ void testLiteralOutOfRangeDiagnosticIncludesTargetType() {
     std::filesystem::remove(sourcePath, ignored);
 }
 
-// RELEASE HARDENING M2.1: the `for` statement must produce the specific,
-// actionable message CompileCommand.cpp now surfaces from
-// LLVMCodeGenerator::unsupportedConstruct() (M2) - REQUIRED regression:
-// proves the generic "LLVM IR generation failed" text is no longer what a
-// user sees for this exact, already-identified-as-deferred construct.
-void testUnsupportedForStatementDiagnosticIsActionable() {
+// RETARGETED (KAI LANGUAGE M6, post-alpha.2): a `for` statement over a
+// literal integer range now compiles and runs (see the M6 end-to-end
+// test group below) - the diagnostic-actionability coverage this test
+// originally proved now belongs to the one iterable shape `for` still
+// rejects: anything that isn't a literal `start..end` range. TypeChecker
+// rejects this directly (SemanticErrorKind::UnsupportedForIterable,
+// exit code 5 - a semantic error, never reaching codegen at all), so the
+// message is now a semantic diagnostic rather than
+// LLVMCodeGenerator::unsupportedConstruct()'s own text.
+void testUnsupportedForIterableDiagnosticIsActionable() {
     const std::filesystem::path sourcePath = writeTempSource(
-        "kai_e2e_unsupported_for.kai", "fn main() {\n    for i in 0..3 {\n        print(i)\n    }\n}");
+        "kai_e2e_unsupported_for_iterable.kai",
+        "fn main() {\n    let values: i32 = 5\n    for i in values {\n        print(i)\n    }\n}");
     std::error_code ignored;
 
     SourceManager sm;
@@ -307,8 +482,8 @@ void testUnsupportedForStatementDiagnosticIsActionable() {
     const int exitCode =
         kai::cli::runCompileCommand(sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_for.out", err);
 
-    KAI_CHECK(exitCode == 6);
-    KAI_CHECK(err.str().find("code generation is not yet supported for 'for' statements") != std::string::npos);
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("unsupported for-loop iterable") != std::string::npos);
     KAI_CHECK(err.str().find("LLVM IR generation failed") == std::string::npos);
 
     std::filesystem::remove(sourcePath, ignored);
@@ -632,12 +807,21 @@ int main() {
     testFactorialEndToEnd();
     testWhileLoopEndToEnd();
 
+    testForLoopLiteralRangeEndToEnd();
+    testForLoopZeroIterationsWhenStartEqualsEndEndToEnd();
+    testForLoopZeroIterationsWhenStartExceedsEndEndToEnd();
+    testForLoopRangeFromVariablesEndToEnd();
+    testForLoopNestedEndToEnd();
+    testForLoopReturnInsideBodyEndToEnd();
+    testForLoopOuterVariableShadowingEndToEnd();
+    testForLoopEndpointsEvaluatedOnceEndToEnd();
+
     testCompileFailsCleanlyOnSemanticError();
     testCompileFailsCleanlyWithNoMain();
 
     testTypeMismatchDiagnosticIncludesExpectedAndActualTypes();
     testLiteralOutOfRangeDiagnosticIncludesTargetType();
-    testUnsupportedForStatementDiagnosticIsActionable();
+    testUnsupportedForIterableDiagnosticIsActionable();
     testUnsupportedParameterTypeDiagnosticIsActionable();
 
     testNativeLinkerProducesRunnableExecutable();

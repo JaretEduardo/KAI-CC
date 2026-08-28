@@ -19,6 +19,8 @@ after a release build).
 | `functions.kai` | Functions, parameters, calls, and a `str` parameter | `Hello`, `KAI`, `42`, `84` |
 | `conditions.kai` | `if`/`else if`/`else` | `adult`, `positive`, `negative`, `zero` |
 | `variables.kai` | `let`, `mut`, reassignment, `f32`/`i32` locals | `KAI`, `0.1`, `2026`, `1` |
+| `loops.kai` | `while`, then a `for` loop over an integer literal range (KAI LANGUAGE M6, post-alpha.2) | `0`,`1`,`2`,`3`,`4` (from `while`), then `0`,`1`,`2`,`3`,`4` again (from `for n in 0..5`) |
+| `fibonacci.kai` | Recursion + a `for` loop over an integer literal range (KAI LANGUAGE M6, post-alpha.2), printing the first 10 Fibonacci numbers | `0`,`1`,`1`,`2`,`3`,`5`,`8`,`13`,`21`,`34` |
 
 ## Diagnostic example (intentionally invalid)
 
@@ -31,29 +33,31 @@ after a release build).
 These files predate the current MVP compiler and describe language
 directions that are not implemented yet. They are kept as design sketches,
 not deleted, but they do **not** compile with the current `kaicc` and are
-**not** included in release artifacts. Each currently fails for exactly
-one of two reasons:
+**not** included in release artifacts. Each currently fails for one of
+these reasons:
 
 - **Arrays/slices are not yet backend-lowerable.** A function parameter
   or local of array/slice shape (`[T]`, `[T; N]`) fails during code
   generation with `code generation is not yet supported for this
   parameter's type` (or the equivalent return-type message).
-- **`for` loops are not yet backend-lowerable.** A `for` statement parses
-  and type-checks, but fails during code generation with `code generation
-  is not yet supported for 'for' statements`.
+- **`for` iteration over anything other than a literal integer range is
+  not yet supported.** KAI LANGUAGE M6 (post-alpha.2) makes
+  `for i in start..end` over integers a real, executable, native loop -
+  see `loops.kai`/`fibonacci.kai` above - but KAI 0.1 still has no
+  general iterable protocol/arrays-as-iterables/iterators: `for x in
+  someArray` fails as a **semantic** error (`unsupported for-loop
+  iterable`), before code generation is ever reached.
 
 | File | Why it doesn't compile today |
 |---|---|
-| `arrays.kai` | Uses array literals, indexing, `for` iteration, and an array-typed parameter (`sum(values: [i32])`) - the parameter type is rejected first. (This file previously also had a structural defect - two `fn main()` declarations, an authoring mistake unrelated to array support - which has been fixed; see "arrays.kai defect" below.) |
+| `arrays.kai` | Uses array literals, indexing, `for` iteration over an array, and an array-typed parameter (`sum(values: [i32])`) - the parameter type is rejected first. (This file previously also had a structural defect - two `fn main()` declarations, an authoring mistake unrelated to array support - which has been fixed; see "arrays.kai defect" below.) |
 | `calculator.kai` | Compares two `str` values with `==` (`op == "+"`) - string equality is not implemented; this is a **semantic** error (`invalid binary operands`), not a codegen limitation. |
-| `fibonacci.kai` | `main` uses `for i in 0..10` to iterate and print each Fibonacci number. |
-| `loops.kai` | Uses `while` (which works) followed by `for n in 0..5` (which doesn't). |
-| `mini_program.kai` | Uses array-typed parameters (`average(values: [f64])`), `for` iteration, and array member access (`.len`) - none implemented yet. |
+| `mini_program.kai` | Uses array-typed parameters (`average(values: [f64])`), `for` iteration over an array, and array member access (`.len`) - none implemented yet. |
 | `results.kai` | Sketches `Result<(), IOError>` and the `?` operator against an undefined `write_file()`/`IOError` - a design fragment with no `main`, not a runnable program; fails with `unknown identifier`. |
 
 See the root [`README.md`](../README.md)'s "Current limitations" section
 and [`ROADMAP.md`](../ROADMAP.md) for the actual implementation status of
-arrays/slices and `for` loops.
+arrays/slices and general `for` iteration.
 
 ### `arrays.kai` defect (resolved)
 

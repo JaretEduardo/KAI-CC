@@ -281,10 +281,11 @@ void testSourcePositionsAreCorrect() {
     }
 }
 
-// Bonus: the `for` loop variable is itself a discoverable Local, since
-// SemanticAnalyzer declares it as a genuine SymbolKind::Local (its Type
-// commonly stays "unresolved" - range/iterable typing is not modeled yet
-// - and that is reported honestly, not hidden or crashed on).
+// The `for` loop variable is itself a discoverable Local, since
+// SemanticAnalyzer declares it as a genuine SymbolKind::Local. KAI
+// LANGUAGE M6: for a supported integer-range `for i in start..end`, its
+// Type is now the real matched endpoint element type (i32 here, both
+// endpoints being default-typed integer literals) - not "unresolved".
 void testForLoopVariableIsDiscoveredAsALocal() {
     SourceManager sm;
     const Inspected inspected = inspectSource(sm, "fn f() {\n    for i in 0..10 {\n        print(i)\n    }\n}");
@@ -295,6 +296,9 @@ void testForLoopVariableIsDiscoveredAsALocal() {
 
     const SemanticSymbolInfo* loopVar = findSymbol(inspected.result, "i", SemanticSymbolKind::Local);
     KAI_CHECK(loopVar != nullptr);
+    if (loopVar != nullptr) {
+        KAI_CHECK(loopVar->type.kind() == TypeKind::I32);
+    }
 }
 
 } // namespace

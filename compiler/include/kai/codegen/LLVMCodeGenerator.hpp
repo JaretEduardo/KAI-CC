@@ -28,9 +28,12 @@ namespace kai::codegen {
 /// Integer Return (M1), Primitive Expression Lowering (M2), Local
 /// Variables + Identifier Loads + Assignment (M3), Parameters + Function
 /// Calls + Recursion + FINAL short-circuit &&/|| (M4), If/Else/Else-If +
-/// While statement-level control flow (M5, ForStmt still deferred), and a
-/// minimal `print` builtin lowered to a tiny native runtime ABI (M6,
-/// `panic`/`assert` still deferred).
+/// While statement-level control flow (M5), and a minimal `print` builtin
+/// lowered to a tiny native runtime ABI (M6, `panic`/`assert` still
+/// deferred). KAI LANGUAGE M6 (`for` + integer ranges, post-alpha.2 -
+/// distinct from the LLVM codegen milestone numbering above) adds ForStmt
+/// lowering for the one supported iterable form - a literal integer
+/// `start..end` range - see generateForStmt().
 ///
 /// LLVMCodeGenerator lowers an already-fully-checked AST into an
 /// llvm::Module:
@@ -77,10 +80,14 @@ namespace kai::codegen {
 ///   identically once bound.
 /// - a sequence of VarDeclStmt / ExprStmt / ReturnStmt / (trivially)
 ///   nested BlockStmt / IfStmt (with any number of `else if` branches and
-///   an optional final `else`) / WhileStmt statements, in source order -
-///   see generateBlock()/generateStatement()/generateIfStmt()/
-///   generateWhileStmt(). ForStmt remains an explicit failure until
-///   iteration lowering exists (M6+).
+///   an optional final `else`) / WhileStmt / ForStmt statements, in
+///   source order - see generateBlock()/generateStatement()/
+///   generateIfStmt()/generateWhileStmt()/generateForStmt(). ForStmt
+///   lowering (KAI LANGUAGE M6, post-alpha.2) supports exactly one
+///   iterable form: a literal integer `start..end` half-open range -
+///   any other iterable shape is already rejected by TypeChecker
+///   (SemanticErrorKind::UnsupportedForIterable), so it never reaches
+///   codegen at all.
 /// - expressions: integer/float/bool literals; parens; unary Negate/Not;
 ///   binary arithmetic/comparison/equality operators; SHORT-CIRCUIT `&&`/
 ///   `||` (see lowerLogicalExpr() - this is now final KAI language
@@ -117,7 +124,10 @@ namespace kai::codegen {
 /// generate() to fail explicitly (return false) rather than emit partial
 /// or malformed LLVM IR - see generate()'s own documentation. Every other
 /// Builtin call (`panic`, `assert`, ...), non-direct/first-class-
-/// function-value calls, method calls, `for` iteration, Range, a
+/// function-value calls, method calls, a bare Range as a first-class
+/// runtime value (`let r = 0..10` - still unlowerable; only a `for`
+/// loop's own `start..end` iterable is ever lowered, and only its two
+/// endpoints, never the Range "value" itself - see generateForStmt()), a
 /// Unit-typed local variable (LLVM has no storable void value - see
 /// generateVarDeclStmt()), and every non-primitive-scalar semantic Type
 /// (references, arrays, structs, enums, generics, Result, Option, ...)
@@ -156,16 +166,18 @@ public:
     /// RELEASE HARDENING M2: a small, deliberately narrow diagnostic-UX
     /// addition - NOT a general diagnostic framework. Set exactly once,
     /// at the specific site an explicitly-deferred (never silently
-    /// skipped) AST construct causes generate() to fail - e.g.
-    /// StmtKind::For (see generateStatement()'s own case). Left
-    /// std::nullopt for every other failure path, including a genuine
-    /// llvm::verifyModule() failure and any defensive/internal check -
-    /// this is intentional: a caller (CompileCommand) uses its presence
-    /// to show a specific, actionable message ("code generation is not
-    /// yet supported for 'for' statements") instead of the generic "LLVM
-    /// IR generation failed", but must NEVER attribute a real verifier
-    /// failure to "an unsupported construct". Cleared at the start of
-    /// every generate() call - never stale from a previous call.
+    /// skipped) AST construct causes generate() to fail - e.g. an
+    /// array/slice parameter or return type declareFunction() cannot
+    /// lower (see that method's own recordUnsupportedConstruct() calls).
+    /// Left std::nullopt for every other failure path, including a
+    /// genuine llvm::verifyModule() failure and any defensive/internal
+    /// check - this is intentional: a caller (CompileCommand) uses its
+    /// presence to show a specific, actionable message (e.g. "code
+    /// generation is not yet supported for this parameter's type")
+    /// instead of the generic "LLVM IR generation failed", but must
+    /// NEVER attribute a real verifier failure to "an unsupported
+    /// construct". Cleared at the start of every generate() call - never
+    /// stale from a previous call.
     struct UnsupportedConstruct {
         std::string description;
         SourceSpan span;
@@ -259,13 +271,12 @@ private:
     StatementResult generateBlock(const ast::BlockStmt& block, llvm::Function& function, llvm::IRBuilder<>& builder,
                                    const semantic::SemanticModel& model);
 
-    /// Exhaustive over ast::StmtKind. ForStmt remains an explicit failure
-    /// (statement-level iteration is not yet lowerable - M6+) - never
-    /// silently skipped. VarDecl/Expr/Return wrap their existing bool
-    /// result into a StatementResult (VarDecl/Expr -> FallsThrough on
-    /// success, Return -> Terminated on success, either -> Failed on
-    /// failure); If/While compute their own StatementResult directly (see
-    /// generateIfStmt()/generateWhileStmt()).
+    /// Exhaustive over ast::StmtKind. VarDecl/Expr/Return wrap their
+    /// existing bool result into a StatementResult (VarDecl/Expr ->
+    /// FallsThrough on success, Return -> Terminated on success, either ->
+    /// Failed on failure); If/While/For compute their own StatementResult
+    /// directly (see generateIfStmt()/generateWhileStmt()/
+    /// generateForStmt()) - never silently skipped.
     StatementResult generateStatement(const ast::Stmt& stmt, llvm::Function& function, llvm::IRBuilder<>& builder,
                                        const semantic::SemanticModel& model);
 
@@ -317,6 +328,65 @@ private:
     /// missing/non-real/non-i1 condition value.
     StatementResult generateWhileStmt(const ast::WhileStmt& stmt, llvm::Function& function, llvm::IRBuilder<>& builder,
                                        const semantic::SemanticModel& model);
+
+    /// ForStmt lowering (KAI LANGUAGE M6, post-alpha.2): TypeChecker
+    /// already guarantees `stmt.iterable()` is a BinaryExpr{Range} whose
+    /// two endpoints share one lowerable concrete integer Type (the loop
+    /// variable's own Symbol type, per checkForStmt()/checkIntegerRangeFor()
+    /// in TypeChecker.cpp) - defensively re-checked here (never trusted
+    /// blindly) via lowerType()/a structural cast, falling back to
+    /// recordUnsupportedConstruct() on mismatch exactly like
+    /// generateVarDeclStmt() does for its own local-type checks, even
+    /// though the frontend makes this path practically unreachable today.
+    ///
+    /// Conceptual lowering (half-open `start <= i < end`):
+    ///
+    ///     induction = alloca <elementType>
+    ///     store start, induction     // evaluated ONCE, in the preheader
+    ///     endValue = <end>           // evaluated ONCE, in the preheader
+    ///     br for.cond
+    ///
+    ///     for.cond:
+    ///       i = load induction
+    ///       br (i < endValue) ? for.body : for.end   // signed/unsigned
+    ///                                                 // per elementType
+    ///
+    ///     for.body:
+    ///       <bind the loop variable's SymbolId to `induction` in
+    ///        locals_ - the SAME slot the condition/increment read/write,
+    ///        so the body's own IdentifierExpr loads see the current
+    ///        induction value with no separate PHI/copy>
+    ///       <body>
+    ///       next = add i, 1
+    ///       store next, induction
+    ///       br for.cond                // only if body FallsThrough
+    ///
+    ///     for.end:
+    ///
+    /// No SSA PHI node is used for the induction variable - it lives in
+    /// ordinary alloca'd memory and is re-loaded every time it's read,
+    /// exactly like every other KAI local this class already lowers
+    /// (mirrors generateWhileStmt()'s own memory-based, no-PHI style,
+    /// never introducing a second lowering strategy). `endValue` is
+    /// computed exactly once, in the preheader, and reused as the SAME
+    /// llvm::Value* in every `for.cond` iteration (it dominates
+    /// `for.cond` since the preheader always branches into it first) -
+    /// never re-lowered from `stmt.iterable()`'s right operand inside the
+    /// loop. Half-open design: the condition alone (`i < end`) decides
+    /// whether to enter/continue the body, so `start >= end` naturally
+    /// yields zero iterations with no separate pre-check, and the
+    /// induction variable is never incremented past `end` (no risk of
+    /// signed/unsigned overflow at the boundary - see this method's own
+    /// comment in the .cpp for the exact argument). Same "a loop can
+    /// never be soundly proven to execute even once" stance as
+    /// generateWhileStmt() - ForStmt as a whole ALWAYS returns
+    /// StatementResult::FallsThrough, matching
+    /// ControlFlowAnalyzer::analyzeStatement()'s own conservative
+    /// FlowResult for `for`. Fails explicitly for a missing/non-real
+    /// start/end value, a non-integer element type, or an iterable that
+    /// isn't structurally a Range (defensive only - see above).
+    StatementResult generateForStmt(const ast::ForStmt& stmt, llvm::Function& function, llvm::IRBuilder<>& builder,
+                                     const semantic::SemanticModel& model);
 
     /// Allocates entry-block storage for a `let`/`mut` local, lowers its
     /// initializer, and records `SymbolId -> AllocaInst*` in `locals_`.

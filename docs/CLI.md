@@ -75,7 +75,7 @@ kaicc --ast <file.kai>
 | `2` | Input file could not be loaded |
 | `4` | Parse failure |
 | `5` | Semantic, type-checking, or control-flow failure |
-| `6` | LLVM IR generation failure (includes constructs that parse/type-check but are not yet backend-lowerable, e.g. `for` loops) |
+| `6` | LLVM IR generation failure (includes constructs that parse/type-check but are not yet backend-lowerable, e.g. array/slice parameter or return types) |
 | `7` | Native entry-point adaptation failure |
 | `8` | Object file emission failure |
 | `9` | No usable host C compiler driver found (`$KAI_CC`, `cc`, `clang`, `gcc`) |

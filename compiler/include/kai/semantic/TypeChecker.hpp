@@ -148,11 +148,35 @@ private:
     void checkWhileStmt(const ast::WhileStmt& whileStmt, const ReturnContext& returnContext,
                          SemanticModel& model) const;
 
-    /// Milestone 5 spec #6: UNCHANGED from Milestone 1 - the iterable is
-    /// still only checked for its own independent errors (no Range/
-    /// element-type/iterable-type validation), and the for-variable's
-    /// Symbol type is untouched by this milestone.
+    /// KAI LANGUAGE M6 (`for` + integer ranges): the only supported
+    /// iterable form is a literal `start..end` range (an existing
+    /// BinaryExpr{Range} - see checkIntegerRangeFor()); anything else is
+    /// rejected with SemanticErrorKind::UnsupportedForIterable rather
+    /// than silently left Unresolved (M6 spec #2). The loop variable's
+    /// Symbol - already declared by SemanticAnalyzer::analyzeForStmt()
+    /// as an immutable Local with Type::unresolved() - has its real
+    /// type pushed via model.setSymbolType() here, exactly like
+    /// checkVarDecl() does for an unannotated `let`. The body is always
+    /// checked afterward regardless of the iterable's own outcome (same
+    /// "keep traversing" policy as every other statement in this file).
     void checkForStmt(const ast::ForStmt& forStmt, const ReturnContext& returnContext, SemanticModel& model) const;
+
+    /// M6: validates `range`'s two endpoints via the SAME
+    /// checkMatchedOperands()/resolveMatchedOperatorResult() machinery
+    /// arithmetic operators already use - sibling-anchored contextual
+    /// literal adaptation (e.g. `0` in `for i in 0..n` with `n: u32`
+    /// adapts to u32 exactly like `0 + n` would), no new implicit-
+    /// conversion system. Restricted to isIntegerDomain (floats/bool/
+    /// char/str/unit rejected via the existing InvalidBinaryOperands
+    /// path). Returns the matched element Type (or Error/Unresolved,
+    /// following the same propagation rule as every other binary
+    /// operator) - the CALLER (checkForStmt) is responsible for pushing
+    /// it onto the loop variable's Symbol. `range`'s own whole-
+    /// expression type is left exactly as checkBinaryExpr()'s general
+    /// Range case already records it (Type::unresolved(),
+    /// unconditionally) - a range is never itself a first-class runtime
+    /// value in M6, only its endpoints and the loop variable are.
+    Type checkIntegerRangeFor(const ast::BinaryExpr& range, SemanticModel& model) const;
 
     /// Milestone 5 spec #2-#3: `checkExpr(condition, Type::boolean(),
     /// model)` - a CONCRETE expected Type states the semantic contract

@@ -363,11 +363,55 @@ void TypeChecker::checkWhileStmt(const ast::WhileStmt& whileStmt, const ReturnCo
 
 void TypeChecker::checkForStmt(const ast::ForStmt& forStmt, const ReturnContext& returnContext,
                                 SemanticModel& model) const {
-    // Milestone 5 spec #6: UNCHANGED from Milestone 1 - no iterable-type/
-    // Range/element-type validation, and the for-variable's Symbol type is
-    // untouched by this milestone.
-    inferExpr(forStmt.iterable(), model);
+    const ast::Expr& iterable = forStmt.iterable();
+
+    Type elementType = Type::error();
+    if (iterable.kind() == ast::ExprKind::Binary &&
+        static_cast<const ast::BinaryExpr&>(iterable).op() == ast::BinaryOperator::Range) {
+        elementType = checkIntegerRangeFor(static_cast<const ast::BinaryExpr&>(iterable), model);
+    } else {
+        // M6 spec #2/#10: no general iterable protocol exists yet - the
+        // iterable is still checked for its OWN independent errors (same
+        // as Milestone 1's blanket inferExpr()), but a for-loop over
+        // anything other than a literal range is now explicitly rejected
+        // rather than silently deferred.
+        inferExpr(iterable, model);
+        model.addError(SemanticError{
+            SemanticErrorKind::UnsupportedForIterable,
+            iterable.span(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+        });
+    }
+
+    // The loop variable's Symbol already exists (SemanticAnalyzer::
+    // analyzeForStmt() declared it as an immutable Local with
+    // Type::unresolved()) - push its real type now, exactly like
+    // checkVarDecl() does for an unannotated `let`. Error/Unresolved
+    // both propagate through untouched, same as everywhere else.
+    const std::optional<SymbolId> loopVarId = model.declarationSymbol(forStmt.variable());
+    assert(loopVarId.has_value());
+    model.setSymbolType(*loopVarId, elementType);
+
     checkBlock(forStmt.body(), returnContext, model);
+}
+
+Type TypeChecker::checkIntegerRangeFor(const ast::BinaryExpr& range, SemanticModel& model) const {
+    const auto [leftType, rightType] = checkMatchedOperands(range.left(), range.right(), std::nullopt, std::nullopt, model);
+    const Type elementType =
+        resolveMatchedOperatorResult(range, leftType, rightType, isIntegerDomain, /*resultIsOperandType=*/true, model);
+
+    // The Range expression's own whole-expression type stays exactly
+    // what checkBinaryExpr()'s general Range case already records
+    // (Type::unresolved(), unconditionally) - a range is never a
+    // first-class runtime value in M6 either way, so `for i in 0..3`
+    // and `let r = 0..3` both leave the raw `0..3` node itself
+    // Unresolved; only the endpoints (via checkMatchedOperands above)
+    // and the loop variable (via the caller) get real types.
+    model.setExpressionType(range, Type::unresolved());
+
+    return elementType;
 }
 
 void TypeChecker::checkCondition(const ast::Expr& condition, SemanticModel& model) const {
