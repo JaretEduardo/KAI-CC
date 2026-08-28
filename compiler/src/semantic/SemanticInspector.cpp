@@ -160,10 +160,13 @@ void SemanticInspector::collectStatement(const ast::Stmt& stmt, const std::strin
         case ast::StmtKind::For: {
             // The loop variable is a genuine SymbolKind::Local (see
             // SemanticAnalyzer.cpp's analyzeForStmt()) - exposed like any
-            // other local; its Type is commonly Type::unresolved() today
-            // (range/iterable typing is not yet modeled - see
-            // TypeChecker.cpp), serialized honestly as "unresolved"
-            // rather than hidden.
+            // other local. KAI LANGUAGE M6: for a supported integer-range
+            // `for i in start..end`, this is now the real matched
+            // endpoint element type (e.g. "i32"), pushed by TypeChecker's
+            // checkForStmt()/checkIntegerRangeFor(); it stays
+            // "unresolved"/"error" for a still-unsupported iterable
+            // shape or a mismatched/non-integer range, serialized
+            // honestly either way rather than hidden.
             const auto& forStmt = static_cast<const ast::ForStmt&>(stmt);
             const std::optional<SymbolId> id = model_.declarationSymbol(forStmt.variable());
             assert(id.has_value());

@@ -39,6 +39,8 @@ const char* semanticErrorKindName(semantic::SemanticErrorKind kind) {
             return "missing return";
         case semantic::SemanticErrorKind::UnsupportedStrReturn:
             return "unsupported str return";
+        case semantic::SemanticErrorKind::UnsupportedForIterable:
+            return "unsupported for-loop iterable";
     }
     return "semantic error";
 }

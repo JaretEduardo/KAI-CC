@@ -527,8 +527,14 @@ void testNestedReturnInWhileUsesFunctionContext() {
 
 void testNestedReturnInForUsesFunctionContext() {
     SourceManager sm;
+    // KAI LANGUAGE M6: the iterable must be a literal integer range (a
+    // bare `items` identifier is now its own separate
+    // UnsupportedForIterable error) - `0..items` preserves this test's
+    // actual intent (a `return` inside a `for` body is checked against
+    // the ENCLOSING FUNCTION's return type, not some for-loop-specific
+    // context) without introducing an unrelated second error.
     Checked result =
-        analyzeAndCheck(sm, "fn f(items: i32) -> i64 {\n    for item in items {\n        return true\n    }\n    return 1\n}");
+        analyzeAndCheck(sm, "fn f(items: i32) -> i64 {\n    for item in 0..items {\n        return true\n    }\n    return 1\n}");
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
         return;

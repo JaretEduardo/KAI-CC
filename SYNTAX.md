@@ -200,21 +200,34 @@ Parentheses around conditions are not required.
 
 ## 11. For Loops
 
-Proposed syntax:
+Syntax:
 
     for i in 0..10 {
         print(i)
     }
 
-Range semantics are not yet finalized.
+**KAI LANGUAGE M6 (post-alpha.2): implemented and executable** for exactly this form - a `for` loop whose
+iterable is a literal `start..end` integer range. `i` is scoped to the loop body only, is always immutable
+(reassigning it is a compile-time error, same diagnostic as reassigning any other `let`), and receives
+successive values of the range's own element type (both endpoints must resolve to the same concrete integer
+type, via the same contextual-literal-adaptation rules arithmetic already uses - e.g. `for i in 0..n` with
+`n: u32` adapts the literal `0` to `u32`). `start`/`end` are each evaluated exactly once, before the loop
+begins - never re-evaluated per iteration.
 
-Initial proposal:
+Range semantics:
 
     0..10
 
-means:
+means the half-open range:
 
     0 <= i < 10
+
+so `start >= end` executes the loop body zero times.
+
+**Not yet implemented:** iteration over anything other than a literal integer range (arrays, general
+iterators, a first-class `Range` value), an inclusive `..=` range, reverse iteration, a `step`, and
+`break`/`continue`. `let r = 0..10` (a range used as an ordinary value, outside a `for` loop) also remains
+unsupported.
 
 ---
 

@@ -240,8 +240,8 @@ LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateBlock(const ast::B
 
 // No `default:` case: StmtKind is fully implemented today, mirroring
 // TypeChecker.cpp's/ControlFlowAnalyzer.cpp's own exhaustive switch over
-// it. ForStmt is an explicit failure - iteration lowering does not exist
-// yet (M6+).
+// it. ForStmt lowering (KAI LANGUAGE M6, post-alpha.2) is real - see
+// generateForStmt().
 LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateStatement(const ast::Stmt& stmt,
                                                                          llvm::Function& function,
                                                                          llvm::IRBuilder<>& builder,
@@ -279,10 +279,7 @@ LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateStatement(const as
             return generateWhileStmt(static_cast<const ast::WhileStmt&>(stmt), function, builder, model);
 
         case ast::StmtKind::For:
-            // Iteration lowering remains deferred to M6+ - never silently
-            // skipped.
-            recordUnsupportedConstruct("code generation is not yet supported for 'for' statements", stmt.span());
-            return StatementResult::Failed;
+            return generateForStmt(static_cast<const ast::ForStmt&>(stmt), function, builder, model);
     }
     return StatementResult::Failed;
 }
@@ -436,6 +433,126 @@ LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateWhileStmt(const as
     // whole ALWAYS falls through, regardless of the body's own result.
     // Mirrors ControlFlowAnalyzer::analyzeStatement()'s own documented
     // "conservatively FallsThrough, unconditionally" stance for While.
+    return StatementResult::FallsThrough;
+}
+
+// KAI LANGUAGE M6 (`for` + integer ranges, post-alpha.2): see this
+// method's own header doc comment for the full conceptual lowering.
+// TypeChecker already guarantees `stmt.iterable()` is a
+// BinaryExpr{Range} whose two endpoints share one lowerable concrete
+// integer Type (checkForStmt()/checkIntegerRangeFor() in
+// TypeChecker.cpp) - the checks below are DEFENSIVE re-verification
+// (mirrors generateIfStmt()'s/generateWhileStmt()'s own "defensive only"
+// condition-type checks), not a second independent type analysis.
+LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateForStmt(const ast::ForStmt& stmt,
+                                                                       llvm::Function& function,
+                                                                       llvm::IRBuilder<>& builder,
+                                                                       const SemanticModel& model) {
+    if (stmt.iterable().kind() != ast::ExprKind::Binary) {
+        recordUnsupportedConstruct("code generation is not yet supported for this 'for' loop's iterable",
+                                    stmt.iterable().span());
+        return StatementResult::Failed;
+    }
+    const auto& range = static_cast<const ast::BinaryExpr&>(stmt.iterable());
+    if (range.op() != ast::BinaryOperator::Range) {
+        recordUnsupportedConstruct("code generation is not yet supported for this 'for' loop's iterable",
+                                    stmt.iterable().span());
+        return StatementResult::Failed;
+    }
+
+    const std::optional<SymbolId> loopVarId = model.declarationSymbol(stmt.variable());
+    assert(loopVarId.has_value());
+    const Symbol& loopVarSymbol = model.symbol(*loopVarId);
+
+    llvm::Type* elementType = lowerType(loopVarSymbol.type);
+    if (elementType == nullptr || !elementType->isIntegerTy()) {
+        // Defensive only - TypeChecker's isIntegerDomain restriction
+        // already guarantees a concrete i8/i16/i32/i64/u8/u16/u32/u64
+        // element type reaches here.
+        recordUnsupportedConstruct("code generation is not yet supported for this 'for' loop's element type",
+                                    stmt.iterable().span());
+        return StatementResult::Failed;
+    }
+    const bool isSigned = loopVarSymbol.type.isSignedInteger();
+
+    // `start`/`end` are each evaluated EXACTLY ONCE, here in the
+    // preheader - never re-lowered inside the loop (M6 spec #1/#2/#12).
+    const std::optional<llvm::Value*> startValue = lowerExpr(range.left(), model, builder);
+    if (!startValue.has_value() || *startValue == nullptr) {
+        return StatementResult::Failed;
+    }
+    const std::optional<llvm::Value*> endValue = lowerExpr(range.right(), model, builder);
+    if (!endValue.has_value() || *endValue == nullptr) {
+        return StatementResult::Failed;
+    }
+    if ((*startValue)->getType() != elementType || (*endValue)->getType() != elementType) {
+        return StatementResult::Failed;
+    }
+
+    // The induction variable's own storage IS the loop variable's
+    // storage - registered in `locals_` under the loop variable's own
+    // SymbolId below, so the body's ordinary IdentifierExpr loads (via
+    // lowerIdentifierExpr()/findLocalSlot()) transparently see the
+    // current induction value with no separate PHI/copy mechanism. No
+    // assignment can ever target it (TypeChecker rejects that via
+    // AssignmentToImmutableBinding, since SemanticAnalyzer declared this
+    // Symbol immutable), so only this method itself ever stores to it.
+    llvm::AllocaInst* induction =
+        createEntryBlockAlloca(function, elementType, sources_.text(stmt.variable().span));
+    builder.CreateStore(*startValue, induction);
+    locals_.emplace_back(*loopVarId, induction);
+
+    llvm::BasicBlock* conditionBlock = llvm::BasicBlock::Create(context_, "for.cond", &function);
+    llvm::BasicBlock* bodyBlock = llvm::BasicBlock::Create(context_, "for.body", &function);
+    llvm::BasicBlock* exitBlock = llvm::BasicBlock::Create(context_, "for.end", &function);
+
+    // Enter the loop from wherever `builder` currently is (the
+    // preheader, where `startValue`/`endValue` were just lowered) -
+    // never assumed to be the function entry block.
+    builder.CreateBr(conditionBlock);
+
+    builder.SetInsertPoint(conditionBlock);
+    llvm::Value* currentValue = builder.CreateLoad(elementType, induction);
+    // Half-open range: `i < end` alone decides continuation, so
+    // `start >= end` naturally yields zero iterations with no separate
+    // pre-check, and `induction` is never incremented past `end` (its
+    // final stored value is always exactly `end`, which is by
+    // construction representable in `elementType` - no wraparound risk
+    // at the type's maximum, e.g. `for i in 250..255` with `u8`).
+    llvm::Value* condition =
+        isSigned ? builder.CreateICmpSLT(currentValue, *endValue) : builder.CreateICmpULT(currentValue, *endValue);
+    builder.CreateCondBr(condition, bodyBlock, exitBlock);
+
+    builder.SetInsertPoint(bodyBlock);
+    const StatementResult bodyResult = generateBlock(stmt.body(), function, builder, model);
+    if (bodyResult == StatementResult::Failed) {
+        return StatementResult::Failed;
+    }
+    if (bodyResult == StatementResult::FallsThrough) {
+        // Reload rather than reuse `currentValue`: the body may contain
+        // arbitrary statements (a nested for/while, calls, ...) between
+        // entering `bodyBlock` and here - `currentValue` is still valid
+        // LLVM SSA-wise (it dominates this point), but reloading matches
+        // this class's established memory-based, no-PHI style (see
+        // generateWhileStmt()) and stays correct even if a future
+        // milestone ever lets the body store to `induction` itself.
+        llvm::Value* bodyEndValue = builder.CreateLoad(elementType, induction);
+        llvm::Value* next = builder.CreateAdd(bodyEndValue, llvm::ConstantInt::get(elementType, 1));
+        builder.CreateStore(next, induction);
+        // Back-edge from the body's ACTUAL final block, never assumed to
+        // still be `bodyBlock` itself.
+        builder.CreateBr(conditionBlock);
+    }
+    // Terminated: the body always returns on this path - no back-edge, no
+    // instruction after the terminator it already ended in.
+
+    builder.SetInsertPoint(exitBlock);
+    // Same conservative stance as generateWhileStmt(): a `for` loop can
+    // never be soundly proven to execute even once without constant-
+    // range reasoning (which neither the frontend's ControlFlowAnalyzer
+    // nor this backend performs) - the condition's false edge always
+    // targets `exitBlock` directly, so ForStmt as a whole ALWAYS falls
+    // through, regardless of the body's own result.
     return StatementResult::FallsThrough;
 }
 

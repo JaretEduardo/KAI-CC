@@ -2598,9 +2598,13 @@ The second example is rejected for the same reason `(x = 1) + 2` is
 rejected above - an assignment's type is `()`, never the assigned value's
 type - not because of any special "assignment used as a condition" rule.
 
-This section covers `if` and `while` only. A `for` loop's iterable is not
-type-checked by this rule or by any other rule yet - iteration semantics
-remain a separate, still-deferred concern.
+This section covers `if` and `while` only - a `for` loop has no
+Bool-typed condition at all, so this specific rule never applies to it.
+A `for` loop's iterable is type-checked by its own separate rule (KAI
+LANGUAGE M6, post-alpha.2): a literal `start..end` integer range is
+validated and typed; any other iterable shape is rejected outright.
+General iterable/foreach semantics remain a separate, still-deferred
+concern.
 
 ---
 
@@ -2884,8 +2888,10 @@ fn f() -> i64 {
 }
 ```
 
-`for`-loop iterable and element type checking remain deferred, as
-before; this only describes `for`'s effect on return completeness.
+`for`-loop iterable and element type checking are now implemented (KAI
+LANGUAGE M6, post-alpha.2 - a literal `start..end` integer range); this
+only describes `for`'s effect on return completeness, which is
+unaffected by that milestone.
 
 ### Not unreachable-code analysis
 
