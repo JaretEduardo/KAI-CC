@@ -307,10 +307,18 @@ design/future sketches that don't compile with the current backend yet.
 post-alpha.2 - both endpoints must be the same concrete integer type, following the same contextual-literal-
 adaptation rules as arithmetic; no implicit widening/narrowing). KAI 0.1 still has no general iteration
 protocol, though: `for x in someCollection` over anything other than a literal `start..end` range is rejected
-as a semantic error, not silently ignored. Also parses and/or type-checks in some form, but explicitly **not**
-backend-lowerable yet:
+as a semantic error, not silently ignored.
 
-- arrays/slices as function parameter, return, or local types (and therefore `for` iteration over one)
+A fixed-size array `[T; N]` is a real semantic type as of KAI LANGUAGE M7A (post-alpha.2): `let xs = [1, 2, 3]`
+and an explicitly-annotated `let xs: [i32; 3] = [1, 2, 3]` both resolve and type-check (homogeneous elements
+only, using the same contextual-literal-adaptation rules as arithmetic), and `kaicc inspect` renders the type
+canonically as `[i32; 3]`. This is frontend type-system work only - **no array program compiles to a native
+executable yet**: element reads/writes, bounds checking, and LLVM lowering itself all remain unimplemented, so
+an array-typed local/parameter/return still fails cleanly at (or before) code generation, never silently
+miscompiling. Also parses and/or type-checks in some form, but explicitly **not** backend-lowerable yet:
+
+- native execution of arrays (element access, bounds checking, LLVM lowering - see above), and slices (`[T]`)
+  as a semantic type at all
 - structs, enums, generics, traits
 - `Result`, general references (`&T`), and advanced ownership/borrowing
 - an owned, dynamic `String` type (`str` today is a `Copy`, immutable, non-owning view only)

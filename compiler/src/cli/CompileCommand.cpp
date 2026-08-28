@@ -84,7 +84,7 @@ int runCompileCommand(SourceManager& sources, const std::filesystem::path& input
 
     if (!model.errors().empty()) {
         for (const semantic::SemanticError& error : model.errors()) {
-            err << formatSemanticError(sources, error) << '\n';
+            err << formatSemanticError(sources, error, model) << '\n';
         }
         return 5;
     }

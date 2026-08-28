@@ -92,14 +92,30 @@ private:
 
     /// Exhaustive over ast::TypeSyntaxKind, no `default:`: Named
     /// resolves to a primitive Type or Type::error() (with an
-    /// UnknownType SemanticError); Unit resolves to Type::unit();
-    /// Reference/Slice/Array/Generic all resolve to Type::unresolved()
-    /// with no SemanticError, since this phase does not model those
-    /// semantic shapes yet (see Type.hpp's Unresolved-vs-Error
-    /// distinction, and SemanticAnalyzer.cpp for the exact rationale).
+    /// UnknownType SemanticError); Unit resolves to Type::unit(); Array
+    /// resolves to a real fixed-size array Type (KAI LANGUAGE M7A - see
+    /// resolveArrayTypeSyntax()); Reference/Slice/Generic all resolve to
+    /// Type::unresolved() with no SemanticError, since this phase does
+    /// not model those semantic shapes yet (see Type.hpp's Unresolved-
+    /// vs-Error distinction, and SemanticAnalyzer.cpp for the exact
+    /// rationale).
     Type resolveTypeSyntax(const ast::TypeSyntax& type, SemanticModel& model) const;
 
     Type resolveNamedTypeSyntax(const ast::NamedTypeSyntax& type, SemanticModel& model) const;
+
+    /// KAI LANGUAGE M7A: resolves `[T; N]` to a real, interned,
+    /// structural array Type. `T` is resolved recursively through this
+    /// SAME resolveTypeSyntax() dispatch (so a still-deferred element
+    /// shape, e.g. `[[i32]; 3]`'s slice element, or an already-broken
+    /// one, e.g. `[Foo; 3]` with unknown `Foo`, propagates through
+    /// exactly like every other Unresolved/Error propagation in this
+    /// file - no new diagnostic is invented here for a problem the
+    /// recursive resolution already reported). `N` is decoded from the
+    /// grammar-guaranteed integer-literal length expression
+    /// (ArrayTypeSyntax::length()'s own doc comment) and the result is
+    /// canonicalized via `model`'s own compound-type interner
+    /// (SemanticModel::internArray()) - never a fabricated ad hoc Type.
+    Type resolveArrayTypeSyntax(const ast::ArrayTypeSyntax& type, SemanticModel& model) const;
 
     // --- Pass 2: function-body declaration/scope/name analysis ---
 

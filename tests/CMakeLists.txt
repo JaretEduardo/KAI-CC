@@ -50,6 +50,7 @@ kai_add_test(parser_tests parser/ParserTests.cpp)
 kai_add_test(semantic_type_tests semantic/TypeTests.cpp)
 kai_add_test(semantic_model_tests semantic/SemanticModelTests.cpp)
 kai_add_test(semantic_analyzer_tests semantic/SemanticAnalyzerTests.cpp)
+kai_add_test(semantic_array_type_tests semantic/ArrayTypeTests.cpp)
 # TypeChecker tests are split by milestone/responsibility (see
 # tests/semantic/type_checker/TypeCheckerTestSupport.hpp) rather than one
 # monolithic file - each category is its own small CTest executable so it
@@ -60,6 +61,7 @@ kai_add_test(semantic_type_checker_call_tests semantic/type_checker/CallTests.cp
 kai_add_test(semantic_type_checker_assignment_tests semantic/type_checker/AssignmentTests.cpp)
 kai_add_test(semantic_type_checker_control_tests semantic/type_checker/ConditionAndReturnTests.cpp)
 kai_add_test(semantic_type_checker_for_range_tests semantic/type_checker/ForRangeTests.cpp)
+kai_add_test(semantic_type_checker_array_literal_tests semantic/type_checker/ArrayLiteralTests.cpp)
 # MINIMAL STRING LITERAL SUPPORT: Type::str() TypeChecker coverage, split
 # out like every other type_checker/*.cpp milestone file.
 kai_add_test(semantic_type_checker_string_literal_tests semantic/type_checker/StringLiteralTests.cpp)

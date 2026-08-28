@@ -233,19 +233,30 @@ unsupported.
 
 ## 12. Arrays
 
-Initial proposal:
+Fixed-size array literal:
 
     let values = [1, 2, 3, 4]
 
-Explicit type:
+Explicit type - `[T; N]`, NOT the slice syntax `[T]` (§16 below covers
+slices, a distinct, still-future, non-owning view type):
 
-    let values: [i32] = [1, 2, 3, 4]
+    let values: [i32; 4] = [1, 2, 3, 4]
 
 Indexing:
 
     let first = values[0]
 
-Array implementation details are still under design.
+**KAI LANGUAGE M7A (post-alpha.2): the type system is implemented** for
+exactly this - `[T; N]` is a real semantic type (element type and
+compile-time length `N` are both part of the type's own identity, so
+`[i32; 3]` and `[i32; 4]` are distinct types), and both forms above
+(inferred and explicitly-annotated) resolve and type-check correctly,
+rejecting a non-homogeneous literal (`[1, true, 3]`). **Native execution
+is NOT yet implemented**: indexing (`values[0]`), bounds checking, and
+LLVM lowering itself all remain future work - no program using an array
+compiles to a running executable yet. See TYPE_SYSTEM.md §18 for the
+full decision, including the approved (but not yet implemented) checked-
+indexing/bounds-trap semantics.
 
 ---
 

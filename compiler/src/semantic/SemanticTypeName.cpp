@@ -6,7 +6,7 @@ namespace kai::semantic {
 // TypeChecker.cpp's/LLVMCodeGenerator.cpp's own exhaustive switches over
 // it (see e.g. TypeChecker.cpp's integerRangeFor(), LLVMCodeGenerator.cpp's
 // lowerType()).
-std::string_view typeName(Type type) noexcept {
+std::string typeName(Type type, const SemanticModel& model) {
     switch (type.kind()) {
         case TypeKind::Unresolved:
             return "unresolved";
@@ -44,6 +44,20 @@ std::string_view typeName(Type type) noexcept {
             // spellable `str` annotation exists yet (see Type::str()'s
             // own comment).
             return "str";
+        case TypeKind::Array: {
+            // KAI LANGUAGE M7A: "[ElementName; N]" - the canonical
+            // fixed-size-array spelling (TYPE_SYSTEM.md §18), built
+            // recursively so a nested array (e.g. "[[i32; 2]; 3]")
+            // renders correctly with no separate case needed. `model`
+            // must be the SAME SemanticModel that produced `type` - see
+            // this function's own header doc comment.
+            std::string name = "[";
+            name += typeName(model.arrayElementType(type), model);
+            name += "; ";
+            name += std::to_string(model.arrayLength(type));
+            name += "]";
+            return name;
+        }
     }
     // Unreachable while TypeKind's enumerators match the switch above
     // exactly - kept only so -Wreturn-type doesn't warn.

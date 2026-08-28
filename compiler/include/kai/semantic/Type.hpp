@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 
 namespace kai::semantic {
+
+class SemanticModel;
 
 /// The complete vocabulary of semantic type kinds this milestone knows
 /// about. See Type's own class comment for the Unresolved/Error
@@ -34,13 +37,76 @@ enum class TypeKind : std::uint8_t {
     /// str/String/&str design (still open - see TYPE_SYSTEM.md,
     /// DESIGN_QUESTIONS.md) has been settled.
     Str,
+
+    /// KAI LANGUAGE M7A: a fixed-size array `[T; N]` - a real structural
+    /// type, not a fabricated stand-in. Unlike every other TypeKind
+    /// above, an Array Type's full identity is NOT determined by `kind_`
+    /// alone - it also needs an element Type and a compile-time length,
+    /// neither of which fits in this flat enum. See Type's own class
+    /// comment and CompoundTypeId below for how that structural payload
+    /// is carried without turning Type itself into a heap object.
+    Array,
 };
 
-/// A semantic type: a small, closed, value-typed kind tag. Never
-/// interned, never heap-allocated, never polymorphic - Type is compared
-/// and matched by value, not dynamically dispatched, the same way
-/// ast::LiteralKind or ast::ReferenceMutability are plain enums rather
-/// than class hierarchies.
+/// KAI LANGUAGE M7A: an opaque handle into ONE SemanticModel's own
+/// compound-type interning table (see SemanticModel::internArray()) -
+/// the mechanism that lets a compound TypeKind (currently only Array)
+/// carry structural data (element type, length) while Type itself stays
+/// a small, flat, trivially-copyable value. Mirrors SymbolId's own
+/// existing "opaque handle, only SemanticModel may construct or dereference
+/// one" contract exactly (see Symbol.hpp) - a CompoundTypeId is never
+/// constructed, incremented, or interpreted by anything other than the
+/// SemanticModel that issued it, and (like SymbolId) survives that
+/// model's internal storage reallocating, since it is an index, never a
+/// raw pointer.
+///
+/// Lifetime invariant: a CompoundTypeId (and therefore any Type carrying
+/// one) is only meaningful for as long as the SemanticModel that issued
+/// it is alive, and must only ever be dereferenced against THAT SAME
+/// model - never a different SemanticModel instance, even one built from
+/// identical source text. This is the same lifetime contract
+/// SemanticModel's own class comment already documents for identifier/
+/// declaration resolution ("the ast::SourceFile used to build this
+/// SemanticModel must remain alive...") extended to compound type data:
+/// one SemanticModel, one coherent set of Type values, for the lifetime
+/// of one compilation.
+class CompoundTypeId {
+public:
+    constexpr CompoundTypeId() noexcept = default;
+
+    constexpr bool isValid() const noexcept { return id_ != kInvalidId; }
+
+    friend constexpr bool operator==(CompoundTypeId, CompoundTypeId) noexcept = default;
+
+private:
+    friend class SemanticModel;
+
+    constexpr explicit CompoundTypeId(std::uint32_t id) noexcept : id_(id) {}
+
+    constexpr std::uint32_t rawId() const noexcept { return id_; }
+
+    static constexpr std::uint32_t kInvalidId = std::numeric_limits<std::uint32_t>::max();
+
+    std::uint32_t id_ = kInvalidId;
+};
+
+/// A semantic type: a small, cheap-to-copy value - NOT a heap object,
+/// NOT reference-counted, NOT polymorphic. Every primitive TypeKind
+/// (Unresolved through Str) is fully self-describing from `kind_` alone,
+/// exactly as before M7A - constructing/copying/comparing one of those
+/// remains as cheap as a plain enum, with `compoundId_` simply left at
+/// its default, invalid value. Array is the one KIND whose full
+/// identity additionally depends on structural payload (an element Type
+/// + a length) that cannot fit in a flat enum tag - that payload is
+/// never stored inline in Type itself (which would force EVERY Type,
+/// including every plain `i32`, to carry unused space or an owning
+/// pointer); instead Type stores only a `CompoundTypeId` handle into the
+/// issuing SemanticModel's own interning table (see
+/// SemanticModel::internArray()/arrayElementType()/arrayLength()). Type
+/// therefore stays exactly what it always was - two small trivially-
+/// copyable fields, no raw owning pointers, no global mutable state,
+/// safe to store in a Symbol, an expression-type map, or a
+/// FunctionSignature exactly like before.
 ///
 /// Unresolved vs. Error - not interchangeable:
 ///
@@ -53,18 +119,26 @@ enum class TypeKind : std::uint8_t {
 ///   semantic error (e.g. a NamedTypeSyntax naming an unknown type).
 ///   Always accompanied by a SemanticError recording why.
 ///
-/// Only Unit, the primitive numeric/bool/char kinds, and (as of the
-/// Minimal String Literal Support milestone) Str are modeled here.
-/// References, slices, arrays, generics, and functions-as-values remain
-/// unrepresented - a syntactic type in one of those shapes still resolves
-/// to Type::unresolved(), never a fabricated Type of some new kind
-/// invented to stand in for it.
+/// Unit, the primitive numeric/bool/char kinds, Str, and (as of KAI
+/// LANGUAGE M7A) Array are modeled here. References, slices, generics,
+/// and functions-as-values remain unrepresented - a syntactic type in
+/// one of those shapes still resolves to Type::unresolved(), never a
+/// fabricated Type of some new kind invented to stand in for it. Slices
+/// (`[T]`) are a DISTINCT, still-future, non-owning view type - M7A
+/// deliberately does not resolve them to Array or to anything else (see
+/// SemanticAnalyzer.cpp's resolveTypeSyntax()).
 ///
 /// Deliberately no single `primitive(TypeKind)` factory: that shape
 /// would let a caller pass Error/Unresolved into it and read at the call
 /// site as if it were requesting an ordinary primitive. Each kind gets
 /// its own named factory instead, so constructing an Error or Unresolved
-/// Type is always textually explicit.
+/// Type is always textually explicit. Array deliberately has NO such
+/// factory at all - unlike every primitive kind, an array Type cannot be
+/// constructed from a bare TypeKind: it can only be produced by
+/// SemanticModel::internArray(), because canonicalization (so two
+/// equivalent `[i32; 3]` types compare equal) requires consulting that
+/// model's interning table. This is an intentional asymmetry, not an
+/// oversight.
 class Type {
 public:
     static constexpr Type unresolved() noexcept { return Type(TypeKind::Unresolved); }
@@ -132,12 +206,33 @@ public:
 
     constexpr bool isStr() const noexcept { return kind_ == TypeKind::Str; }
 
+    /// KAI LANGUAGE M7A: true for a fixed-size array Type. Use
+    /// SemanticModel::arrayElementType()/arrayLength() to inspect its
+    /// structure - never CompoundTypeId/rawId() directly (private to
+    /// Type/SemanticModel exactly like SymbolId's own rawId()).
+    constexpr bool isArray() const noexcept { return kind_ == TypeKind::Array; }
+
     friend constexpr bool operator==(const Type&, const Type&) noexcept = default;
 
 private:
+    friend class SemanticModel;
+
     constexpr explicit Type(TypeKind kind) noexcept : kind_(kind) {}
 
+    /// Only SemanticModel::internArray() ever calls this - see
+    /// CompoundTypeId's own class comment for the lifetime contract this
+    /// establishes.
+    constexpr Type(TypeKind kind, CompoundTypeId compoundId) noexcept : kind_(kind), compoundId_(compoundId) {}
+
+    constexpr CompoundTypeId compoundId() const noexcept { return compoundId_; }
+
     TypeKind kind_;
+
+    /// Default-invalid (and therefore ignored by operator==='s member-
+    /// wise comparison being trivially equal) for every primitive kind -
+    /// only ever set to a real value by the (TypeKind, CompoundTypeId)
+    /// constructor above, i.e. only for Array.
+    CompoundTypeId compoundId_{};
 };
 
 } // namespace kai::semantic

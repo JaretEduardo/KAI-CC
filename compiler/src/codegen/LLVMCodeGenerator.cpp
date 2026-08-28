@@ -692,6 +692,20 @@ llvm::Type* LLVMCodeGenerator::lowerType(Type type) {
         case TypeKind::Error:
         case TypeKind::Char:
             return nullptr;
+        case TypeKind::Array:
+            // KAI LANGUAGE M7A: Array is now a real semantic Type (see
+            // Type.hpp), but its LLVM lowering ([N x ElementType],
+            // element GEP/load/store, bounds checking) is explicitly
+            // deferred to M7B - see this class's own header comment.
+            // nullptr here is the SAME "not yet backend-lowerable"
+            // signal every other unsupported Type already returns
+            // (Unresolved/Error/Char) - existing callers (parameter/
+            // return/local-type checks) already treat nullptr uniformly
+            // via recordUnsupportedConstruct(), so an array-typed
+            // parameter/return/local fails cleanly with the SAME
+            // actionable message a slice/reference-typed one already
+            // does today, never a crash or silent miscompile.
+            return nullptr;
     }
     return nullptr;
 }

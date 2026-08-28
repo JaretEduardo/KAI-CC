@@ -381,7 +381,39 @@ private:
     /// Builtin-call "deferred construct" rule rather than the "Error
     /// child propagates" rule implemented constructs use.
     Type checkDeferredAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
-    Type checkArrayLiteralExpr(const ast::ArrayLiteralExpr& array, SemanticModel& model) const;
+    /// KAI LANGUAGE M7A: produces a real fixed-size array Type
+    /// `[ElementType; N]` for a non-empty, homogeneous literal - reusing
+    /// the SAME sibling/contextual-literal-adaptation spirit
+    /// checkMatchedOperands() already uses for binary operators,
+    /// generalized to N elements (an explicit `expected` array element
+    /// type always wins; otherwise the first non-"flexible" element's
+    /// own no-context type becomes the anchor offered to the rest; if
+    /// every element is flexible, each simply defaults independently -
+    /// still coherent, since a flexible literal's default never depends
+    /// on position). Error/Unresolved propagate exactly like
+    /// resolveMatchedOperatorResult() does. An inhomogeneous literal
+    /// (e.g. `[1, true, 3]`) is rejected via
+    /// SemanticErrorKind::IncompatibleArrayElementType. An empty literal
+    /// `[]` is accepted ONLY when `expected` supplies a concrete array
+    /// element type (M7A spec #10 - "no standalone inferred element
+    /// type"); otherwise SemanticErrorKind::AmbiguousEmptyArrayLiteral.
+    /// Never checks any element more than once (each element is checked
+    /// EXACTLY once, whether or not it becomes the anchor). No length
+    /// mismatch against `expected` is special-cased here at all: the
+    /// literal's OWN structural type (element type + actual element
+    /// count) is always what's returned, and the CALLER's existing
+    /// generic `initializerType == declaredType` comparison
+    /// (checkVarDecl()) already rejects a length mismatch correctly, for
+    /// free, now that `[i32; 3] != [i32; 4]` is real Type inequality -
+    /// no new length-specific diagnostic is invented here.
+    Type checkArrayLiteralExpr(const ast::ArrayLiteralExpr& array, std::optional<Type> expected,
+                                SemanticModel& model) const;
+
+    /// KAI LANGUAGE M7A spec §12: deliberately UNCHANGED - `object[index]`
+    /// element-read typing (index-domain validation, bounds checking)
+    /// remains fully deferred to M7B. Still only checks `object`/`index`
+    /// for their own independent errors and always returns
+    /// Type::unresolved(), exactly as before Array became a real Type.
     Type checkIndexExpr(const ast::IndexExpr& index, SemanticModel& model) const;
     Type checkMemberExpr(const ast::MemberExpr& member, SemanticModel& model) const;
     Type checkErrorPropagationExpr(const ast::ErrorPropagationExpr& errorPropagation, SemanticModel& model) const;

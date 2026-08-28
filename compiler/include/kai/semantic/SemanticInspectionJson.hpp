@@ -32,8 +32,12 @@ void appendRange(std::string& out, const InspectionRange& range);
 /// Parameter/Local: `type`+`enclosingFunction`) onto `out` - reused
 /// as-is by M2's definition/references JSON so a symbol never has two
 /// subtly different JSON shapes depending on which command produced it
-/// (M2 spec §25).
-void appendSymbolJson(std::string& out, const SemanticSymbolInfo& symbol);
+/// (M2 spec §25). `model` MUST be the SAME SemanticModel `symbol`'s own
+/// Type field(s) were resolved against (KAI LANGUAGE M7A: needed to
+/// render a fixed-size array type as "[i32; 3]" via semantic::typeName()
+/// - see that function's own doc comment for the exact lifetime
+/// contract this establishes).
+void appendSymbolJson(std::string& out, const SemanticSymbolInfo& symbol, const SemanticModel& model);
 
 /// SEMANTIC INSPECTION MILESTONE 1: the numeric schema version of the
 /// JSON shape `writeSemanticInspectionJson()` produces - an external
@@ -74,6 +78,10 @@ inline constexpr int kSemanticInspectionSchemaVersion = 1;
 /// Produces compact (non-pretty-printed) JSON with NO trailing newline -
 /// callers decide their own output framing (e.g. a CLI command appending
 /// exactly one `\n` before writing to stdout).
-std::string writeSemanticInspectionJson(const SemanticInspectionResult& result);
+///
+/// `model` MUST be the SAME SemanticModel `result` was produced from
+/// (every call site already has it in scope - see appendSymbolJson()'s
+/// own doc comment for why KAI LANGUAGE M7A needs it).
+std::string writeSemanticInspectionJson(const SemanticInspectionResult& result, const SemanticModel& model);
 
 } // namespace kai::semantic

@@ -36,10 +36,17 @@ not deleted, but they do **not** compile with the current `kaicc` and are
 **not** included in release artifacts. Each currently fails for one of
 these reasons:
 
-- **Arrays/slices are not yet backend-lowerable.** A function parameter
-  or local of array/slice shape (`[T]`, `[T; N]`) fails during code
-  generation with `code generation is not yet supported for this
-  parameter's type` (or the equivalent return-type message).
+- **Arrays/slices are not yet backend-lowerable (native execution).**
+  KAI LANGUAGE M7A (post-alpha.2) makes a fixed-size array `[T; N]` a
+  real semantic type - `let xs = [1, 2, 3]` and `let xs: [i32; 3] = [1,
+  2, 3]` both resolve and type-check successfully now - but LLVM
+  lowering for arrays (element reads/writes, bounds checking) remains
+  unimplemented: an array-typed function PARAMETER/return still fails
+  with `code generation is not yet supported for this parameter's type`
+  (or the equivalent return-type message), and an array-typed LOCAL that
+  ever reaches codegen fails with the generic `LLVM IR generation
+  failed`. Slice syntax (`[T]`) remains fully deferred at the type level
+  too (still `Type::unresolved()`), unchanged by M7A.
 - **`for` iteration over anything other than a literal integer range is
   not yet supported.** KAI LANGUAGE M6 (post-alpha.2) makes
   `for i in start..end` over integers a real, executable, native loop -
@@ -50,9 +57,9 @@ these reasons:
 
 | File | Why it doesn't compile today |
 |---|---|
-| `arrays.kai` | Uses array literals, indexing, `for` iteration over an array, and an array-typed parameter (`sum(values: [i32])`) - the parameter type is rejected first. (This file previously also had a structural defect - two `fn main()` declarations, an authoring mistake unrelated to array support - which has been fixed; see "arrays.kai defect" below.) |
+| `arrays.kai` | Uses array literals, indexing, `for` iteration over an array (`for value in values`/`for n in numbers`), and a slice-typed parameter (`sum(values: [i32])`) - fails with TWO **semantic** `unsupported for-loop iterable` errors (KAI LANGUAGE M6) before compilation ever reaches the codegen stage, so the array-typed local/slice parameter's own still-unsupported backend lowering is never even reached. (This file previously also had a structural defect - two `fn main()` declarations, an authoring mistake unrelated to array support - which has been fixed; see "arrays.kai defect" below.) |
 | `calculator.kai` | Compares two `str` values with `==` (`op == "+"`) - string equality is not implemented; this is a **semantic** error (`invalid binary operands`), not a codegen limitation. |
-| `mini_program.kai` | Uses array-typed parameters (`average(values: [f64])`), `for` iteration over an array, and array member access (`.len`) - none implemented yet. |
+| `mini_program.kai` | Uses a slice-typed parameter (`average(values: [f64])`), `for` iteration over an array, and array member access (`.len`) - fails with the same **semantic** `unsupported for-loop iterable` error as `arrays.kai` above, for the same reason. |
 | `results.kai` | Sketches `Result<(), IOError>` and the `?` operator against an undefined `write_file()`/`IOError` - a design fragment with no `main`, not a runnable program; fails with `unknown identifier`. |
 
 See the root [`README.md`](../README.md)'s "Current limitations" section

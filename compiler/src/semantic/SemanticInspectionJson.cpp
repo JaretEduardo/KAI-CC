@@ -74,11 +74,11 @@ namespace {
 // Implementation details of appendSymbolJson() only - never needed
 // outside this file.
 
-void appendParameter(std::string& out, const SemanticParameterInfo& parameter) {
+void appendParameter(std::string& out, const SemanticParameterInfo& parameter, const SemanticModel& model) {
     out += "{\"name\":";
     appendEscapedJsonString(out, parameter.name);
     out += ",\"type\":";
-    appendEscapedJsonString(out, typeName(parameter.type));
+    appendEscapedJsonString(out, typeName(parameter.type, model));
     out += ",\"definition\":";
     appendRange(out, parameter.definition);
     out += '}';
@@ -101,7 +101,7 @@ std::string_view symbolKindName(SemanticSymbolKind kind) {
 
 // Public - see this function's own declaration in SemanticInspectionJson.hpp
 // for why M2's definition/references JSON reuses this exact per-symbol shape.
-void appendSymbolJson(std::string& out, const SemanticSymbolInfo& symbol) {
+void appendSymbolJson(std::string& out, const SemanticSymbolInfo& symbol, const SemanticModel& model) {
     out += "{\"name\":";
     appendEscapedJsonString(out, symbol.name);
     out += ",\"kind\":";
@@ -115,13 +115,13 @@ void appendSymbolJson(std::string& out, const SemanticSymbolInfo& symbol) {
             if (i != 0) {
                 out += ',';
             }
-            appendParameter(out, symbol.parameters[i]);
+            appendParameter(out, symbol.parameters[i], model);
         }
         out += "],\"returnType\":";
-        appendEscapedJsonString(out, typeName(symbol.returnType));
+        appendEscapedJsonString(out, typeName(symbol.returnType, model));
     } else {
         out += ",\"type\":";
-        appendEscapedJsonString(out, typeName(symbol.type));
+        appendEscapedJsonString(out, typeName(symbol.type, model));
         if (symbol.enclosingFunction.has_value()) {
             out += ",\"enclosingFunction\":";
             appendEscapedJsonString(out, *symbol.enclosingFunction);
@@ -131,7 +131,7 @@ void appendSymbolJson(std::string& out, const SemanticSymbolInfo& symbol) {
     out += '}';
 }
 
-std::string writeSemanticInspectionJson(const SemanticInspectionResult& result) {
+std::string writeSemanticInspectionJson(const SemanticInspectionResult& result, const SemanticModel& model) {
     std::string out;
     out += "{\"schemaVersion\":";
     out += std::to_string(kSemanticInspectionSchemaVersion);
@@ -142,7 +142,7 @@ std::string writeSemanticInspectionJson(const SemanticInspectionResult& result) 
         if (i != 0) {
             out += ',';
         }
-        appendSymbolJson(out, result.symbols[i]);
+        appendSymbolJson(out, result.symbols[i], model);
     }
     out += "]}";
     return out;

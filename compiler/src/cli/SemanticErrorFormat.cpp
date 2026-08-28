@@ -41,29 +41,38 @@ const char* semanticErrorKindName(semantic::SemanticErrorKind kind) {
             return "unsupported str return";
         case semantic::SemanticErrorKind::UnsupportedForIterable:
             return "unsupported for-loop iterable";
+        case semantic::SemanticErrorKind::AmbiguousEmptyArrayLiteral:
+            return "ambiguous empty array literal";
+        case semantic::SemanticErrorKind::IncompatibleArrayElementType:
+            return "incompatible array element type";
     }
     return "semantic error";
 }
 
 } // namespace
 
-std::string formatSemanticError(const SourceManager& sources, const semantic::SemanticError& error) {
+std::string formatSemanticError(const SourceManager& sources, const semantic::SemanticError& error,
+                                 const semantic::SemanticModel& model) {
     const SourceManager::LineColumn where = sources.lineColumn(error.primarySpan.begin());
     std::ostringstream message;
     message << "kaicc: error at " << where.line << ':' << where.column << ": " << semanticErrorKindName(error.kind);
 
     // RELEASE HARDENING M2: SemanticError already carries expectedType/
-    // actualType for these two kinds (SemanticModel.hpp) - previously
+    // actualType for these kinds (SemanticModel.hpp) - previously
     // computed and then silently discarded here. Only append detail when
     // the structured information is actually present (never fabricated),
     // and reuse semantic::typeName() - the ONE canonical Type renderer -
-    // rather than duplicating type-name formatting here.
-    if (error.kind == semantic::SemanticErrorKind::TypeMismatch && error.expectedType.has_value() &&
-        error.actualType.has_value()) {
-        message << ": expected " << semantic::typeName(*error.expectedType) << ", got "
-                 << semantic::typeName(*error.actualType);
+    // rather than duplicating type-name formatting here. KAI LANGUAGE
+    // M7A: IncompatibleArrayElementType reuses TypeMismatch's own
+    // expected/got phrasing (see SemanticModel.hpp's own doc comment on
+    // that error kind for why its fields are shaped the same way).
+    if ((error.kind == semantic::SemanticErrorKind::TypeMismatch ||
+         error.kind == semantic::SemanticErrorKind::IncompatibleArrayElementType) &&
+        error.expectedType.has_value() && error.actualType.has_value()) {
+        message << ": expected " << semantic::typeName(*error.expectedType, model) << ", got "
+                 << semantic::typeName(*error.actualType, model);
     } else if (error.kind == semantic::SemanticErrorKind::LiteralOutOfRange && error.expectedType.has_value()) {
-        message << ": does not fit in " << semantic::typeName(*error.expectedType);
+        message << ": does not fit in " << semantic::typeName(*error.expectedType, model);
     }
 
     return message.str();
