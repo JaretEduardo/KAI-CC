@@ -702,7 +702,7 @@ Assert-True ($sanitizedNoToolchain.Vars.Path -notmatch '(?i)mingw|ucrt64|msys64'
 Write-Section 'kaicc.exe startup WITHOUT any host toolchain on PATH'
 $versionResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('--version') -WorkingDirectory $kaiRoot -Sanitized $sanitizedNoToolchain
 Assert-True ($versionResult.ExitCode -eq 0) 'kaicc.exe --version exits 0 with no host toolchain present'
-Assert-True ($versionResult.Stdout -match '^KAI-CC 0\.1\.0-alpha\.1') "kaicc.exe --version reports the expected 'KAI-CC 0.1.0-alpha.1' (got: $($versionResult.Stdout.Trim()))"
+Assert-True ($versionResult.Stdout -match '^KAI-CC 0\.1\.0-alpha\.2') "kaicc.exe --version reports the expected 'KAI-CC 0.1.0-alpha.2' (got: $($versionResult.Stdout.Trim()))"
 
 $helpResult = Invoke-Native -FilePath $kaiccExe -ArgumentList @('--help') -WorkingDirectory $kaiRoot -Sanitized $sanitizedNoToolchain
 Assert-True ($helpResult.ExitCode -eq 0) 'kaicc.exe --help exits 0 with no host toolchain present'

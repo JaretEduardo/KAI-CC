@@ -616,8 +616,11 @@ jobs:
           retention-days: 7
 
       - name: Bundled kaicc.exe --version (informational)
-        # spec §24: expected to still report 0.1.0-alpha.1 during this
-        # milestone - no version bump happens here.
+        # RELEASE PREP v0.1.0-alpha.2: expected to report 0.1.0-alpha.2 on
+        # this release-prep branch (KAI_CC_PRERELEASE_SUFFIX bumped in
+        # CMakeLists.txt) - informational sanity check, not a hard
+        # assertion here (see test-windows-fresh-user.ps1 for the real
+        # exact-version assertion against this same bundled binary).
         run: ./bin/kaicc.exe --version
 
   # WINDOWS FRESH-USER M5: the question this job answers is deliberately
