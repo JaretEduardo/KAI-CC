@@ -137,20 +137,24 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
     std::vector<llvm::Type*> paramTypes;
     paramTypes.reserve(signature.parameterTypes.size());
     for (std::size_t i = 0; i < signature.parameterTypes.size(); ++i) {
-        // KAI LANGUAGE M7B: arrays as PARAMETERS are explicitly out of
-        // scope (no array function ABI exists or is decided) - checked
-        // here, structurally, BEFORE calling lowerType() at all, even
-        // though lowerType() itself would now happily produce a real
-        // `[N x T]` LLVM type for a supported element type (M7B makes
-        // Array a real lowerable local-storage type - see lowerType()'s
-        // own Array case). Passing this straight to lowerType() would
-        // silently start accepting an array-typed parameter the moment
-        // its element type also happens to be backend-lowerable, which
-        // would mean inventing an array-by-value calling convention as
-        // an unreviewed side effect - never appropriate here. Same
-        // "unsupported parameter type" message/diagnostic path as every
-        // other unsupported parameter shape - never a distinct message
-        // that would suggest this is a different kind of limitation.
+        // KAI LANGUAGE M7B/M8A: arrays as PARAMETERS remain explicitly
+        // out of scope for CODEGEN - checked here, structurally, BEFORE
+        // calling lowerType() at all, even though lowerType() itself
+        // would now happily produce a real `[N x T]` LLVM type for a
+        // supported element type (M7B makes Array a real lowerable
+        // local-storage type - see lowerType()'s own Array case).
+        // Passing this straight to lowerType() would silently start
+        // accepting an array-typed parameter the moment its element type
+        // also happens to be backend-lowerable. KAI LANGUAGE M8A already
+        // resolved the LANGUAGE side of this (array parameters are
+        // semantically by value, TYPE_SYSTEM.md §18) - what remains
+        // undecided is purely the PHYSICAL ABI (registers/stack/sret/
+        // byval-style lowering), an M8B backend decision this guard
+        // deliberately keeps from being invented as a side effect of
+        // Array becoming lowerable. Same "unsupported parameter type"
+        // message/diagnostic path as every other unsupported parameter
+        // shape - never a distinct message that would suggest this is a
+        // different kind of limitation.
         if (signature.parameterTypes[i].isArray()) {
             recordUnsupportedConstruct("code generation is not yet supported for this parameter's type",
                                         fn.params()[i].type->span());
@@ -171,8 +175,10 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
         paramTypes.push_back(llvmParamType);
     }
 
-    // KAI LANGUAGE M7B: arrays as RETURN VALUES are equally out of scope,
-    // for the identical "no array ABI decided" reason above.
+    // KAI LANGUAGE M7B/M8A: arrays as RETURN VALUES are equally out of
+    // scope for codegen, for the identical "physical ABI not yet
+    // implemented" reason above (language semantics: by value, resolved
+    // by M8A, TYPE_SYSTEM.md §18).
     if (signature.returnType.isArray()) {
         const SourceSpan span = fn.returnType() != nullptr ? fn.returnType()->span() : fn.name().span;
         recordUnsupportedConstruct("code generation is not yet supported for this function's return type", span);
@@ -673,12 +679,12 @@ bool LLVMCodeGenerator::generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llv
 // initializer shape (an identifier, a call, ...) - i.e. `let b = a` for
 // two array-typed values - is deliberately kept unsupported (returns
 // false, the same clean "LLVM IR generation failed" every other
-// unsupported construct produces): M7B spec §13 explicitly forbids
-// silently enabling whole-array value copying just because Array became
-// a real lowerable LLVM aggregate type - that is a real language-
-// semantics (Copy/aliasing) question for separate, explicit review, not
-// a side effect of this milestone. See lowerAssignmentExpr()'s own
-// identical guard for `a = b` (LLVMExpressionLowering.cpp).
+// unsupported construct produces): this is real LANGUAGE semantics KAI
+// LANGUAGE M8A already resolved (ordinary value-copy, no aliasing -
+// TYPE_SYSTEM.md §19) - what remains is purely the M8B backend
+// implementation, never something enabled silently as a side effect of
+// Array becoming lowerable. See lowerAssignmentExpr()'s own identical
+// guard for `a = b` (LLVMExpressionLowering.cpp).
 bool LLVMCodeGenerator::generateArrayVarDeclStmt(const ast::VarDeclStmt& varDecl, SymbolId id,
                                                   llvm::ArrayType* arrayType, llvm::Function& function,
                                                   llvm::IRBuilder<>& builder, const SemanticModel& model) {

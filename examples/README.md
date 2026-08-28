@@ -38,18 +38,24 @@ not deleted, but they do **not** compile with the current `kaicc` and are
 these reasons:
 
 - **Arrays as function parameters/returns, and slices, remain
-  unsupported.** KAI LANGUAGE M7B (post-alpha.2) makes a LOCAL fixed-size
-  array `[T; N]` fully executable - literal creation, checked indexed
-  reads/writes, integration with an M6 `for`-range loop - see
-  `arrays.kai` above. What remains explicitly out of scope: arrays as a
-  function PARAMETER or return type (no array calling-convention/ABI has
-  been designed - such a parameter/return still fails with `code
-  generation is not yet supported for this parameter's type`, the same
-  message a still-unsupported type already produces), whole-array
-  assignment/copy (`let b = a` / `a = b` for two array-typed values -
-  deliberately kept unsupported pending explicit language-semantics
-  review, not merely unimplemented by oversight), and slice syntax
-  (`[T]`, still fully deferred at the type level, `Type::unresolved()`).
+  unsupported for NATIVE EXECUTION.** KAI LANGUAGE M7B (post-alpha.2)
+  makes a LOCAL fixed-size array `[T; N]` fully executable - literal
+  creation, checked indexed reads/writes, integration with an M6
+  `for`-range loop - see `arrays.kai` above. KAI LANGUAGE M8A
+  (post-alpha.2) then resolved the remaining LANGUAGE semantics: fixed
+  arrays are value types (`let b = a` / whole-array `a = b` are ordinary
+  value copies, no aliasing), and a function parameter/return of array
+  type is likewise semantically by value with exact structural type
+  matching. What remains explicitly out of scope for the BACKEND (M8B
+  work): arrays as a function PARAMETER or return type (no array
+  calling-convention/ABI has been implemented yet - such a
+  parameter/return still fails with `code generation is not yet
+  supported for this parameter's type`, the same message a still-
+  unsupported type already produces), whole-array assignment/copy (`let
+  b = a` / `a = b` for two array-typed values - a deliberate backend
+  guard still rejects this cleanly, now that the language semantics
+  themselves are settled), and slice syntax (`[T]`, still fully deferred
+  at the type level, `Type::unresolved()`).
 - **`for` iteration over anything other than a literal integer range is
   not yet supported.** KAI LANGUAGE M6 (post-alpha.2) makes
   `for i in start..end` over integers a real, executable, native loop -

@@ -26,17 +26,13 @@
 - When does ownership move?
 - Are primitive values copied?
 - How are strings passed?
-- How are arrays passed?
-- Should whole-array assignment/copy (`let b = a`, `a = b` for two
-  array-typed values) be Copy-by-value? KAI LANGUAGE M7B found this is
-  technically trivial to enable (LLVM already supports loading/storing a
-  whole aggregate as one SSA value, with zero codegen changes needed
-  once Array became a real lowerable Type) but deliberately left it
-  blocked (an explicit codegen-level guard rejects it) pending this
-  exact language-semantics decision, rather than enabling it as an
-  unreviewed side effect - see COMPILER_ARCHITECTURE.md's own M7B note
-  and LLVMCodeGenerator.cpp's lowerAssignmentExpr()/
-  generateArrayVarDeclStmt() for where that guard lives.
+- How are arrays passed at the LOW-LEVEL PHYSICAL ABI (registers, stack,
+  hidden pointer/sret/byval-style lowering, ...)? **Not** a language-
+  semantics question - KAI LANGUAGE M8A resolved the language semantics
+  themselves (arrays are passed BY VALUE, see the Resolved section
+  below); this remaining question is an M8B backend/target
+  implementation decision only, with no observable effect on KAI source
+  semantics regardless of which physical strategy is chosen.
 - Will explicit provenance/lifetime syntax ever be needed for cases local
   inference cannot resolve? (Reserved future possibility, not planned for
   KAI 0.1 - see MEMORY_MODEL.md §13.)
@@ -82,4 +78,5 @@
 ✓ **(KAI LANGUAGE M7A)** Arrays are represented as a real structural semantic type `[T; N]`: element type and compile-time length are both part of the type's own identity (`[i32; 3]` and `[i32; 4]` are distinct types, as are `[i32; 3]` and `[u32; 3]`), inline-owned (no runtime length header), with a backend representation expected to be LLVM's `[N x T]`. Still open: how arrays are PASSED at a function boundary (see the Memory section above) - this resolves the type's own identity/representation only, not an ABI. See TYPE_SYSTEM.md §18 and Type.hpp's own CompoundTypeId documentation.
 ✓ **(KAI LANGUAGE M7A)** Arrays and slices are distinct, non-interchangeable types: a fixed-size array `[T; N]` owns N elements inline; a slice `[T]` is a separate, still-future, non-owning borrowed view. `[T]` does not resolve to Array and has no semantic Type representation yet. See TYPE_SYSTEM.md §18/§20.
 ✓ **(KAI LANGUAGE M7A, implemented in M7B)** Normal array indexing (`xs[index]`) is CHECKED: `0 <= index < N` for an array of length N, verified at compile time when the index is a compile-time constant, otherwise at runtime; a dynamic out-of-bounds access (including any negative signed index) terminates the program immediately via a non-recoverable trap - this is NOT the language `panic` mechanism, introduces no unwinding/recovery, and its exact OS signal/exit code is not a stable language guarantee. The element address/load/store must never occur before the bounds check succeeds - normal indexing never silently lowers to an unchecked GEP. A future explicitly-unsafe unchecked-indexing operation may be designed separately without changing this normal-indexing contract. See TYPE_SYSTEM.md §18.
-✓ **(KAI LANGUAGE M7B)** A LOCAL fixed-size array is real, native, executable code: literal creation, checked indexed reads/writes (a `mut` binding only), and integration with an M6 `for`-range loop. Arrays as a function parameter or return type remain unimplemented (no array calling-convention/ABI has been designed) - see the still-open "How are arrays passed?" question above.
+✓ **(KAI LANGUAGE M7B)** A LOCAL fixed-size array is real, native, executable code: literal creation, checked indexed reads/writes (a `mut` binding only), and integration with an M6 `for`-range loop. Arrays as a function parameter or return type, and whole-array assignment/copy, remain unexecutable in M7B (deliberate backend guards) pending the semantic decisions M8A then resolved below, and the physical ABI M8B will implement.
+✓ **(KAI LANGUAGE M8A)** Fixed-size arrays are KAI value types: `let b = a` and `mut a = ...; a = b` (exact same structural array type, `a` mutable) are semantically valid value copies - there is no aliasing, no implicit sharing, no copy-on-write, and `a` and `b` are never a special "shared storage" relationship even conceptually. `[T; N]` is Copy-like exactly when `T` is - no `Copy` trait or ownership system was introduced to say so; this is a plain, documented language rule that a future non-Copy element type may need to refine, not a general mechanism. Self-assignment (`a = a`) is ordinarily valid, with no special-cased language error. Whole-array transfer requires the EXACT structural type (`[i32;3]` to `[i32;3]` only - never `[i32;3]` to `[i32;4]` or `[u32;3]`, and never an implicit element-by-element conversion); an array LITERAL may still use ordinary contextual literal typing (`let xs: [u32; 3] = [1, 2, 3]`) - that is unrelated to, and does not generalize, cross-type array value conversion. Function parameters and return values of a fixed-size array type are semantically BY VALUE - a parameter's own value is independent of the caller's binding (no aliasing), a returned array value has no lifetime relationship to callee locals, and parameters remain immutable under KAI's existing (unchanged) parameter rules - no new mutable-parameter syntax. This is a LANGUAGE-semantics resolution only: the low-level physical ABI (registers/stack/hidden-pointer/sret/byval-style lowering) remains a separate, unresolved M8B implementation decision with no bearing on these observable semantics - see the "How are arrays passed at the LOW-LEVEL PHYSICAL ABI" question above. `str` array elements continue following M7B's existing `str` Copy/view contract unchanged - this is not reinterpreted as owned-`String` semantics. No array decay to `[T]`/a pointer/a reference exists or is planned; slices remain a distinct, still-entirely-separate future feature. Backend implementation of all of the above (LLVM aggregate argument/return lowering, whole-array LLVM copy) remains M8B work - M8A is semantics-only. See TYPE_SYSTEM.md §18/§19 and COMPILER_ARCHITECTURE.md's own M8A note.

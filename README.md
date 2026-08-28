@@ -82,9 +82,10 @@ logical `&&`/`||` (short-circuit), assignment, function calls, recursion, `if`/`
 indexed reads (`xs[i]`) and, for a `mut` binding, checked indexed writes (`xs[i] = value`), including inside
 an M6 `for`-range loop. Indexing is CHECKED: a compile-time-constant out-of-bounds index (`xs[3]`/`xs[-1]` for
 a length-3 array) is a compile error, and a dynamic out-of-bounds index (positive, negative, signed, or
-unsigned) traps the program immediately at runtime rather than reading/writing out of bounds - see "Current
-limitations" below for exactly what array support does *not* yet cover (arrays as function parameters/
-returns, slices, whole-array copy).
+unsigned) traps the program immediately at runtime rather than reading/writing out of bounds. Fixed arrays
+are KAI value types (KAI LANGUAGE M8A, post-alpha.2): whole-array copy/assignment and array function
+parameters/returns are semantically by value with no aliasing - see "Current limitations" below for exactly
+what remains native-execution-only work (M8B) versus what is already resolved language semantics.
 
 **Text:** string literals, explicit `str` local annotations, `str` function parameters and return types, and
 `print(str)`. `str` values (including those containing an embedded `\0` byte, which is valid UTF-8) are
@@ -319,13 +320,18 @@ as a semantic error, not silently ignored.
 
 A LOCAL fixed-size array `[T; N]` (`let`/`mut`, literal creation, checked indexed reads/writes, `for`-range
 integration - see "What works today" above) is real, native, executable code as of KAI LANGUAGE M7B
-(post-alpha.2). What remains explicitly out of scope: arrays as a function PARAMETER or return type (no array
-calling-convention/ABI has been designed - such a parameter/return still fails with the same "not yet
-supported for this parameter's/return type" diagnostic any other still-unsupported type produces), whole-array
-assignment/copy (`let b = a` / `a = b` for two array-typed values - deliberately kept unsupported pending
-explicit language-semantics review, not merely unimplemented by oversight), and slice syntax (`[T]`, still
-fully deferred at the type level, `Type::unresolved()`). Also parses and/or type-checks in some form, but
-explicitly **not** backend-lowerable yet:
+(post-alpha.2). KAI LANGUAGE M8A (post-alpha.2) resolves the remaining LANGUAGE semantics: fixed arrays are
+value types (`let b = a` / whole-array `a = b` are ordinary value copies, no aliasing), and a function
+parameter/return of array type is likewise semantically by value (exact structural type required; an inline
+literal argument/return still uses ordinary contextual literal typing) - see "Documentation"'s TYPE_SYSTEM.md
+link for the complete rule. What remains explicitly out of scope for NATIVE EXECUTION (M8B work): arrays as a
+function PARAMETER or return type (no array calling-convention/ABI has been implemented - such a
+parameter/return still fails with the same "not yet supported for this parameter's/return type" diagnostic
+any other still-unsupported type produces), whole-array assignment/copy (`let b = a` / `a = b` - a deliberate
+backend guard still rejects this cleanly, now that the language semantics themselves are settled), and slice
+syntax (`[T]`, still fully deferred at the type level, `Type::unresolved()`) - KAI performs no array decay to
+`[T]`/a pointer/a reference either way. Also parses and/or type-checks in some form, but explicitly **not**
+backend-lowerable yet:
 
 - arrays as function parameters/returns, whole-array copy/assignment, and slices (`[T]`) as a semantic type at
   all - see above

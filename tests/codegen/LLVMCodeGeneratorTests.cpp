@@ -3150,6 +3150,82 @@ void testM6ForLoopIndexedMutationIntegrationVerifies() {
     }
 }
 
+// --- KAI LANGUAGE M8A: backend clean-failure contract preserved ---
+//
+// M8A is a semantic-contract milestone only - it implements NO array
+// function ABI/whole-array-copy codegen. These tests lock in that the
+// M7B backend guards declareFunction()/lowerAssignmentExpr()/
+// generateArrayVarDeclStmt() already established remain in place and
+// still produce a specific, actionable unsupportedConstruct() message
+// (never a crash, never invalid IR, never an accidental success) for
+// every semantically-VALID (per M8A's own approved contract) array
+// function-boundary/whole-copy program. See NativeCompilationTests.cpp
+// for the same contract exercised through the full CLI pipeline.
+
+void testArrayParameterStillRejectedAtBackend() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn sum(xs: [i32; 3]) -> i32 {\n    return xs[0]\n}");
+
+    // Semantically valid per M8A's own approved contract (§6/§19) - the
+    // frontend accepts this unconditionally.
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+    KAI_CHECK(codegen.unsupportedConstruct().has_value());
+    if (codegen.unsupportedConstruct().has_value()) {
+        KAI_CHECK(codegen.unsupportedConstruct()->description ==
+                  "code generation is not yet supported for this parameter's type");
+    }
+}
+
+void testArrayReturnTypeStillRejectedAtBackend() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn make() -> [i32; 3] {\n    return [1, 2, 3]\n}");
+
+    // Semantically valid per M8A's own approved contract (§7/§20).
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+    KAI_CHECK(codegen.unsupportedConstruct().has_value());
+    if (codegen.unsupportedConstruct().has_value()) {
+        KAI_CHECK(codegen.unsupportedConstruct()->description ==
+                  "code generation is not yet supported for this function's return type");
+    }
+}
+
+void testWholeArrayInitializationFromAnotherArrayStillRejectedAtBackend() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn f() {\n    let a = [1, 2, 3]\n    let b = a\n}");
+
+    // Semantically valid per M8A's own approved contract (§1/§18.A) - a
+    // real value copy, not aliasing - but M8A deliberately implements no
+    // codegen for it (§4/§17/§22).
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+}
+
+void testWholeArrayAssignmentStillRejectedAtBackend() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn f() {\n    mut a = [1, 2, 3]\n    let b = [4, 5, 6]\n    a = b\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+}
+
+// Self-assignment (M8A spec §5): semantically valid, with NO special
+// language error - but still produces no codegen success in M8A.
+void testWholeArraySelfAssignmentStillRejectedAtBackend() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn f() {\n    mut a = [1, 2, 3]\n    a = a\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+}
+
 } // namespace
 
 int main() {
@@ -3273,6 +3349,12 @@ int main() {
     testUnsignedDynamicIndexBoundsCFG();
     testM6ForLoopIndexIntegrationVerifies();
     testM6ForLoopIndexedMutationIntegrationVerifies();
+
+    testArrayParameterStillRejectedAtBackend();
+    testArrayReturnTypeStillRejectedAtBackend();
+    testWholeArrayInitializationFromAnotherArrayStillRejectedAtBackend();
+    testWholeArrayAssignmentStillRejectedAtBackend();
+    testWholeArraySelfAssignmentStillRejectedAtBackend();
 
     testPrintLiteralI32SignExtendsToI64();
     testPrintVariableI64();

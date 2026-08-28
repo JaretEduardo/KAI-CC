@@ -639,17 +639,19 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerAssignmentExpr(const ast::As
         return std::nullopt;
     }
 
-    // KAI LANGUAGE M7B spec §13: whole-array reassignment (`a = b`) is
+    // KAI LANGUAGE M7B/M8A: whole-array reassignment (`a = b`) is
     // deliberately kept unsupported here, even though it would otherwise
     // "fall out" of this existing, array-agnostic scalar path for free
     // the moment Array became a real lowerable LLVM aggregate type
     // (CreateLoad/CreateStore both already support an aggregate SSA
-    // value structurally, with zero changes needed below). That is a
-    // real language-semantics question (whole-array Copy/aliasing)
-    // explicitly deferred for separate, explicit review - never
-    // something this milestone enables silently as a side effect of
-    // Array becoming lowerable. Indexed ELEMENT assignment (`xs[i] = v`)
-    // is handled entirely separately above and IS fully supported.
+    // value structurally, with zero changes needed below). KAI LANGUAGE
+    // M8A already resolved the LANGUAGE semantics this would need
+    // (ordinary value-copy, no aliasing - TYPE_SYSTEM.md §19); what
+    // remains is purely the M8B backend implementation (the actual LLVM
+    // copy lowering), never something enabled silently as a side effect
+    // of Array becoming lowerable. Indexed ELEMENT assignment
+    // (`xs[i] = v`) is handled entirely separately above and IS fully
+    // supported.
     if (slot->getAllocatedType()->isArrayTy()) {
         return std::nullopt;
     }

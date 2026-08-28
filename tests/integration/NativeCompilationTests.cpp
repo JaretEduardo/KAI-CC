@@ -771,6 +771,71 @@ void testUnsupportedParameterTypeDiagnosticIsActionable() {
     std::filesystem::remove(sourcePath, ignored);
 }
 
+// KAI LANGUAGE M8A: a FIXED-SIZE array parameter (semantically valid
+// per M8A's own approved by-value contract - §6/§19) still fails
+// cleanly at the backend, through the full CLI, with the SAME
+// actionable message a slice parameter already produces above - no
+// array function ABI exists yet (M8B work), and this is not an
+// accidental regression from M8A's own semantic-contract work.
+void testArrayParameterDiagnosticIsActionable() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_array_param.kai",
+                         "fn sum(xs: [i32; 3]) -> i32 {\n    return xs[0]\n}\nfn main() {\n    let a = [1, 2, 3]\n    print(sum(a))\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_array_param.out", err);
+
+    KAI_CHECK(exitCode == 6);
+    KAI_CHECK(err.str().find("code generation is not yet supported for this parameter's type") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// KAI LANGUAGE M8A: a fixed-size array RETURN type (semantically valid
+// per §7/§20) still fails cleanly at the backend.
+void testArrayReturnTypeDiagnosticIsActionable() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_array_return.kai", "fn make() -> [i32; 3] {\n    return [1, 2, 3]\n}\nfn main() {\n    print(0)\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_array_return.out", err);
+
+    KAI_CHECK(exitCode == 6);
+    KAI_CHECK(err.str().find("code generation is not yet supported for this function's return type") !=
+              std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// KAI LANGUAGE M8A: whole-array initialization (`let b = a`, semantically
+// valid per §1/§18.A) still fails cleanly at the backend - the generic
+// "LLVM IR generation failed" message, since no specific
+// unsupportedConstruct() site exists for this shape (see
+// LLVMCodeGeneratorTests.cpp's own dedicated coverage of the exact
+// guard). The important, tested fact here is exit 6 (a real backend
+// failure), never exit 0 (an accidental silent success) and never a
+// crash.
+void testWholeArrayInitializationDiagnosticFailsCleanly() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_array_whole_copy.kai", "fn main() {\n    let a = [1, 2, 3]\n    let b = a\n    print(b[0])\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_array_whole_copy.out", err);
+
+    KAI_CHECK(exitCode == 6);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
 // NATIVE LINKER (M7 spec §22): emit an object, link it with kai_runtime
 // via NativeLinker directly, confirm the executable exists AND runs.
 
@@ -1097,6 +1162,9 @@ int main() {
     testLiteralOutOfRangeDiagnosticIncludesTargetType();
     testUnsupportedForIterableDiagnosticIsActionable();
     testUnsupportedParameterTypeDiagnosticIsActionable();
+    testArrayParameterDiagnosticIsActionable();
+    testArrayReturnTypeDiagnosticIsActionable();
+    testWholeArrayInitializationDiagnosticFailsCleanly();
 
     testNativeLinkerProducesRunnableExecutable();
 

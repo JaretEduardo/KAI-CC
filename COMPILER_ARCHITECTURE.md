@@ -88,12 +88,15 @@ those primitive types (lowered to the tiny static C runtime described in §12, `
 native object emission (`LLVMObjectEmitter`), and static runtime linking into a real executable
 (`NativeLinker`, invoking the host C compiler driver) via `kaicc <file.kai> -o <output>`.
 
-Still unimplemented: general iterable/foreach semantics and array/slice iteration (`for x in someArray` -
-`for` only supports a literal `start..end` integer range, KAI LANGUAGE M6), a first-class `Range` value,
-arrays as a function parameter or return type (no array calling-convention/ABI exists - KAI LANGUAGE M7B
-deliberately stops at LOCAL arrays only), whole-array assignment/copy (`let b = a` / `a = b` for two
-array-typed values - deliberately kept unsupported pending explicit language-semantics review, not merely
-unimplemented by oversight), slices (`[T]`, still no semantic Type at all), strings/`Char` as backend-
+Still unimplemented (backend/native execution only - see the M8A note below for what is already resolved at
+the language-semantics level): general iterable/foreach semantics and array/slice iteration (`for x in
+someArray` - `for` only supports a literal `start..end` integer range, KAI LANGUAGE M6), a first-class
+`Range` value, arrays as a function parameter or return type (no array calling-convention/ABI has been
+IMPLEMENTED yet - KAI LANGUAGE M8A resolved that they are semantically BY VALUE; M8B implements the actual
+LLVM lowering), whole-array assignment/copy (`let b = a` / `a = b` for two array-typed values - KAI LANGUAGE
+M8A resolved this as ordinary value-copy semantics with no aliasing; a deliberate backend guard still
+rejects it cleanly until M8B implements it, never an unimplemented-by-oversight gap), slices (`[T]`, still
+no semantic Type at all), strings/`Char` as backend-
 lowerable values, references, ownership/borrowing, structs/enums/generics, `panic`/`assert` lowering,
 optimization passes, HIR, an LSP, and the higher-level `kai` CLI wrapper described in §14 (only `kaicc`
 itself exists today).
@@ -237,6 +240,24 @@ Implemented so far: top-level function collection, primitive/unit type resolutio
 Not yet implemented: unreachable-code analysis, constant-condition flow reasoning (e.g. recognizing `if true` or `while true` as always executing), divergence analysis, a general control-flow graph, for-loop iterable/element type validation beyond a literal `start..end` integer range (KAI LANGUAGE M6, post-alpha.2, implements exactly that one form - general iterable/foreach semantics, array/slice iteration, and a first-class `Range` value remain unimplemented), member assignment semantics (`obj.field = value` - structs don't exist yet; `xs[index] = value` for a mutable LOCAL array IS implemented, KAI LANGUAGE M7B, post-alpha.2 - see TYPE_SYSTEM.md §18), builtin call signature validation, reference semantic types, ownership/borrow checking, and first-class function/method call semantics. Semantic analysis as a whole is not yet complete.
 
 **Compound semantic types (KAI LANGUAGE M7A, post-alpha.2):** `semantic::Type` (`compiler/include/kai/semantic/Type.hpp`) started as a flat, closed `TypeKind` enum wrapper with no structural payload - sufficient while every modeled type was fully self-describing from its own kind tag alone. Fixed-size arrays (`[T; N]`) broke that assumption: an array's identity also depends on an element type and a compile-time length, neither of which fits in a flat enum. Rather than turning every `Type` into a heap object/shared_ptr (which would make even `i32` expensively allocated), `Type` instead carries a small, cheap, trivially-copyable `CompoundTypeId` handle alongside its `TypeKind`, meaningful only for compound kinds (currently only Array) and ignored entirely by every primitive kind. The actual structural data (`ArrayTypeInfo { elementType, length }`) lives in ONE compile-scoped interning table OWNED BY `SemanticModel` itself - not a process-global singleton, not a second parameter every pass has to thread through separately, since every pass (SemanticAnalyzer, TypeChecker, LLVMCodeGenerator, and every semantic-tooling consumer) already receives the same `SemanticModel` by reference for the whole compilation's lifetime. `SemanticModel::internArray()` canonicalizes structurally-equal array shapes to the SAME `CompoundTypeId`, so `[i32; 3] == [i32; 3]` compares true by simple value equality, with no deep structural comparison needed at the `Type` level itself. A `Type` carrying a `CompoundTypeId` is only ever valid against the SAME `SemanticModel` that produced it - the same lifetime discipline `SymbolId` already established for symbol identity. Semantic tooling (`SemanticTypeName::typeName()`) reads this same interning table (via `SemanticModel::arrayElementType()`/`arrayLength()`, never a raw `CompoundTypeId`) to render `[i32; 3]` canonically, without any internal ID ever reaching JSON output. This design generalizes to a future second compound `TypeKind` (e.g. a struct/tuple) without further redesign, but M7A itself adds exactly one: Array.
+
+**Semantic value passing vs. physical ABI lowering (KAI LANGUAGE M8A, post-alpha.2):** M8A is a deliberate
+architectural split, not merely a scheduling one. The FRONTEND (SemanticAnalyzer/TypeChecker) resolves and
+enforces KAI's language-level value semantics for fixed-size arrays - value-copy assignment/initialization
+with no aliasing, exact structural type matching, by-value function parameters/returns - entirely through
+the SAME generic, Type-kind-agnostic machinery every other Type already used (Type equality, contextual
+literal adaptation, TypeMismatch, argument/return-type checking); this required ZERO new TypeChecker.cpp
+code, since none of that machinery ever special-cased "is this an aggregate." The BACKEND (LLVMCodeGenerator)
+is a completely separate concern: it decides HOW an array value physically crosses a function boundary or
+gets copied in memory (LLVM aggregate arguments/results, registers, stack, hidden temporaries, indirect/
+`sret`/`byval`-style lowering, ...), and none of those choices may ever change the frontend's already-
+settled observable semantics. M8A intentionally implements none of that backend lowering - the M7B guards
+(`declareFunction()`'s explicit Array parameter/return rejection, `lowerAssignmentExpr()`'s/
+`generateArrayVarDeclStmt()`'s explicit whole-array-copy rejection) remain in place unchanged, so a
+semantically-valid array-parameter/return or whole-array-copy program still fails cleanly at code
+generation until M8B. KAI does not promise a stable, external, C-compatible ABI for how arrays cross a
+function boundary - that remains an M8B target/backend implementation decision, never a language-design
+question (see DESIGN_QUESTIONS.md's own M8A resolution).
 
 Example errors:
 
