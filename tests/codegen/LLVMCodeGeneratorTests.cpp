@@ -9,6 +9,7 @@
 #include "kai/source/SourceManager.hpp"
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Verifier.h>
@@ -16,9 +17,11 @@
 
 #include "support/check.hpp"
 
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <utility>
+#include <vector>
 
 using kai::FileId;
 using kai::SourceManager;
@@ -2822,6 +2825,331 @@ void testUserDefinedPrintShadowsBuiltin() {
     KAI_CHECK(sawCallToUserPrint);
 }
 
+// --- KAI LANGUAGE M7B: local fixed-size arrays + checked indexing ---
+
+// LLVM [N x T] type, local alloca, and literal element stores in the
+// correct source order.
+void testArrayLocalAllocaAndLiteralStores() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    let xs = [10, 20, 30]\n    print(xs[0])\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    const llvm::AllocaInst* arrayAlloca = nullptr;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&inst)) {
+            if (llvm::isa<llvm::ArrayType>(alloca->getAllocatedType())) {
+                arrayAlloca = alloca;
+            }
+        }
+    }
+    KAI_CHECK(arrayAlloca != nullptr);
+    if (arrayAlloca == nullptr) {
+        return;
+    }
+    const auto* arrayType = llvm::cast<llvm::ArrayType>(arrayAlloca->getAllocatedType());
+    KAI_CHECK(arrayType->getNumElements() == 3);
+    KAI_CHECK(arrayType->getElementType()->isIntegerTy(32));
+
+    // Three GEP+store pairs into the array, storing 10/20/30 in order.
+    std::vector<std::int64_t> storedConstants;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+            if (const auto* c = llvm::dyn_cast<llvm::ConstantInt>(store->getValueOperand())) {
+                if (llvm::isa<llvm::GetElementPtrInst>(store->getPointerOperand())) {
+                    storedConstants.push_back(c->getSExtValue());
+                }
+            }
+        }
+    }
+    KAI_CHECK(storedConstants.size() >= 3);
+    if (storedConstants.size() >= 3) {
+        KAI_CHECK(storedConstants[0] == 10);
+        KAI_CHECK(storedConstants[1] == 20);
+        KAI_CHECK(storedConstants[2] == 30);
+    }
+}
+
+// Zero-length arrays lower to a valid `[0 x T]`.
+void testZeroLengthArrayLowersAndVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    let xs: [i32; 0] = []\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// Array literal elements are lowered left to right, exactly once each -
+// side-effecting calls must appear in source order with no duplicates.
+void testArrayLiteralElementsEvaluatedLeftToRightOnce() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn a() -> i32 {\n    print(100)\n    return 1\n}\n"
+                                      "fn b() -> i32 {\n    print(200)\n    return 2\n}\n"
+                                      "fn main() {\n    let xs = [a(), b()]\n    print(xs[0])\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    const llvm::Function* aFn = module.getFunction("a");
+    const llvm::Function* bFn = module.getFunction("b");
+    const llvm::Function* mainFn = module.getFunction("main");
+    KAI_CHECK(aFn != nullptr && bFn != nullptr && mainFn != nullptr);
+    if (aFn == nullptr || bFn == nullptr || mainFn == nullptr) {
+        return;
+    }
+
+    std::vector<const llvm::Function*> callOrder;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() == aFn || call->getCalledFunction() == bFn) {
+                    callOrder.push_back(call->getCalledFunction());
+                }
+            }
+        }
+    }
+    KAI_CHECK(callOrder.size() == 2);
+    if (callOrder.size() == 2) {
+        KAI_CHECK(callOrder[0] == aFn);
+        KAI_CHECK(callOrder[1] == bFn);
+    }
+}
+
+// Element load: correct GEP form (first index 0, second the element
+// index) followed by exactly one load of the element type.
+void testElementReadUsesCorrectGEPAndLoad() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    let xs = [10, 20, 30]\n    print(xs[1])\n}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    bool sawElementLoad = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst)) {
+                KAI_CHECK(llvm::isa<llvm::ArrayType>(gep->getSourceElementType()));
+                KAI_CHECK(gep->getNumIndices() == 2);
+                for (const llvm::Use& use : gep->uses()) {
+                    if (llvm::isa<llvm::LoadInst>(use.getUser())) {
+                        sawElementLoad = true;
+                    }
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawElementLoad);
+}
+
+// Element write: a mutable indexed assignment stores through the same
+// kind of GEP'd address, never through the whole-array alloca directly.
+void testElementWriteStoresThroughGEP() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() {\n    mut xs = [10, 20, 30]\n    xs[1] = 99\n    print(xs[1])\n}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    bool sawStoreOfNinetyNineThroughGEP = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+                if (const auto* c = llvm::dyn_cast<llvm::ConstantInt>(store->getValueOperand())) {
+                    if (c->getSExtValue() == 99 && llvm::isa<llvm::GetElementPtrInst>(store->getPointerOperand())) {
+                        sawStoreOfNinetyNineThroughGEP = true;
+                    }
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawStoreOfNinetyNineThroughGEP);
+}
+
+// Bounds CFG: a signed dynamic index produces a signed comparison
+// (ICMP_SGE for the non-negative check) plus the unsigned upper-bound
+// comparison (ICMP_ULT), an llvm.trap + unreachable out-of-bounds block,
+// and NO GEP/load/store dominates the trap block (i.e. none of them
+// exist in it).
+void testSignedDynamicIndexBoundsCFG() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let xs = [10, 20, 30]\n"
+                                      "    mut i: i32 = 1\n"
+                                      "    print(xs[i])\n"
+                                      "}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    bool sawSGE = false;
+    bool sawULT = false;
+    bool sawTrapCall = false;
+    const llvm::BasicBlock* trapBlock = nullptr;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                sawSGE |= cmp->getPredicate() == llvm::ICmpInst::ICMP_SGE;
+                sawULT |= cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT;
+            }
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "llvm.trap") {
+                    sawTrapCall = true;
+                    trapBlock = &block;
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawSGE);
+    KAI_CHECK(sawULT);
+    KAI_CHECK(sawTrapCall);
+    KAI_CHECK(trapBlock != nullptr);
+    if (trapBlock != nullptr) {
+        KAI_CHECK(llvm::isa<llvm::UnreachableInst>(trapBlock->getTerminator()));
+        // No element GEP/load/store in the trap block itself - the
+        // element address is only ever computed in the in-bounds
+        // successor.
+        for (const llvm::Instruction& inst : *trapBlock) {
+            KAI_CHECK(!llvm::isa<llvm::GetElementPtrInst>(inst));
+            KAI_CHECK(!llvm::isa<llvm::LoadInst>(inst));
+            KAI_CHECK(!llvm::isa<llvm::StoreInst>(inst));
+        }
+    }
+}
+
+// Bounds CFG: an UNSIGNED dynamic index skips the non-negative (SGE)
+// check entirely - only the unsigned upper-bound comparison is needed
+// (M7B spec §6).
+void testUnsignedDynamicIndexBoundsCFG() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let xs = [10, 20, 30]\n"
+                                      "    mut i: u32 = 1\n"
+                                      "    print(xs[i])\n"
+                                      "}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    bool sawSGE = false;
+    bool sawULT = false;
+    bool sawTrapCall = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                sawSGE |= cmp->getPredicate() == llvm::ICmpInst::ICMP_SGE;
+                sawULT |= cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT;
+            }
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "llvm.trap") {
+                    sawTrapCall = true;
+                }
+            }
+        }
+    }
+    KAI_CHECK(!sawSGE);
+    KAI_CHECK(sawULT);
+    KAI_CHECK(sawTrapCall);
+}
+
+// M6 integration: `for i in 0..3 { print(xs[i]) }` - the for-loop's own
+// induction variable is reused directly as the index expression, and
+// the whole module still verifies.
+void testM6ForLoopIndexIntegrationVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let xs = [10, 20, 30]\n"
+                                      "    for i in 0..3 {\n"
+                                      "        print(xs[i])\n"
+                                      "    }\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// M6 integration, mutable: `for i in 0..3 { xs[i] = xs[i] + 1 }`.
+void testM6ForLoopIndexedMutationIntegrationVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    mut xs = [10, 20, 30]\n"
+                                      "    for i in 0..3 {\n"
+                                      "        xs[i] = xs[i] + 1\n"
+                                      "    }\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -2935,6 +3263,16 @@ int main() {
     testForLoopEndExpressionLoweredExactlyOnce();
     testForLoopNestedVerifies();
     testForLoopBodyReturnVerifies();
+
+    testArrayLocalAllocaAndLiteralStores();
+    testZeroLengthArrayLowersAndVerifies();
+    testArrayLiteralElementsEvaluatedLeftToRightOnce();
+    testElementReadUsesCorrectGEPAndLoad();
+    testElementWriteStoresThroughGEP();
+    testSignedDynamicIndexBoundsCFG();
+    testUnsignedDynamicIndexBoundsCFG();
+    testM6ForLoopIndexIntegrationVerifies();
+    testM6ForLoopIndexedMutationIntegrationVerifies();
 
     testPrintLiteralI32SignExtendsToI64();
     testPrintVariableI64();

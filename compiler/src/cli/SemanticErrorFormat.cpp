@@ -45,6 +45,12 @@ const char* semanticErrorKindName(semantic::SemanticErrorKind kind) {
             return "ambiguous empty array literal";
         case semantic::SemanticErrorKind::IncompatibleArrayElementType:
             return "incompatible array element type";
+        case semantic::SemanticErrorKind::InvalidIndexTarget:
+            return "invalid index target";
+        case semantic::SemanticErrorKind::InvalidIndexType:
+            return "invalid index type";
+        case semantic::SemanticErrorKind::ArrayIndexOutOfBounds:
+            return "array index out of bounds";
     }
     return "semantic error";
 }
@@ -73,6 +79,10 @@ std::string formatSemanticError(const SourceManager& sources, const semantic::Se
                  << semantic::typeName(*error.actualType, model);
     } else if (error.kind == semantic::SemanticErrorKind::LiteralOutOfRange && error.expectedType.has_value()) {
         message << ": does not fit in " << semantic::typeName(*error.expectedType, model);
+    } else if ((error.kind == semantic::SemanticErrorKind::InvalidIndexTarget ||
+                error.kind == semantic::SemanticErrorKind::InvalidIndexType) &&
+               error.actualType.has_value()) {
+        message << ": " << semantic::typeName(*error.actualType, model);
     }
 
     return message.str();

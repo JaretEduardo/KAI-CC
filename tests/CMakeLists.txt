@@ -62,6 +62,7 @@ kai_add_test(semantic_type_checker_assignment_tests semantic/type_checker/Assign
 kai_add_test(semantic_type_checker_control_tests semantic/type_checker/ConditionAndReturnTests.cpp)
 kai_add_test(semantic_type_checker_for_range_tests semantic/type_checker/ForRangeTests.cpp)
 kai_add_test(semantic_type_checker_array_literal_tests semantic/type_checker/ArrayLiteralTests.cpp)
+kai_add_test(semantic_type_checker_array_index_tests semantic/type_checker/ArrayIndexTests.cpp)
 # MINIMAL STRING LITERAL SUPPORT: Type::str() TypeChecker coverage, split
 # out like every other type_checker/*.cpp milestone file.
 kai_add_test(semantic_type_checker_string_literal_tests semantic/type_checker/StringLiteralTests.cpp)

@@ -80,19 +80,23 @@ the frontend is stable" framing.
 Currently implemented and native-executable-verified on Fedora Linux x86_64 only (no cross-compilation, no
 Windows/macOS support yet): primitive integer/Bool/f32/f64 values and arithmetic/comparison/logical
 expressions (`&&`/`||` are FINAL short-circuit, not eager), local variables, mutability/assignment, function
-parameters/calls/forward-calls/recursion, `if`/`else`/`else if`, `while`, Unit functions, a minimal `print`
-builtin for those primitive types (lowered to the tiny static C runtime described in §12,
-`runtime/kai_runtime.c`), native object emission (`LLVMObjectEmitter`), and static runtime linking into a real
-executable (`NativeLinker`, invoking the host C compiler driver) via `kaicc <file.kai> -o <output>`.
+parameters/calls/forward-calls/recursion, `if`/`else`/`else if`, `while`, `for i in start..end` over an
+integer range (KAI LANGUAGE M6, post-alpha.2), a LOCAL fixed-size array `[T; N]` with checked indexed reads/
+writes (KAI LANGUAGE M7B, post-alpha.2 - a compile-time-constant out-of-bounds index is a compile error; a
+dynamic one traps via `llvm.trap`, never an unchecked access), Unit functions, a minimal `print` builtin for
+those primitive types (lowered to the tiny static C runtime described in §12, `runtime/kai_runtime.c`),
+native object emission (`LLVMObjectEmitter`), and static runtime linking into a real executable
+(`NativeLinker`, invoking the host C compiler driver) via `kaicc <file.kai> -o <output>`.
 
-Still unimplemented: `for` loop iteration over anything other than an integer range (KAI LANGUAGE M6, post-
-alpha.2, implements exactly `for i in start..end` - general iterable/foreach semantics, array/slice iteration,
-and a first-class `Range` value remain unimplemented), native execution of arrays (KAI LANGUAGE M7A, post-
-alpha.2, makes fixed-size array a real semantic Type with real literal inference - element reads/writes,
-bounds checking, and the LLVM backend representation itself remain M7B work; slices remain entirely
-unimplemented as a semantic type), strings/`Char` as backend-lowerable values, references, ownership/
-borrowing, structs/enums/generics, `panic`/`assert` lowering, optimization passes, HIR, an LSP, and the
-higher-level `kai` CLI wrapper described in §14 (only `kaicc` itself exists today).
+Still unimplemented: general iterable/foreach semantics and array/slice iteration (`for x in someArray` -
+`for` only supports a literal `start..end` integer range, KAI LANGUAGE M6), a first-class `Range` value,
+arrays as a function parameter or return type (no array calling-convention/ABI exists - KAI LANGUAGE M7B
+deliberately stops at LOCAL arrays only), whole-array assignment/copy (`let b = a` / `a = b` for two
+array-typed values - deliberately kept unsupported pending explicit language-semantics review, not merely
+unimplemented by oversight), slices (`[T]`, still no semantic Type at all), strings/`Char` as backend-
+lowerable values, references, ownership/borrowing, structs/enums/generics, `panic`/`assert` lowering,
+optimization passes, HIR, an LSP, and the higher-level `kai` CLI wrapper described in §14 (only `kaicc`
+itself exists today).
 
 **WINDOWS M1 (portability baseline, in progress):** the same source tree also builds and runs its CTest suite
 natively on Windows x86_64, targeting exactly one Windows toolchain baseline - MSYS2 UCRT64 with Clang/LLVM
@@ -230,7 +234,7 @@ model, each running to completion before the next begins:
 
 Implemented so far: top-level function collection, primitive/unit type resolution for function signatures and local annotations, lexical scoping with same-scope duplicate detection and nested shadowing, prelude name seeding, lexical resolution of identifier uses (undefined-name and duplicate-symbol detection), primitive literal typing (including contextual literal typing and integer literal range checking), local type inference for currently-typed expressions, annotated local compatibility checking, primitive operator type checking (unary negation/not, arithmetic, modulo, comparison, equality, logical), ordinary user-function call validation (argument-count validation, contextual argument checking against the declared signature, call result typing, and known non-callable-expression detection), assignment checking for a local variable or parameter target (binding mutability validation, right-hand-side compatibility against the target's type, and assignment-expression unit typing), if/else-if/while condition Bool validation, explicit return-statement type compatibility against the enclosing function's declared return type (including contextual return-expression checking and bare-return-as-unit compatibility), and structural return-completeness (all-paths-return) analysis via the separate ControlFlowAnalyzer pass, producing a `MissingReturn` diagnostic for a concrete non-unit-returning function whose body can structurally fall through to its end without reaching a `return`.
 
-Not yet implemented: unreachable-code analysis, constant-condition flow reasoning (e.g. recognizing `if true` or `while true` as always executing), divergence analysis, a general control-flow graph, for-loop iterable/element type validation beyond a literal `start..end` integer range (KAI LANGUAGE M6, post-alpha.2, implements exactly that one form - general iterable/foreach semantics, array/slice iteration, and a first-class `Range` value remain unimplemented), member/index assignment semantics (`xs[index] = value` - the array TYPE itself is real as of KAI LANGUAGE M7A below, but index-expression element-type validation, bounds checking, and indexed assignment all remain M7B work), builtin call signature validation, reference semantic types, ownership/borrow checking, and first-class function/method call semantics. Semantic analysis as a whole is not yet complete.
+Not yet implemented: unreachable-code analysis, constant-condition flow reasoning (e.g. recognizing `if true` or `while true` as always executing), divergence analysis, a general control-flow graph, for-loop iterable/element type validation beyond a literal `start..end` integer range (KAI LANGUAGE M6, post-alpha.2, implements exactly that one form - general iterable/foreach semantics, array/slice iteration, and a first-class `Range` value remain unimplemented), member assignment semantics (`obj.field = value` - structs don't exist yet; `xs[index] = value` for a mutable LOCAL array IS implemented, KAI LANGUAGE M7B, post-alpha.2 - see TYPE_SYSTEM.md §18), builtin call signature validation, reference semantic types, ownership/borrow checking, and first-class function/method call semantics. Semantic analysis as a whole is not yet complete.
 
 **Compound semantic types (KAI LANGUAGE M7A, post-alpha.2):** `semantic::Type` (`compiler/include/kai/semantic/Type.hpp`) started as a flat, closed `TypeKind` enum wrapper with no structural payload - sufficient while every modeled type was fully self-describing from its own kind tag alone. Fixed-size arrays (`[T; N]`) broke that assumption: an array's identity also depends on an element type and a compile-time length, neither of which fits in a flat enum. Rather than turning every `Type` into a heap object/shared_ptr (which would make even `i32` expensively allocated), `Type` instead carries a small, cheap, trivially-copyable `CompoundTypeId` handle alongside its `TypeKind`, meaningful only for compound kinds (currently only Array) and ignored entirely by every primitive kind. The actual structural data (`ArrayTypeInfo { elementType, length }`) lives in ONE compile-scoped interning table OWNED BY `SemanticModel` itself - not a process-global singleton, not a second parameter every pass has to thread through separately, since every pass (SemanticAnalyzer, TypeChecker, LLVMCodeGenerator, and every semantic-tooling consumer) already receives the same `SemanticModel` by reference for the whole compilation's lifetime. `SemanticModel::internArray()` canonicalizes structurally-equal array shapes to the SAME `CompoundTypeId`, so `[i32; 3] == [i32; 3]` compares true by simple value equality, with no deep structural comparison needed at the `Type` level itself. A `Type` carrying a `CompoundTypeId` is only ever valid against the SAME `SemanticModel` that produced it - the same lifetime discipline `SymbolId` already established for symbol identity. Semantic tooling (`SemanticTypeName::typeName()`) reads this same interning table (via `SemanticModel::arrayElementType()`/`arrayLength()`, never a raw `CompoundTypeId`) to render `[i32; 3]` canonically, without any internal ID ever reaching JSON output. This design generalizes to a future second compound `TypeKind` (e.g. a struct/tuple) without further redesign, but M7A itself adds exactly one: Array.
 

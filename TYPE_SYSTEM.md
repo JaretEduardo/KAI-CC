@@ -754,23 +754,33 @@ any other statically-sized value.
 A zero-length array (`[T; 0]`) is a valid, ordinary fixed-size array
 type - it is not rejected merely because its length is zero.
 
-**Implementation status (KAI LANGUAGE M7A/M7B):** M7A establishes this as
+**Implementation status (KAI LANGUAGE M7A/M7B):** M7A established this as
 a real semantic type - `[T; N]` annotations resolve to it, array literals
 infer it (homogeneous elements only, using the same contextual-literal-
 adaptation rules arithmetic already uses - no new implicit-conversion
-system), and semantic tooling renders it canonically as `[T; N]`. Native
-LLVM execution (element reads/writes, bounds checking, the backend
-representation below) is explicitly deferred to M7B - an array-typed
-local currently fails code generation cleanly (the same "not yet
-backend-lowerable" diagnostic path a slice- or reference-typed local
-already gets), never a crash or silent miscompile.
+system), and semantic tooling renders it canonically as `[T; N]`. M7B
+(post-alpha.2) implements native execution for a LOCAL fixed-size array:
+literal creation, checked indexed reads/writes (see "Array Indexing Is
+Checked" below), and integration with an M6 `for i in start..end` loop
+all compile to a real native executable. Still NOT implemented: arrays
+as a function parameter or return type (no array calling-convention/ABI
+exists - such a parameter/return still fails the same "not yet backend-
+lowerable" diagnostic a slice- or reference-typed one already gets),
+whole-array assignment/copy (`let b = a` / `a = b` for two array-typed
+values - deliberately kept unsupported pending explicit language-
+semantics review), and slices (`[T]`, still `Type::unresolved()`).
 
-The expected backend representation for a supported element type is
-LLVM's own fixed-size aggregate:
+The backend representation for a supported element type is LLVM's own
+fixed-size aggregate:
 
 ```text
 [N x T]
 ```
+
+driven entirely by whatever element types the compiler can already lower
+standalone (every integer width, `f32`/`f64`, `bool`, `str`) - `char`
+remains unsupported as an array element for the same reason it remains
+unsupported standalone.
 
 ## Array Index Type
 
@@ -809,7 +819,12 @@ Rules:
     designed separately - that does not change normal indexing's
     checked semantics.
 
-Documented as of KAI LANGUAGE M7A; implemented in M7B.
+Documented as of KAI LANGUAGE M7A; implemented in M7B (post-alpha.2) for
+a local array binding - a compile-time-constant out-of-bounds index is a
+real SemanticError (never an LLVM/backend error), and a dynamic
+out-of-bounds index lowers to an actual `llvm.trap` + `unreachable`,
+guarded by a real runtime bounds check that always precedes the element
+address computation.
 
 ---
 

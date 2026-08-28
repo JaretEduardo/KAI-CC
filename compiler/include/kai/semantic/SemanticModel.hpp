@@ -65,6 +65,27 @@ enum class SemanticErrorKind : std::uint8_t {
     /// inventing a new error shape - see TypeChecker.cpp's
     /// checkArrayLiteralExpr().
     IncompatibleArrayElementType,
+
+    /// KAI LANGUAGE M7B: `xs[index]` where `xs`'s own Type is not a
+    /// fixed-size array (e.g. `5[0]`, or indexing a `str`/scalar local -
+    /// array indexing and string indexing remain separate, unrelated
+    /// features). `actualType` records what `xs` actually is.
+    InvalidIndexTarget,
+
+    /// KAI LANGUAGE M7B: `xs[index]` where `index`'s own Type is not one
+    /// of the eight concrete integer types (float/bool/char/str/unit/
+    /// array all rejected). `actualType` records what `index` actually
+    /// is.
+    InvalidIndexType,
+
+    /// KAI LANGUAGE M7B: `xs[index]` where `index` is a compile-time
+    /// constant (a bare or directly-negated integer literal) PROVABLY
+    /// outside `xs`'s fixed length - e.g. `xs[3]`/`xs[-1]` for a
+    /// length-3 array. A DYNAMIC out-of-bounds index is intentionally
+    /// NOT a SemanticError at all (TYPE_SYSTEM.md §18's approved
+    /// design): it is checked at runtime and traps via `llvm.trap`, a
+    /// backend/runtime mechanism, never a compile-time diagnostic.
+    ArrayIndexOutOfBounds,
 };
 
 /// A minimal, message-free description of a semantic failure - the

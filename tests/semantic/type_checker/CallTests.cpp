@@ -651,10 +651,16 @@ void testUnresolvedParameterCalleeNoNotCallable() {
 }
 
 void testDeferredCalleeShapesNoNotCallable() {
+    // KAI LANGUAGE M7B: `arr[0]()` REMOVED from this list - indexing a
+    // non-array `i32` is no longer a deferred/Unresolved shape, it is a
+    // real SemanticErrorKind::InvalidIndexTarget error now (checkIndexExpr()
+    // in TypeChecker.cpp), which would break this test's own
+    // `errors().empty()` premise for an unrelated reason. Member (`.method()`)
+    // and error-propagation (`?()`) callee shapes remain genuinely
+    // deferred/Unresolved, unaffected by M7B, and still covered here.
     SourceManager sm;
-    Checked result = analyzeAndCheck(sm, "fn f(obj: i32, arr: i32, result: i32) {\n"
+    Checked result = analyzeAndCheck(sm, "fn f(obj: i32, result: i32) {\n"
                                           "    obj.method()\n"
-                                          "    arr[0]()\n"
                                           "    result?()\n"
                                           "}");
     KAI_CHECK(result.parsed.has_value());

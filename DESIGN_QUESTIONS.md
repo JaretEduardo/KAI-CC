@@ -27,6 +27,16 @@
 - Are primitive values copied?
 - How are strings passed?
 - How are arrays passed?
+- Should whole-array assignment/copy (`let b = a`, `a = b` for two
+  array-typed values) be Copy-by-value? KAI LANGUAGE M7B found this is
+  technically trivial to enable (LLVM already supports loading/storing a
+  whole aggregate as one SSA value, with zero codegen changes needed
+  once Array became a real lowerable Type) but deliberately left it
+  blocked (an explicit codegen-level guard rejects it) pending this
+  exact language-semantics decision, rather than enabling it as an
+  unreviewed side effect - see COMPILER_ARCHITECTURE.md's own M7B note
+  and LLVMCodeGenerator.cpp's lowerAssignmentExpr()/
+  generateArrayVarDeclStmt() for where that guard lives.
 - Will explicit provenance/lifetime syntax ever be needed for cases local
   inference cannot resolve? (Reserved future possibility, not planned for
   KAI 0.1 - see MEMORY_MODEL.md §13.)
@@ -71,4 +81,5 @@
 ✓ `str` is a Copy, non-owning, immutable UTF-8 text view (not a reference; bare `str`, not `&str`, for ordinary text parameters/locals). `String` is the future owned, growable, Move UTF-8 buffer. See TYPE_SYSTEM.md §13-17 and MEMORY_MODEL.md §25.
 ✓ **(KAI LANGUAGE M7A)** Arrays are represented as a real structural semantic type `[T; N]`: element type and compile-time length are both part of the type's own identity (`[i32; 3]` and `[i32; 4]` are distinct types, as are `[i32; 3]` and `[u32; 3]`), inline-owned (no runtime length header), with a backend representation expected to be LLVM's `[N x T]`. Still open: how arrays are PASSED at a function boundary (see the Memory section above) - this resolves the type's own identity/representation only, not an ABI. See TYPE_SYSTEM.md §18 and Type.hpp's own CompoundTypeId documentation.
 ✓ **(KAI LANGUAGE M7A)** Arrays and slices are distinct, non-interchangeable types: a fixed-size array `[T; N]` owns N elements inline; a slice `[T]` is a separate, still-future, non-owning borrowed view. `[T]` does not resolve to Array and has no semantic Type representation yet. See TYPE_SYSTEM.md §18/§20.
-✓ **(KAI LANGUAGE M7A)** Normal array indexing (`xs[index]`) is CHECKED: `0 <= index < N` for an array of length N, verified at compile time when the index is a compile-time constant, otherwise at runtime; a dynamic out-of-bounds access (including any negative signed index) terminates the program immediately via a non-recoverable trap - this is NOT the language `panic` mechanism, introduces no unwinding/recovery, and its exact OS signal/exit code is not a stable language guarantee. The element address/load/store must never occur before the bounds check succeeds - normal indexing never silently lowers to an unchecked GEP. A future explicitly-unsafe unchecked-indexing operation may be designed separately without changing this normal-indexing contract. Documented in M7A; implemented in M7B. See TYPE_SYSTEM.md §18.
+✓ **(KAI LANGUAGE M7A, implemented in M7B)** Normal array indexing (`xs[index]`) is CHECKED: `0 <= index < N` for an array of length N, verified at compile time when the index is a compile-time constant, otherwise at runtime; a dynamic out-of-bounds access (including any negative signed index) terminates the program immediately via a non-recoverable trap - this is NOT the language `panic` mechanism, introduces no unwinding/recovery, and its exact OS signal/exit code is not a stable language guarantee. The element address/load/store must never occur before the bounds check succeeds - normal indexing never silently lowers to an unchecked GEP. A future explicitly-unsafe unchecked-indexing operation may be designed separately without changing this normal-indexing contract. See TYPE_SYSTEM.md §18.
+✓ **(KAI LANGUAGE M7B)** A LOCAL fixed-size array is real, native, executable code: literal creation, checked indexed reads/writes (a `mut` binding only), and integration with an M6 `for`-range loop. Arrays as a function parameter or return type remain unimplemented (no array calling-convention/ABI has been designed) - see the still-open "How are arrays passed?" question above.
