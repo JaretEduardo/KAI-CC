@@ -5,7 +5,7 @@
 **KAI** is an experimental, statically-typed, compiled systems programming language explored with AI-assisted
 software development in mind from the start. **KAI-CC** is its reference compiler.
 
-> **Status: alpha / pre-release (v0.1.0-alpha.1).** KAI-CC currently targets **Linux x86_64 only**. It
+> **Status: alpha / pre-release (v0.1.0-alpha.2).** KAI-CC targets **Linux x86_64 and Windows x86_64**. It
 > compiles a real (but still small) subset of KAI source directly to a native executable via LLVM. Syntax,
 > semantics, and tooling may change significantly. Do not use KAI for production software.
 
@@ -122,11 +122,13 @@ grep. See [`docs/CLI.md`](docs/CLI.md) for the full reference.
 ## VS Code extension
 
 `editors/vscode` provides syntax highlighting, snippets, basic completion, KAI file icons/branding, and
-**Build Current File** / **Run Current File** commands, with a bundled Linux x86_64 `kaicc` + runtime when
-packaged as a VSIX. See [`editors/vscode/README.md`](editors/vscode/README.md) for full extension
-documentation, and "Portable Linux release" below for how that bundled compiler is produced
-(`KAI_RELEASE_ROOT` is a packaging-time detail for whoever builds the VSIX, not something an extension user
-needs to set).
+**Build Current File** / **Run Current File** commands. It ships as two separate, platform-specific VSIX
+packages - Linux x64 and Windows x64 - each bundling that platform's native `kaicc`/`kaicc.exe` + runtime by
+default; a single VSIX never bundles both platforms' compilers, and your platform's package installs the
+right one automatically. See [`editors/vscode/README.md`](editors/vscode/README.md) for full extension
+documentation, and "Portable Linux release"/"Portable Windows release" below for how each bundled compiler is
+produced (`KAI_RELEASE_ROOT` is a packaging-time detail for whoever builds the VSIX, not something an
+extension user needs to set).
 
 ---
 
@@ -209,11 +211,10 @@ verified.
 
 ---
 
-## Portable Windows release (in development, WINDOWS PORTABLE PACKAGE M2)
+## Portable Windows release
 
-A portable Windows x86_64 distribution, analogous in spirit to the Linux release above, is under active
-development from an MSYS2 UCRT64 baseline (the same one `compiler-windows` CI/WINDOWS M1 already build/test
-against):
+A portable Windows x86_64 distribution, analogous in spirit to the Linux release above, is built from an
+MSYS2 UCRT64 baseline (the same one the `compiler-windows` CI job already builds/tests against):
 
 ```sh
 scripts/build-release-windows-x86_64.sh
@@ -255,12 +256,14 @@ working host C toolchain on `PATH`** (a `clang`/`gcc`-compatible driver `kaicc.e
 link step), exactly as the Linux release requires `gcc`/`clang` + `libc6-dev` - this is a real, documented
 remaining requirement for this alpha, not an oversight.
 
-**This is a development milestone, not yet a public download.** No `v0.1.0-alpha.2` release exists yet; this
-`.zip` is produced and validated by CI as build evidence, not published anywhere.
+This packaging, plus a from-scratch "download -> extract -> compile -> run" smoke test using an independently
+obtained host toolchain (no KAI/MSYS2 build tooling present), is validated end to end by CI on every commit.
+**`v0.1.0-alpha.2` release artifacts will include this `.zip`** once published; until then it is CI build
+evidence, not yet an attached GitHub Release asset.
 
 ### Windows quickstart (for someone who has never touched this repository)
 
-This is the exact, minimal sequence a Windows x86_64 user follows once a KAI Windows `.zip` is actually
+This is the exact, minimal sequence a Windows x86_64 user follows once `v0.1.0-alpha.2` release artifacts are
 published - **no MSYS2, no LLVM, no CMake/Ninja, no source build** is needed for any of it:
 
 1. Download and extract `kai-<version>-windows-x86_64.zip` anywhere (an ordinary `Downloads` folder is fine -
@@ -309,18 +312,18 @@ Parses and/or type-checks in some form, but explicitly **not** backend-lowerable
 - string concatenation, equality, slicing, and indexing
 - modules/packages
 
-Platform: **Linux x86_64 only** for the released/distributed compiler. No macOS support exists or is claimed.
+Platform: **Linux x86_64 and Windows x86_64** for the released/distributed compiler. No macOS or ARM64 (any
+OS) support exists or is claimed.
 
-A native **Windows x86_64 build/test/packaging baseline** (MSYS2 UCRT64, Clang/LLVM 22.1.8 - see the
-`compiler-windows` CI job, `COMPILER_ARCHITECTURE.md`'s "WINDOWS M1" note, and "Portable Windows release" above)
-is under active, in-progress development: the same source tree builds `kaicc.exe`, runs its CTest suite, and now
-also produces a portable `.zip` distribution on Windows. Distinguish two separate claims here: native Windows
-**compiler support** (building/running `kaicc.exe` and compiling KAI programs on Windows) is real and CI-proven;
-a fully **frictionless end-user setup** is not yet claimed, since compiling a KAI program still requires a host
-C toolchain on `PATH` (see "Portable Windows release" above), same as the Linux release requires one. There is
-still no bundled VS Code compiler for Windows and no Windows entry in a GitHub Release - this remains a
-**development milestone, not a supported or released platform yet**. Do not rely on Windows support until a
-future release milestone says otherwise here.
+Windows support (MSYS2 UCRT64 build baseline, Clang/LLVM 22.1.8 - see the `compiler-windows` CI job and
+"Portable Windows release" above) is CI-proven end to end on every commit: the same source tree builds
+`kaicc.exe`, runs its full CTest suite, produces a portable `.zip` distribution, packages a platform-specific
+VS Code VSIX, and passes an independent fresh-user smoke test proving an ordinary Windows user - with none of
+KAI's own MSYS2/LLVM/CMake/Ninja build tooling installed - can download the released ZIP and VSIX and
+compile/run real KAI programs with only a separately-obtained host C toolchain. As on Linux, compiling a KAI
+program still requires that host C toolchain on `PATH` (see "Portable Windows release" above) - a fully
+toolchain-free experience is not claimed on either platform. `v0.1.0-alpha.2` is the first release to include
+Windows binary artifacts once published.
 
 ---
 

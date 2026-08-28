@@ -18,7 +18,7 @@ project(
 # kai/Version.hpp below, so there is exactly one canonical version string,
 # never duplicated as a literal in source. Set to an empty string for a
 # final, non-prerelease build.
-set(KAI_CC_PRERELEASE_SUFFIX "alpha.1" CACHE STRING
+set(KAI_CC_PRERELEASE_SUFFIX "alpha.2" CACHE STRING
     "KAI-CC prerelease suffix appended to PROJECT_VERSION (empty for a final release)")
 
 if(KAI_CC_PRERELEASE_SUFFIX)
