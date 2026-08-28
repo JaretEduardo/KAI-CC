@@ -37,8 +37,11 @@ struct CallQueryJsonEnvelope {
 /// appendRange() from SemanticInspectionJson.hpp verbatim - the SAME
 /// per-symbol/per-range rendering as inspect/definition/references,
 /// never a forked shape (M3 spec §21).
+/// `model` MUST be the SAME SemanticModel `result`'s symbols were
+/// resolved against - see appendSymbolJson()'s own doc comment (KAI
+/// LANGUAGE M7A).
 std::string writeCallRelationJson(const CallQueryJsonEnvelope& envelope, const CallRelationResult& result,
-                                   std::string_view relationKey);
+                                   std::string_view relationKey, const SemanticModel& model);
 
 /// Serializes the whole direct call graph to:
 ///
@@ -54,6 +57,6 @@ std::string writeCallRelationJson(const CallQueryJsonEnvelope& envelope, const C
 ///
 /// `functions` is in source declaration order; a function with no
 /// callees still appears, with `"callees": []` (M3 spec §20).
-std::string writeCallGraphJson(const std::string& file, const CallGraph& graph);
+std::string writeCallGraphJson(const std::string& file, const CallGraph& graph, const SemanticModel& model);
 
 } // namespace kai::semantic

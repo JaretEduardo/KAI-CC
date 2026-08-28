@@ -13,11 +13,13 @@
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/Casting.h>
 
 #include <cassert>
 #include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -172,7 +174,7 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerExpr(const ast::Expr& expr, 
 
     switch (expr.kind()) {
         case ast::ExprKind::Literal:
-            return lowerLiteralExpr(static_cast<const ast::LiteralExpr&>(expr), *type, builder);
+            return lowerLiteralExpr(static_cast<const ast::LiteralExpr&>(expr), *type, model, builder);
         case ast::ExprKind::Paren:
             return lowerExpr(static_cast<const ast::ParenExpr&>(expr).inner(), model, builder);
         case ast::ExprKind::Unary:
@@ -185,13 +187,20 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerExpr(const ast::Expr& expr, 
             return lowerAssignmentExpr(static_cast<const ast::AssignmentExpr&>(expr), model, builder);
         case ast::ExprKind::Call:
             return lowerCallExpr(static_cast<const ast::CallExpr&>(expr), *type, model, builder);
-
-        // Explicitly deferred to later milestones (M5+): array/index/
-        // member need compound types; Unit is a legitimate value this
-        // milestone simply does not produce as an expression's own
-        // literal form yet; error propagation needs Result.
-        case ast::ExprKind::ArrayLiteral:
         case ast::ExprKind::Index:
+            // KAI LANGUAGE M7B: a real, checked element read - see
+            // lowerIndexExpr()/lowerArrayElementAddress()'s own doc
+            // comments for the full bounds-check/GEP/load design.
+            return lowerIndexExpr(static_cast<const ast::IndexExpr&>(expr), model, builder);
+
+        // Explicitly deferred: ArrayLiteral is never a general value-
+        // producing expression (M7A/M7B - only lowered directly as a
+        // local's own initializer, see generateArrayVarDeclStmt() in
+        // LLVMCodeGenerator.cpp); Member needs compound/struct types;
+        // Unit is a legitimate value this milestone simply does not
+        // produce as an expression's own literal form yet; error
+        // propagation needs Result.
+        case ast::ExprKind::ArrayLiteral:
         case ast::ExprKind::Member:
         case ast::ExprKind::Unit:
         case ast::ExprKind::ErrorPropagation:
@@ -202,8 +211,8 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerExpr(const ast::Expr& expr, 
 
 // No `default:` case: ast::LiteralKind is fully implemented today.
 std::optional<llvm::Value*> LLVMCodeGenerator::lowerLiteralExpr(const ast::LiteralExpr& literal, Type type,
-                                                                 llvm::IRBuilder<>&) {
-    llvm::Type* llvmType = lowerType(type);
+                                                                 const SemanticModel& model, llvm::IRBuilder<>&) {
+    llvm::Type* llvmType = lowerType(type, model);
     if (llvmType == nullptr) {
         return std::nullopt;
     }
@@ -600,6 +609,14 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerIdentifierExpr(const ast::Id
 std::optional<llvm::Value*> LLVMCodeGenerator::lowerAssignmentExpr(const ast::AssignmentExpr& assignment,
                                                                     const SemanticModel& model,
                                                                     llvm::IRBuilder<>& builder) {
+    if (assignment.target().kind() == ast::ExprKind::Index) {
+        // KAI LANGUAGE M7B: `xs[index] = value` - a real, checked
+        // element write. See lowerIndexAssignmentExpr()'s own doc
+        // comment for the full design.
+        return lowerIndexAssignmentExpr(static_cast<const ast::IndexExpr&>(assignment.target()), assignment.value(),
+                                         model, builder);
+    }
+
     const ast::IdentifierExpr* targetIdentifier = unwrapAssignmentTargetIdentifier(assignment.target());
     if (targetIdentifier == nullptr) {
         return std::nullopt;
@@ -622,6 +639,21 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerAssignmentExpr(const ast::As
         return std::nullopt;
     }
 
+    // KAI LANGUAGE M7B spec §13: whole-array reassignment (`a = b`) is
+    // deliberately kept unsupported here, even though it would otherwise
+    // "fall out" of this existing, array-agnostic scalar path for free
+    // the moment Array became a real lowerable LLVM aggregate type
+    // (CreateLoad/CreateStore both already support an aggregate SSA
+    // value structurally, with zero changes needed below). That is a
+    // real language-semantics question (whole-array Copy/aliasing)
+    // explicitly deferred for separate, explicit review - never
+    // something this milestone enables silently as a side effect of
+    // Array becoming lowerable. Indexed ELEMENT assignment (`xs[i] = v`)
+    // is handled entirely separately above and IS fully supported.
+    if (slot->getAllocatedType()->isArrayTy()) {
+        return std::nullopt;
+    }
+
     const std::optional<llvm::Value*> rhs = lowerExpr(assignment.value(), model, builder);
     if (!rhs.has_value() || *rhs == nullptr) {
         return std::nullopt;
@@ -637,6 +669,149 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerAssignmentExpr(const ast::As
     // this expression. std::optional<llvm::Value*>{nullptr} is the
     // deliberate "successful Unit expression" representation this
     // design reserves distinctly from std::nullopt (failure).
+    return std::optional<llvm::Value*>(nullptr);
+}
+
+std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerArrayElementAddress(
+    const ast::IndexExpr& indexExpr, const SemanticModel& model, llvm::IRBuilder<>& builder) {
+    // M7B spec §1/§12: only `xs[index]` where `xs` is a direct (through
+    // transparent ParenExpr only) identifier resolving to a
+    // SymbolKind::Local array binding is supported - see this method's
+    // own header doc comment for the full rationale.
+    const ast::IdentifierExpr* rootIdentifier = unwrapAssignmentTargetIdentifier(indexExpr.object());
+    if (rootIdentifier == nullptr) {
+        return std::nullopt;
+    }
+    const std::optional<SymbolId> rootId = model.resolution(*rootIdentifier);
+    if (!rootId.has_value() || model.symbol(*rootId).kind != SymbolKind::Local) {
+        return std::nullopt;
+    }
+    llvm::AllocaInst* arraySlot = findLocalSlot(*rootId);
+    if (arraySlot == nullptr) {
+        return std::nullopt;
+    }
+    auto* arrayType = llvm::dyn_cast<llvm::ArrayType>(arraySlot->getAllocatedType());
+    if (arrayType == nullptr) {
+        return std::nullopt;
+    }
+    // The slot's own allocated type drives everything below - never
+    // independently re-derived from model.arrayElementType()/
+    // arrayLength(), so this can never structurally drift from the
+    // actual storage it addresses (same discipline as
+    // lowerIdentifierExpr()'s own "the slot's own allocated type drives
+    // the load" rule).
+    llvm::Type* elementType = arrayType->getElementType();
+    const std::uint64_t length = arrayType->getNumElements();
+
+    // The index expression is evaluated EXACTLY ONCE here, and the
+    // resulting SSA value is reused for both the bounds comparison below
+    // AND the GEP - never re-lowered (M7B spec §10/§11).
+    const std::optional<llvm::Value*> indexValue = lowerExpr(indexExpr.index(), model, builder);
+    if (!indexValue.has_value() || *indexValue == nullptr) {
+        return std::nullopt;
+    }
+    const std::optional<Type> indexSemanticType = model.typeOf(indexExpr.index());
+    if (!indexSemanticType.has_value() || !indexSemanticType->isInteger()) {
+        // Defensive only - checkIndexExpr() already guarantees an
+        // integer-domain index reaches here.
+        return std::nullopt;
+    }
+
+    // M7B spec §6: normalize to an unsigned i64 for a single, width-safe
+    // comparison against the array's own uint64 length, regardless of
+    // the index's own concrete width (including i64/u64 itself, where a
+    // plain CreateSExt/CreateZExt would violate LLVM's own "strictly
+    // widening" precondition) - CreateSExtOrTrunc/CreateZExtOrTrunc are
+    // exactly LLVM's own answer to "the source may already be the target
+    // width." A signed index is ADDITIONALLY checked for non-negativity
+    // at its OWN width first: sign-extending a negative value to i64
+    // would itself already be numerically wrong to compare against an
+    // unsigned length (e.g. i8 -1 sign-extends to the all-ones i64
+    // pattern, which is NOT "a huge positive number" once compared via
+    // an UNSIGNED predicate - it IS the maximum u64 value, so it would
+    // incorrectly compare "in bounds" against any nonzero length without
+    // this separate, explicit sign check).
+    llvm::Type* i64Type = llvm::Type::getInt64Ty(context_);
+    llvm::Value* isNonNegative = llvm::ConstantInt::getTrue(context_);
+    llvm::Value* indexAsI64;
+    if (indexSemanticType->isSignedInteger()) {
+        llvm::Value* zeroAtSourceWidth = llvm::ConstantInt::get((*indexValue)->getType(), 0);
+        isNonNegative = builder.CreateICmpSGE(*indexValue, zeroAtSourceWidth);
+        indexAsI64 = builder.CreateSExtOrTrunc(*indexValue, i64Type);
+    } else {
+        // An unsigned value is never negative - isNonNegative stays the
+        // constant `true` above; no wrapping/reinterpretation involved.
+        indexAsI64 = builder.CreateZExtOrTrunc(*indexValue, i64Type);
+    }
+    llvm::Value* lengthConstant = llvm::ConstantInt::get(i64Type, length);
+    llvm::Value* belowLength = builder.CreateICmpULT(indexAsI64, lengthConstant);
+    llvm::Value* inBounds = builder.CreateAnd(isNonNegative, belowLength);
+
+    // lowerExpr() above may have moved `builder` (a short-circuit index
+    // expression) - the CondBr below always originates from wherever it
+    // ACTUALLY left `builder`, same discipline as generateIfStmt()'s/
+    // generateWhileStmt()'s own condition lowering.
+    llvm::BasicBlock* checkEndBlock = builder.GetInsertBlock();
+    llvm::Function* function = checkEndBlock->getParent();
+    llvm::BasicBlock* inBoundsBlock = llvm::BasicBlock::Create(context_, "index.inbounds", function);
+    llvm::BasicBlock* outOfBoundsBlock = llvm::BasicBlock::Create(context_, "index.outofbounds", function);
+    builder.SetInsertPoint(checkEndBlock);
+    builder.CreateCondBr(inBounds, inBoundsBlock, outOfBoundsBlock);
+
+    // M7B spec §5: NOT KAI `panic` - a non-recoverable trap, no unwind,
+    // no stable exit-code guarantee. No element address is ever computed
+    // in this block, and this block never reaches a `ret`/back-edge/any
+    // other continuation - `unreachable` is the actual, literal
+    // terminator, not merely a naming convention.
+    builder.SetInsertPoint(outOfBoundsBlock);
+    llvm::Function* trapFn = llvm::Intrinsic::getOrInsertDeclaration(module_.get(), llvm::Intrinsic::trap);
+    builder.CreateCall(trapFn);
+    builder.CreateUnreachable();
+
+    // Only reached once the bounds check has ALREADY succeeded - the GEP
+    // (and, in the caller, the load/store through it) never executes on
+    // any path that didn't pass through this branch.
+    builder.SetInsertPoint(inBoundsBlock);
+    llvm::Value* zero32 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(context_), 0);
+    llvm::Value* elementAddress =
+        builder.CreateGEP(arrayType, arraySlot, {zero32, indexAsI64}, "index.addr");
+
+    return ArrayElementAddress{elementAddress, elementType};
+}
+
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerIndexExpr(const ast::IndexExpr& index, const SemanticModel& model,
+                                                               llvm::IRBuilder<>& builder) {
+    const std::optional<ArrayElementAddress> address = lowerArrayElementAddress(index, model, builder);
+    if (!address.has_value()) {
+        return std::nullopt;
+    }
+    return builder.CreateLoad(address->elementType, address->pointer);
+}
+
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerIndexAssignmentExpr(const ast::IndexExpr& indexTarget,
+                                                                         const ast::Expr& value,
+                                                                         const SemanticModel& model,
+                                                                         llvm::IRBuilder<>& builder) {
+    const std::optional<ArrayElementAddress> address = lowerArrayElementAddress(indexTarget, model, builder);
+    if (!address.has_value()) {
+        return std::nullopt;
+    }
+
+    // `value` is lowered EXACTLY ONCE, only now that the bounds check has
+    // already succeeded (`builder` is positioned in the in-bounds block
+    // by lowerArrayElementAddress() itself) - M7B spec §11.
+    const std::optional<llvm::Value*> rhs = lowerExpr(value, model, builder);
+    if (!rhs.has_value() || *rhs == nullptr) {
+        return std::nullopt;
+    }
+    if ((*rhs)->getType() != address->elementType) {
+        return std::nullopt;
+    }
+
+    builder.CreateStore(*rhs, address->pointer);
+
+    // Unit-valued, matching lowerAssignmentExpr()'s own identifier-target
+    // convention exactly.
     return std::optional<llvm::Value*>(nullptr);
 }
 
@@ -695,7 +870,7 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerCallExpr(const ast::CallExpr
         if (!argument.has_value() || *argument == nullptr) {
             return std::nullopt;
         }
-        llvm::Type* expectedType = lowerType(signature.parameterTypes[i]);
+        llvm::Type* expectedType = lowerType(signature.parameterTypes[i], model);
         if (expectedType == nullptr || (*argument)->getType() != expectedType) {
             return std::nullopt;
         }
@@ -712,7 +887,7 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerCallExpr(const ast::CallExpr
         return std::optional<llvm::Value*>(nullptr);
     }
 
-    llvm::Type* expectedResultType = lowerType(type);
+    llvm::Type* expectedResultType = lowerType(type, model);
     if (expectedResultType == nullptr || expectedResultType != function->getReturnType()) {
         // Unreachable given a successfully checked frontend (CallExpr's
         // own recorded Type always matches FunctionSignature.returnType

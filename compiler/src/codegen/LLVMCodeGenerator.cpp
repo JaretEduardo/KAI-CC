@@ -8,9 +8,11 @@
 
 #include "kai/codegen/LLVMCodeGenerator.hpp"
 
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/Casting.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <cassert>
@@ -26,6 +28,30 @@ using semantic::Symbol;
 using semantic::SymbolId;
 using semantic::Type;
 using semantic::TypeKind;
+
+namespace {
+
+// KAI LANGUAGE M7B: structural-only unwrap (mirrors TypeChecker's own
+// unwrapAssignmentTargetIdentifier()/unwrapAdaptableLiteral() "see
+// through transparent ParenExpr only" idiom, already duplicated once
+// more in LLVMExpressionLowering.cpp for the SAME reason - internal
+// linkage per translation unit, never a shared header for a one-line
+// structural check). Finds the ArrayLiteralExpr a `let`/`mut` array
+// local's initializer names, if any - nullptr for anything else (an
+// identifier, a call, ...), which generateArrayVarDeclStmt() then
+// treats as the still-deliberately-unsupported "whole array value from
+// somewhere other than a literal" shape (M7B spec §13).
+const ast::ArrayLiteralExpr* unwrapArrayLiteralInitializer(const ast::Expr& expr) {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return unwrapArrayLiteralInitializer(static_cast<const ast::ParenExpr&>(expr).inner());
+    }
+    if (expr.kind() == ast::ExprKind::ArrayLiteral) {
+        return &static_cast<const ast::ArrayLiteralExpr&>(expr);
+    }
+    return nullptr;
+}
+
+} // namespace
 
 LLVMCodeGenerator::LLVMCodeGenerator(const SourceManager& sources) : sources_(sources) {}
 
@@ -111,12 +137,31 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
     std::vector<llvm::Type*> paramTypes;
     paramTypes.reserve(signature.parameterTypes.size());
     for (std::size_t i = 0; i < signature.parameterTypes.size(); ++i) {
-        llvm::Type* llvmParamType = lowerType(signature.parameterTypes[i]);
+        // KAI LANGUAGE M7B: arrays as PARAMETERS are explicitly out of
+        // scope (no array function ABI exists or is decided) - checked
+        // here, structurally, BEFORE calling lowerType() at all, even
+        // though lowerType() itself would now happily produce a real
+        // `[N x T]` LLVM type for a supported element type (M7B makes
+        // Array a real lowerable local-storage type - see lowerType()'s
+        // own Array case). Passing this straight to lowerType() would
+        // silently start accepting an array-typed parameter the moment
+        // its element type also happens to be backend-lowerable, which
+        // would mean inventing an array-by-value calling convention as
+        // an unreviewed side effect - never appropriate here. Same
+        // "unsupported parameter type" message/diagnostic path as every
+        // other unsupported parameter shape - never a distinct message
+        // that would suggest this is a different kind of limitation.
+        if (signature.parameterTypes[i].isArray()) {
+            recordUnsupportedConstruct("code generation is not yet supported for this parameter's type",
+                                        fn.params()[i].type->span());
+            return false;
+        }
+        llvm::Type* llvmParamType = lowerType(signature.parameterTypes[i], model);
         if (llvmParamType == nullptr) {
             // RELEASE HARDENING M2: a parameter type that never resolved
-            // to a lowerable Type (arrays/slices/references/structs/...
-            // - see lowerType()'s own exhaustive switch) fails HERE, in
-            // Pass 1, before this function's body is ever reached - e.g.
+            // to a lowerable Type (slices/references/structs/... - see
+            // lowerType()'s own exhaustive switch) fails HERE, in Pass 1,
+            // before this function's body is ever reached - e.g.
             // `fn sum(values: [i32]) -> i32` never gets far enough to
             // report its `for` loop as the culprit otherwise.
             recordUnsupportedConstruct("code generation is not yet supported for this parameter's type",
@@ -126,7 +171,14 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
         paramTypes.push_back(llvmParamType);
     }
 
-    llvm::Type* returnType = lowerType(signature.returnType);
+    // KAI LANGUAGE M7B: arrays as RETURN VALUES are equally out of scope,
+    // for the identical "no array ABI decided" reason above.
+    if (signature.returnType.isArray()) {
+        const SourceSpan span = fn.returnType() != nullptr ? fn.returnType()->span() : fn.name().span;
+        recordUnsupportedConstruct("code generation is not yet supported for this function's return type", span);
+        return false;
+    }
+    llvm::Type* returnType = lowerType(signature.returnType, model);
     if (returnType == nullptr) {
         const SourceSpan span = fn.returnType() != nullptr ? fn.returnType()->span() : fn.name().span;
         recordUnsupportedConstruct("code generation is not yet supported for this function's return type", span);
@@ -464,7 +516,7 @@ LLVMCodeGenerator::StatementResult LLVMCodeGenerator::generateForStmt(const ast:
     assert(loopVarId.has_value());
     const Symbol& loopVarSymbol = model.symbol(*loopVarId);
 
-    llvm::Type* elementType = lowerType(loopVarSymbol.type);
+    llvm::Type* elementType = lowerType(loopVarSymbol.type, model);
     if (elementType == nullptr || !elementType->isIntegerTy()) {
         // Defensive only - TypeChecker's isIntegerDomain restriction
         // already guarantees a concrete i8/i16/i32/i64/u8/u16/u32/u64
@@ -569,7 +621,7 @@ bool LLVMCodeGenerator::generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llv
     // by this one code path - the initializer's own AST shape is never
     // inspected to decide the local's type.
     const Symbol& symbol = model.symbol(*id);
-    llvm::Type* llvmType = lowerType(symbol.type);
+    llvm::Type* llvmType = lowerType(symbol.type, model);
     if (llvmType == nullptr || llvmType->isVoidTy()) {
         // nullptr: Error/Unresolved/Char, same as everywhere else.
         // isVoidTy(): a Unit-typed local - LLVM has no storable void
@@ -578,6 +630,19 @@ bool LLVMCodeGenerator::generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llv
         // legitimately returns void for Unit, since Unit IS a valid
         // function return type - only a LOCAL's storage type rejects it).
         return false;
+    }
+
+    if (llvm::ArrayType* arrayType = llvm::dyn_cast<llvm::ArrayType>(llvmType)) {
+        // KAI LANGUAGE M7B: an array-typed local needs its own
+        // initialization path - an ArrayLiteralExpr is not (and stays
+        // not) a general lowerExpr()-producible SSA value (see
+        // lowerExpr()'s own ArrayLiteral case, still nullopt); it is
+        // only ever lowered by evaluating each element directly into the
+        // local's own storage, in source order. See
+        // generateArrayVarDeclStmt()'s own doc comment for exactly what
+        // initializer shape is (and, per M7B spec §13, deliberately is
+        // NOT) supported.
+        return generateArrayVarDeclStmt(varDecl, *id, arrayType, function, builder, model);
     }
 
     const std::optional<llvm::Value*> initializer = lowerExpr(varDecl.initializer(), model, builder);
@@ -599,6 +664,97 @@ bool LLVMCodeGenerator::generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llv
     llvm::AllocaInst* slot = createEntryBlockAlloca(function, llvmType, sources_.text(varDecl.name().span));
     builder.CreateStore(*initializer, slot);
     locals_.emplace_back(*id, slot);
+    return true;
+}
+
+// KAI LANGUAGE M7B: an array-typed local's own initialization path.
+// Supported initializer shape: a (possibly paren-wrapped) ArrayLiteralExpr
+// directly - `let xs = [10, 20, 30]` / `mut xs = [10, 20, 30]`. Any OTHER
+// initializer shape (an identifier, a call, ...) - i.e. `let b = a` for
+// two array-typed values - is deliberately kept unsupported (returns
+// false, the same clean "LLVM IR generation failed" every other
+// unsupported construct produces): M7B spec §13 explicitly forbids
+// silently enabling whole-array value copying just because Array became
+// a real lowerable LLVM aggregate type - that is a real language-
+// semantics (Copy/aliasing) question for separate, explicit review, not
+// a side effect of this milestone. See lowerAssignmentExpr()'s own
+// identical guard for `a = b` (LLVMExpressionLowering.cpp).
+bool LLVMCodeGenerator::generateArrayVarDeclStmt(const ast::VarDeclStmt& varDecl, SymbolId id,
+                                                  llvm::ArrayType* arrayType, llvm::Function& function,
+                                                  llvm::IRBuilder<>& builder, const SemanticModel& model) {
+    const ast::ArrayLiteralExpr* literal = unwrapArrayLiteralInitializer(varDecl.initializer());
+    if (literal == nullptr) {
+        return false;
+    }
+
+    // The alloca is created FIRST (entry block, per this class's
+    // existing local-storage convention) and bound into `locals_` only
+    // AFTER its contents are successfully initialized below - so a
+    // failed initialization never leaves a half-bound local reachable by
+    // any later statement.
+    llvm::AllocaInst* slot = createEntryBlockAlloca(function, arrayType, sources_.text(varDecl.name().span));
+    if (!lowerArrayLiteralIntoStorage(*literal, slot, arrayType, model, builder)) {
+        return false;
+    }
+
+    locals_.emplace_back(id, slot);
+    return true;
+}
+
+// KAI LANGUAGE M7B: stores an ArrayLiteralExpr's elements directly into
+// `storage` (an already-allocated `arrayType`-typed address - an
+// AllocaInst for a top-level local, or a GEP'd sub-address for a nested
+// array literal element - see the recursive case below), left to right,
+// EXACTLY ONCE each (M7B spec §9/§12): every element is lowered via
+// exactly one lowerExpr()/recursive call, in source order, with no
+// element re-evaluated. A nested ArrayLiteralExpr element (e.g.
+// `[[1, 2], [3, 4]]`) recurses into this SAME function against a GEP'd
+// sub-address, rather than first materializing an inner aggregate SSA
+// value and storing that - this is what lets nested array literals work
+// through the identical mechanism with no separate "aggregate value
+// construction" path (M7B spec §1: multidimensional arrays are in scope
+// exactly when recursive lowering "genuinely works without broadening
+// the implementation" - this is that case). Returns false (leaving
+// `storage` partially initialized, but never read - the caller always
+// discards it on failure) the moment any element fails to lower or its
+// LLVM type disagrees with the array's own element type.
+bool LLVMCodeGenerator::lowerArrayLiteralIntoStorage(const ast::ArrayLiteralExpr& array, llvm::Value* storage,
+                                                      llvm::ArrayType* arrayType, const SemanticModel& model,
+                                                      llvm::IRBuilder<>& builder) {
+    llvm::Type* elementType = arrayType->getElementType();
+    llvm::Type* indexType = llvm::Type::getInt32Ty(context_);
+    llvm::Value* zero = llvm::ConstantInt::get(indexType, 0);
+
+    const std::vector<ast::ExprPtr>& elements = array.elements();
+    for (std::size_t i = 0; i < elements.size(); ++i) {
+        llvm::Value* elementAddress = builder.CreateGEP(
+            arrayType, storage, {zero, llvm::ConstantInt::get(indexType, i)}, "array.literal.elem");
+
+        if (elements[i]->kind() == ast::ExprKind::ArrayLiteral) {
+            auto* nestedArrayType = llvm::dyn_cast<llvm::ArrayType>(elementType);
+            if (nestedArrayType == nullptr) {
+                return false;
+            }
+            if (!lowerArrayLiteralIntoStorage(static_cast<const ast::ArrayLiteralExpr&>(*elements[i]),
+                                               elementAddress, nestedArrayType, model, builder)) {
+                return false;
+            }
+            continue;
+        }
+
+        const std::optional<llvm::Value*> value = lowerExpr(*elements[i], model, builder);
+        if (!value.has_value() || *value == nullptr) {
+            return false;
+        }
+        if ((*value)->getType() != elementType) {
+            return false;
+        }
+        // lowerExpr() may have moved `builder` (a short-circuit element
+        // expression) - the store below always goes through `builder` at
+        // its now-current position, same discipline as every other
+        // lowering in this class.
+        builder.CreateStore(*value, elementAddress);
+    }
     return true;
 }
 
@@ -656,7 +812,7 @@ bool LLVMCodeGenerator::generateReturnStmt(const ast::ReturnStmt& stmt, llvm::IR
 
 // No `default:` case: TypeKind is fully implemented today, mirroring
 // TypeChecker.cpp's own exhaustive switch over it (see integerRangeFor()).
-llvm::Type* LLVMCodeGenerator::lowerType(Type type) {
+llvm::Type* LLVMCodeGenerator::lowerType(Type type, const SemanticModel& model) {
     switch (type.kind()) {
         case TypeKind::Unit:
             return llvm::Type::getVoidTy(context_);
@@ -692,6 +848,20 @@ llvm::Type* LLVMCodeGenerator::lowerType(Type type) {
         case TypeKind::Error:
         case TypeKind::Char:
             return nullptr;
+        case TypeKind::Array: {
+            // KAI LANGUAGE M7B: a real `[N x ElementType]` LLVM array
+            // type - driven entirely by whatever this SAME lowerType()
+            // can already lower for the element type (see this method's
+            // own header doc comment). A still-unsupported element type
+            // (Char, or a still-deferred shape) makes the ARRAY itself
+            // unsupported too, via the identical nullptr signal every
+            // other unsupported Type already returns - never a crash.
+            llvm::Type* elementType = lowerType(model.arrayElementType(type), model);
+            if (elementType == nullptr) {
+                return nullptr;
+            }
+            return llvm::ArrayType::get(elementType, model.arrayLength(type));
+        }
     }
     return nullptr;
 }

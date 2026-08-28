@@ -1,7 +1,9 @@
 #include "kai/semantic/SemanticAnalyzer.hpp"
 
 #include <cassert>
+#include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -9,6 +11,27 @@
 namespace kai::semantic {
 
 namespace {
+
+// KAI LANGUAGE M7A: mirrors TypeChecker.cpp's own decodeIntegerMagnitude()
+// exactly (same std::from_chars technique, same "reject trailing garbage"
+// check) - a SECOND, independent copy rather than a shared helper,
+// because it decodes a fundamentally different thing: a fixed-size
+// array TYPE's compile-time length (ArrayTypeSyntax::length(), GRAMMAR.md
+// §15 - the Parser only ever constructs this as a plain digit-sequence
+// LiteralExpr(Integer), never a general expression), not a VALUE
+// literal's magnitude subject to TypeChecker's own signed/unsigned
+// range-fit policy. Returns std::nullopt only if the digit text
+// somehow doesn't fit in a uint64_t - structurally near-unreachable
+// given the lexer's own digit-sequence production, but decoded
+// defensively rather than assumed.
+std::optional<std::uint64_t> decodeArrayLength(std::string_view text) {
+    std::uint64_t value = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
 
 // GRAMMAR.md §12's primitive_type list, plus `str` (Spellable str +
 // Parameters/Returns MVP, M9): `str` is deliberately NOT in GRAMMAR.md's
@@ -149,9 +172,10 @@ Type SemanticAnalyzer::resolveTypeSyntax(const ast::TypeSyntax& type, SemanticMo
             return resolveNamedTypeSyntax(static_cast<const ast::NamedTypeSyntax&>(type), model);
         case ast::TypeSyntaxKind::Unit:
             return Type::unit();
+        case ast::TypeSyntaxKind::Array:
+            return resolveArrayTypeSyntax(static_cast<const ast::ArrayTypeSyntax&>(type), model);
         case ast::TypeSyntaxKind::Reference:
         case ast::TypeSyntaxKind::Slice:
-        case ast::TypeSyntaxKind::Array:
         case ast::TypeSyntaxKind::Generic:
             // Deferred: this phase does not model these semantic shapes
             // yet. Type::unresolved(), not Type::error() - nothing was
@@ -159,7 +183,11 @@ Type SemanticAnalyzer::resolveTypeSyntax(const ast::TypeSyntax& type, SemanticMo
             // Unresolved-vs-Error distinction). No SemanticError, and no
             // partial inspection of what's nested inside an entirely
             // deferred shape: e.g. `&Foo`'s `Foo` is never looked at
-            // here, even though `Foo` alone would be UnknownType.
+            // here, even though `Foo` alone would be UnknownType. Slice
+            // (`[T]`) stays here DELIBERATELY (KAI LANGUAGE M7A spec §4):
+            // it is a distinct, still-future, non-owning view type - it
+            // must never resolve to Array or to anything else this
+            // phase invents.
             return Type::unresolved();
     }
 
@@ -184,6 +212,55 @@ Type SemanticAnalyzer::resolveNamedTypeSyntax(const ast::NamedTypeSyntax& type, 
     // future/unimplemented - see TYPE_SYSTEM.md §14).
     model.addError(SemanticError{SemanticErrorKind::UnknownType, type.name().span, std::nullopt});
     return Type::error();
+}
+
+Type SemanticAnalyzer::resolveArrayTypeSyntax(const ast::ArrayTypeSyntax& type, SemanticModel& model) const {
+    // Recurse through the SAME dispatch every other type position uses -
+    // `[[i32]; 3]`'s slice element, or `[Foo; 3]`'s unknown `Foo`,
+    // already gets exactly the diagnostic/deferral that shape would get
+    // anywhere else; nothing array-specific is re-implemented here.
+    const Type elementType = resolveTypeSyntax(type.element(), model);
+
+    if (elementType.isError()) {
+        // The element's own resolution already reported why (e.g.
+        // UnknownType) - propagate Error without a second, redundant
+        // diagnostic about the array as a whole.
+        return Type::error();
+    }
+    if (elementType.isUnresolved()) {
+        // The element itself is a still-deferred shape (Reference/
+        // Slice/Generic) - nothing was attempted for it, so nothing was
+        // attempted for the array built from it either. Same
+        // Unresolved-propagates-silently convention as every other
+        // compound expression/type in this codebase.
+        return Type::unresolved();
+    }
+
+    // GRAMMAR.md §15 / ArrayTypeSyntax::length()'s own doc comment: the
+    // Parser only ever constructs this as a plain LiteralExpr(Integer) -
+    // never a general expression - so this cast is a structural
+    // invariant, not a runtime guess.
+    assert(type.length().kind() == ast::ExprKind::Literal);
+    const auto& lengthLiteral = static_cast<const ast::LiteralExpr&>(type.length());
+    assert(lengthLiteral.literalKind() == ast::LiteralKind::Integer);
+
+    const std::optional<std::uint64_t> length = decodeArrayLength(sources_.text(lengthLiteral.span()));
+    if (!length.has_value()) {
+        // Structurally near-unreachable (see decodeArrayLength()'s own
+        // comment) - a digit sequence the lexer itself accepted that
+        // still doesn't fit a uint64_t. A deliberate, narrow exception
+        // to the "Error is always accompanied by a SemanticError"
+        // convention (Type.hpp's own class comment): no existing
+        // SemanticErrorKind describes "array length literal too large"
+        // and inventing one for a case no realistic KAI source reaches
+        // is out of this milestone's scope - defensive-only, same spirit
+        // as e.g. generateIfStmt()'s "the frontend already guarantees a
+        // Bool condition" checks elsewhere in this codebase, which are
+        // similarly untested by design.
+        return Type::error();
+    }
+
+    return model.internArray(elementType, *length);
 }
 
 // --- Pass 2: function-body declaration/scope/name analysis ---

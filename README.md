@@ -75,8 +75,16 @@ compiles and runs the same way, printing `Hello` then `KAI`.
 
 **Expressions/statements:** literals, `let` (immutable) and `mut` (mutable) bindings, arithmetic, comparisons,
 logical `&&`/`||` (short-circuit), assignment, function calls, recursion, `if`/`else if`/`else`, `while`,
-`for i in start..end` over a half-open integer range (KAI LANGUAGE M6, post-alpha.2 - see "Current limitations"
-below for exactly what `for` does *not* yet cover), explicit `return`.
+`for i in start..end` over a half-open integer range (KAI LANGUAGE M6, post-alpha.2), explicit `return`.
+
+**Fixed-size arrays (KAI LANGUAGE M7B, post-alpha.2):** a LOCAL fixed-size array `[T; N]` - `let xs = [1, 2,
+3]` or an explicitly-annotated `let xs: [i32; 3] = [1, 2, 3]` - is real, native, executable code: checked
+indexed reads (`xs[i]`) and, for a `mut` binding, checked indexed writes (`xs[i] = value`), including inside
+an M6 `for`-range loop. Indexing is CHECKED: a compile-time-constant out-of-bounds index (`xs[3]`/`xs[-1]` for
+a length-3 array) is a compile error, and a dynamic out-of-bounds index (positive, negative, signed, or
+unsigned) traps the program immediately at runtime rather than reading/writing out of bounds - see "Current
+limitations" below for exactly what array support does *not* yet cover (arrays as function parameters/
+returns, slices, whole-array copy).
 
 **Text:** string literals, explicit `str` local annotations, `str` function parameters and return types, and
 `print(str)`. `str` values (including those containing an embedded `\0` byte, which is valid UTF-8) are
@@ -307,10 +315,20 @@ design/future sketches that don't compile with the current backend yet.
 post-alpha.2 - both endpoints must be the same concrete integer type, following the same contextual-literal-
 adaptation rules as arithmetic; no implicit widening/narrowing). KAI 0.1 still has no general iteration
 protocol, though: `for x in someCollection` over anything other than a literal `start..end` range is rejected
-as a semantic error, not silently ignored. Also parses and/or type-checks in some form, but explicitly **not**
-backend-lowerable yet:
+as a semantic error, not silently ignored.
 
-- arrays/slices as function parameter, return, or local types (and therefore `for` iteration over one)
+A LOCAL fixed-size array `[T; N]` (`let`/`mut`, literal creation, checked indexed reads/writes, `for`-range
+integration - see "What works today" above) is real, native, executable code as of KAI LANGUAGE M7B
+(post-alpha.2). What remains explicitly out of scope: arrays as a function PARAMETER or return type (no array
+calling-convention/ABI has been designed - such a parameter/return still fails with the same "not yet
+supported for this parameter's/return type" diagnostic any other still-unsupported type produces), whole-array
+assignment/copy (`let b = a` / `a = b` for two array-typed values - deliberately kept unsupported pending
+explicit language-semantics review, not merely unimplemented by oversight), and slice syntax (`[T]`, still
+fully deferred at the type level, `Type::unresolved()`). Also parses and/or type-checks in some form, but
+explicitly **not** backend-lowerable yet:
+
+- arrays as function parameters/returns, whole-array copy/assignment, and slices (`[T]`) as a semantic type at
+  all - see above
 - structs, enums, generics, traits
 - `Result`, general references (`&T`), and advanced ownership/borrowing
 - an owned, dynamic `String` type (`str` today is a `Copy`, immutable, non-owning view only)

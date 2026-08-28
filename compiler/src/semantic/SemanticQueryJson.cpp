@@ -16,10 +16,10 @@ void appendEnvelopeHead(std::string& out, const QueryJsonEnvelope& envelope) {
     appendPosition(out, envelope.query);
 }
 
-void appendSymbolOrNull(std::string& out, const std::optional<SemanticSymbolInfo>& symbol) {
+void appendSymbolOrNull(std::string& out, const std::optional<SemanticSymbolInfo>& symbol, const SemanticModel& model) {
     out += ",\"symbol\":";
     if (symbol.has_value()) {
-        appendSymbolJson(out, *symbol);
+        appendSymbolJson(out, *symbol, model);
     } else {
         out += "null";
     }
@@ -27,18 +27,20 @@ void appendSymbolOrNull(std::string& out, const std::optional<SemanticSymbolInfo
 
 } // namespace
 
-std::string writeDefinitionJson(const QueryJsonEnvelope& envelope, const DefinitionResult& result) {
+std::string writeDefinitionJson(const QueryJsonEnvelope& envelope, const DefinitionResult& result,
+                                 const SemanticModel& model) {
     std::string out;
     appendEnvelopeHead(out, envelope);
-    appendSymbolOrNull(out, result);
+    appendSymbolOrNull(out, result, model);
     out += '}';
     return out;
 }
 
-std::string writeReferencesJson(const QueryJsonEnvelope& envelope, const ReferencesResult& result) {
+std::string writeReferencesJson(const QueryJsonEnvelope& envelope, const ReferencesResult& result,
+                                 const SemanticModel& model) {
     std::string out;
     appendEnvelopeHead(out, envelope);
-    appendSymbolOrNull(out, result.symbol);
+    appendSymbolOrNull(out, result.symbol, model);
 
     out += ",\"references\":[";
     for (std::size_t i = 0; i < result.references.size(); ++i) {

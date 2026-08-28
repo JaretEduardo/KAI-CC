@@ -745,7 +745,86 @@ The type is:
 
 The array owns its elements.
 
-Its size is known during compilation.
+Its size is known during compilation, and is part of the type itself -
+`[i32; 3]` and `[i32; 4]` are distinct types, as are `[i32; 3]` and
+`[u32; 3]`. No runtime length header exists or is needed: length is
+purely compile-time structural type information, the same way it is for
+any other statically-sized value.
+
+A zero-length array (`[T; 0]`) is a valid, ordinary fixed-size array
+type - it is not rejected merely because its length is zero.
+
+**Implementation status (KAI LANGUAGE M7A/M7B):** M7A established this as
+a real semantic type - `[T; N]` annotations resolve to it, array literals
+infer it (homogeneous elements only, using the same contextual-literal-
+adaptation rules arithmetic already uses - no new implicit-conversion
+system), and semantic tooling renders it canonically as `[T; N]`. M7B
+(post-alpha.2) implements native execution for a LOCAL fixed-size array:
+literal creation, checked indexed reads/writes (see "Array Indexing Is
+Checked" below), and integration with an M6 `for i in start..end` loop
+all compile to a real native executable. Still NOT implemented: arrays
+as a function parameter or return type (no array calling-convention/ABI
+exists - such a parameter/return still fails the same "not yet backend-
+lowerable" diagnostic a slice- or reference-typed one already gets),
+whole-array assignment/copy (`let b = a` / `a = b` for two array-typed
+values - deliberately kept unsupported pending explicit language-
+semantics review), and slices (`[T]`, still `Type::unresolved()`).
+
+The backend representation for a supported element type is LLVM's own
+fixed-size aggregate:
+
+```text
+[N x T]
+```
+
+driven entirely by whatever element types the compiler can already lower
+standalone (every integer width, `f32`/`f64`, `bool`, `str`) - `char`
+remains unsupported as an array element for the same reason it remains
+unsupported standalone.
+
+## Array Index Type
+
+An index expression `xs[index]` accepts any concrete integer type for
+`index` - signed (`i8`/`i16`/`i32`/`i64`) or unsigned
+(`u8`/`u16`/`u32`/`u64`). A float, `bool`, `char`, `str`, or unit index
+is rejected.
+
+## Array Indexing Is Checked (bounds semantics)
+
+For an array of length `N`, `xs[index]` is valid if and only if:
+
+```text
+0 <= index < N
+```
+
+(for an unsigned `index`, only the upper-bound comparison is needed,
+since it can never be negative).
+
+Rules:
+
+1. A compile-time-known out-of-bounds index is rejected at compile time.
+2. A dynamic (runtime-determined) index is checked at runtime.
+3. A signed dynamic negative index is out-of-bounds.
+4. A dynamic out-of-bounds access terminates the program immediately via
+   a non-recoverable compiler/runtime trap.
+5. This trap is NOT the language's `panic` mechanism.
+6. No unwinding or recovery is introduced by this trap.
+7. The exact OS signal/process exit code this trap produces is not a
+   stable language ABI guarantee.
+8. The element address/load/store must never occur before the bounds
+   check succeeds.
+9. Normal `xs[index]` must never silently lower to an unchecked GEP (or
+   equivalent unchecked backend access).
+10. A future, explicitly unsafe, unchecked-indexing operation may be
+    designed separately - that does not change normal indexing's
+    checked semantics.
+
+Documented as of KAI LANGUAGE M7A; implemented in M7B (post-alpha.2) for
+a local array binding - a compile-time-constant out-of-bounds index is a
+real SemanticError (never an LLVM/backend error), and a dynamic
+out-of-bounds index lowers to an actual `llvm.trap` + `unreachable`,
+guarded by a real runtime bounds check that always precedes the element
+address computation.
 
 ---
 
@@ -775,7 +854,12 @@ The compiler must never silently perform an unexpectedly expensive deep copy.
 
 A slice is a borrowed view into a contiguous sequence of elements.
 
-Slices do not own their elements.
+Slices do not own their elements. This is the fundamental distinction
+from a fixed-size array (§18 above), which DOES own its N elements
+inline: a slice and an array are separate, non-interchangeable types.
+`[T]` (bare slice syntax) never resolves to the Array semantic type, and
+still has no semantic Type representation at all as of KAI LANGUAGE M7A
+- it remains explicitly deferred, unlike `[T; N]`.
 
 Immutable slice:
 

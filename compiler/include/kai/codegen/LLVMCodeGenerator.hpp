@@ -10,6 +10,7 @@
 #include "kai/source/SourceManager.hpp"
 
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
@@ -33,7 +34,10 @@ namespace kai::codegen {
 /// deferred). KAI LANGUAGE M6 (`for` + integer ranges, post-alpha.2 -
 /// distinct from the LLVM codegen milestone numbering above) adds ForStmt
 /// lowering for the one supported iterable form - a literal integer
-/// `start..end` range - see generateForStmt().
+/// `start..end` range - see generateForStmt(). KAI LANGUAGE M7B
+/// (post-alpha.2) adds real execution for a LOCAL fixed-size array -
+/// `[N x T]` storage, checked indexed reads/writes - see
+/// generateArrayVarDeclStmt()/lowerArrayElementAddress().
 ///
 /// LLVMCodeGenerator lowers an already-fully-checked AST into an
 /// llvm::Module:
@@ -129,15 +133,26 @@ namespace kai::codegen {
 /// loop's own `start..end` iterable is ever lowered, and only its two
 /// endpoints, never the Range "value" itself - see generateForStmt()), a
 /// Unit-typed local variable (LLVM has no storable void value - see
-/// generateVarDeclStmt()), and every non-primitive-scalar semantic Type
-/// (references, arrays, structs, enums, generics, Result, Option, ...)
-/// are explicitly deferred to later LLVM codegen milestones (M7+). As of
+/// generateVarDeclStmt()), and every remaining non-primitive-scalar
+/// semantic Type (references, structs, enums, generics, Result, Option,
+/// ...) are explicitly deferred to later LLVM codegen milestones. As of
 /// the Minimal String Literal Support milestone, Str (see Type::str()'s
 /// own comment) is ALSO a lowerable scalar-like Type - a string literal,
 /// an inferred `let`/`mut` local backed by one, and `print(x)` where `x`
 /// is Str all lower successfully - but this is deliberately narrow: `str`
 /// remains unspellable as a source type annotation, and `String`/`&str`/
-/// concatenation/formatting/string methods remain entirely unmodeled.
+/// concatenation/formatting/string methods remain entirely unmodeled. KAI
+/// LANGUAGE M7B (post-alpha.2) additionally lowers a LOCAL fixed-size
+/// array (`let`/`mut xs = [elem, ...]`) to real `[N x T]` LLVM storage
+/// with checked indexed reads/writes (see generateArrayVarDeclStmt()/
+/// lowerArrayElementAddress() and this class's own header note above) -
+/// arrays as a function PARAMETER or RETURN type, and whole-array
+/// assignment/copy (`let b = a` / `a = b`), remain explicitly deferred
+/// (no array calling-convention/ABI exists, and whole-array Copy
+/// semantics are an unreviewed language-design question - see
+/// declareFunction()'s own explicit Array parameter/return guard and
+/// lowerAssignmentExpr()'s/generateArrayVarDeclStmt()'s own explicit
+/// whole-array guards, none of which are accidental omissions).
 class LLVMCodeGenerator {
 public:
     /// `sources` must outlive every generate() call - it is the only way
@@ -401,6 +416,35 @@ private:
     bool generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llvm::Function& function, llvm::IRBuilder<>& builder,
                               const semantic::SemanticModel& model);
 
+    /// KAI LANGUAGE M7B: an array-typed local's own initialization path,
+    /// dispatched to from generateVarDeclStmt() the moment `arrayType`
+    /// (already lowered from the local's own Symbol Type) is an
+    /// llvm::ArrayType. Supports EXACTLY `let`/`mut xs = [elem, ...]` (a
+    /// possibly paren-wrapped ArrayLiteralExpr initializer, evaluated via
+    /// lowerArrayLiteralIntoStorage()) - any other initializer shape
+    /// (`let b = a`, copying one array-typed value into another) is
+    /// deliberately kept unsupported (returns false) per M7B spec §13 -
+    /// see this method's own .cpp comment for the full rationale.
+    bool generateArrayVarDeclStmt(const ast::VarDeclStmt& varDecl, semantic::SymbolId id, llvm::ArrayType* arrayType,
+                                   llvm::Function& function, llvm::IRBuilder<>& builder,
+                                   const semantic::SemanticModel& model);
+
+    /// KAI LANGUAGE M7B: stores `array`'s elements directly into
+    /// `storage` (an `arrayType`-typed address), left to right, EXACTLY
+    /// ONCE each - no separate aggregate-SSA-value construction step. A
+    /// nested ArrayLiteralExpr element recurses into this SAME function
+    /// against a GEP'd sub-address (see this method's own .cpp comment
+    /// for why this is the one case M7B's "multidimensional arrays only
+    /// if recursion genuinely works without broadening the
+    /// implementation" allowance covers). Returns false the moment any
+    /// element fails to lower or its LLVM type disagrees with the
+    /// array's own element type - `storage` may be left partially
+    /// initialized on failure, but the caller always discards it rather
+    /// than ever reading through it.
+    bool lowerArrayLiteralIntoStorage(const ast::ArrayLiteralExpr& array, llvm::Value* storage,
+                                       llvm::ArrayType* arrayType, const semantic::SemanticModel& model,
+                                       llvm::IRBuilder<>& builder);
+
     /// `y = y + 1` (or `do_work()`) as a statement: lowers the expression
     /// and discards its result (a successful Unit-valued expression, or
     /// any other value-producing expression used solely for its side
@@ -456,7 +500,7 @@ private:
                                            llvm::IRBuilder<>& builder);
 
     std::optional<llvm::Value*> lowerLiteralExpr(const ast::LiteralExpr& literal, semantic::Type type,
-                                                  llvm::IRBuilder<>& builder);
+                                                  const semantic::SemanticModel& model, llvm::IRBuilder<>& builder);
     std::optional<llvm::Value*> lowerUnaryExpr(const ast::UnaryExpr& unary, const semantic::SemanticModel& model,
                                                 llvm::IRBuilder<>& builder);
     std::optional<llvm::Value*> lowerBinaryExpr(const ast::BinaryExpr& binary, const semantic::SemanticModel& model,
@@ -515,6 +559,67 @@ private:
     /// expression.
     std::optional<llvm::Value*> lowerAssignmentExpr(const ast::AssignmentExpr& assignment,
                                                      const semantic::SemanticModel& model, llvm::IRBuilder<>& builder);
+
+    /// KAI LANGUAGE M7B: the checked element ADDRESS `xs[index]` names -
+    /// shared by both a plain read (lowerIndexExpr()) and an indexed
+    /// write (lowerIndexAssignmentExpr()), so the bounds-check control
+    /// flow is built exactly once, never duplicated between the two.
+    /// Supports EXACTLY `xs[index]` where `xs` is a direct (through
+    /// transparent ParenExpr only) identifier resolving to a
+    /// SymbolKind::Local array binding - any other base (nested
+    /// indexing, a call/member/parameter base) returns std::nullopt
+    /// (M7B spec §1/§12: "generalized nested lvalue mutation," and
+    /// multidimensional reads through it, remain deferred - the
+    /// frontend's own checkIndexExpr() does not restrict this shape for
+    /// a plain READ the way checkIndexAssignmentTarget() restricts a
+    /// WRITE, so this is a real, if narrow, codegen-only limitation, not
+    /// a frontend one).
+    ///
+    /// `index.index()` is evaluated EXACTLY ONCE (M7B spec §10/§11) and
+    /// reused for both the bounds comparison and the GEP - never
+    /// re-lowered. The comparison normalizes the index to an unsigned
+    /// i64 (CreateSExtOrTrunc/CreateZExtOrTrunc, safe regardless of the
+    /// index's own concrete width, including i64/u64 itself) and
+    /// compares it against the array's own uint64 length - a signed
+    /// index is ADDITIONALLY required to be non-negative at its OWN
+    /// width before that normalization (M7B spec §6). On success,
+    /// returns the GEP'd element address with `builder` positioned in
+    /// the in-bounds successor block. On failure (out of bounds), emits
+    /// `llvm.trap` + `unreachable` in the failure block (M7B spec §5) -
+    /// NEVER KAI `panic`, no unwinding, no recovery - and the CALLER
+    /// never receives a value in that case (this method itself does not
+    /// return early there; it simply never reaches the point of
+    /// returning the address, since the trap block is unreachable by
+    /// construction). The element address is never computed, and no
+    /// GEP/load/store against it ever happens, before the in-bounds
+    /// branch succeeds.
+    struct ArrayElementAddress {
+        llvm::Value* pointer;
+        llvm::Type* elementType;
+    };
+    std::optional<ArrayElementAddress> lowerArrayElementAddress(const ast::IndexExpr& indexExpr,
+                                                                  const semantic::SemanticModel& model,
+                                                                  llvm::IRBuilder<>& builder);
+
+    /// `xs[index]` as a value-producing expression: the checked element
+    /// address (lowerArrayElementAddress()) followed by one load.
+    std::optional<llvm::Value*> lowerIndexExpr(const ast::IndexExpr& index, const semantic::SemanticModel& model,
+                                                llvm::IRBuilder<>& builder);
+
+    /// `xs[index] = value` for a mutable local array binding
+    /// (dispatched to from lowerAssignmentExpr() when the target is an
+    /// IndexExpr). The checked element address is computed first
+    /// (lowerArrayElementAddress()); `value` is lowered - EXACTLY ONCE -
+    /// only once that address is known to be in bounds (M7B spec §11:
+    /// "store only after bounds success" - evaluating `value` before an
+    /// out-of-bounds trap would run its side effects for no reason, on a
+    /// path that can never continue anyway). Returns
+    /// std::optional<llvm::Value*>{nullptr} - Unit success - on a
+    /// successful store, matching lowerAssignmentExpr()'s own
+    /// identifier-target convention exactly.
+    std::optional<llvm::Value*> lowerIndexAssignmentExpr(const ast::IndexExpr& indexTarget, const ast::Expr& value,
+                                                          const semantic::SemanticModel& model,
+                                                          llvm::IRBuilder<>& builder);
 
     /// A direct (or transparently-parenthesized) call - the current
     /// frontend-supported call subset. Resolution is exclusively
@@ -593,7 +698,20 @@ private:
     /// return type) - callers that cannot accept a storable value (e.g.
     /// generateVarDeclStmt()) must reject void themselves; lowerType()
     /// does not encode "is this usable as a local's storage type" policy.
-    llvm::Type* lowerType(semantic::Type type);
+    ///
+    /// KAI LANGUAGE M7B: Array now lowers to a real `llvm::ArrayType`
+    /// (`[N x ElementType]`, via `model`'s own arrayElementType()/
+    /// arrayLength() - never independently re-derived), driven entirely
+    /// by whatever this SAME function can already lower for the element
+    /// type - never a separate hardcoded "supported array element kinds"
+    /// list. This automatically and correctly covers every
+    /// already-lowerable scalar (all eight integer kinds, f32/f64, bool,
+    /// str) and even a nested array, while Char (still nullptr
+    /// standalone) correctly keeps `[char; N]` unsupported too, with no
+    /// special-casing needed either way. `model` is required for this
+    /// one case only - every primitive kind ignores it entirely, so any
+    /// call site's own model is always a valid argument.
+    llvm::Type* lowerType(semantic::Type type, const semantic::SemanticModel& model);
 
     /// Allocates `type`-typed storage at the START of `function`'s entry
     /// block, regardless of `builder`'s own current insertion point -

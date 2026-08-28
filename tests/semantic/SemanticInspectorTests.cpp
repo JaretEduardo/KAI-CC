@@ -5,6 +5,7 @@
 #include "kai/semantic/ControlFlowAnalyzer.hpp"
 #include "kai/semantic/SemanticAnalyzer.hpp"
 #include "kai/semantic/SemanticModel.hpp"
+#include "kai/semantic/SemanticTypeName.hpp"
 #include "kai/semantic/TypeChecker.hpp"
 #include "kai/source/SourceManager.hpp"
 
@@ -12,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 using kai::FileId;
@@ -25,6 +27,7 @@ using kai::semantic::SemanticModel;
 using kai::semantic::SemanticSymbolInfo;
 using kai::semantic::SemanticSymbolKind;
 using kai::semantic::TypeChecker;
+using kai::semantic::typeName;
 using kai::semantic::TypeKind;
 
 namespace {
@@ -35,6 +38,12 @@ namespace {
 struct Inspected {
     bool ok = false;
     SemanticInspectionResult result;
+    // KAI LANGUAGE M7A: kept alongside `result` (rather than discarded)
+    // so a test can render an array-typed symbol's Type canonically via
+    // semantic::typeName()/arrayElementType()/arrayLength() - all of
+    // which require the SAME SemanticModel that produced it (see
+    // Type.hpp's CompoundTypeId documentation).
+    SemanticModel model;
 };
 
 Inspected inspectSource(SourceManager& sm, const std::string& source) {
@@ -60,7 +69,8 @@ Inspected inspectSource(SourceManager& sm, const std::string& source) {
     }
 
     const SemanticInspector inspector(sm, model);
-    return Inspected{true, inspector.inspect(*parsed)};
+    SemanticInspectionResult result = inspector.inspect(*parsed);
+    return Inspected{true, std::move(result), std::move(model)};
 }
 
 const SemanticSymbolInfo* findSymbol(const SemanticInspectionResult& result, const std::string& name,
@@ -301,6 +311,31 @@ void testForLoopVariableIsDiscoveredAsALocal() {
     }
 }
 
+// KAI LANGUAGE M7A: an array-typed local is discovered exactly like any
+// other local, with its real, canonical fixed-size-array Type - never
+// "unresolved", never a leaked internal CompoundTypeId, and the SAME
+// canonical string ("[i32; 3]") an external tool would see via
+// semantic::typeName().
+void testArrayLocalReportsCanonicalArrayType() {
+    SourceManager sm;
+    const Inspected inspected = inspectSource(sm, "fn f() {\n    let xs = [1, 2, 3]\n}");
+    KAI_CHECK(inspected.ok);
+    if (!inspected.ok) {
+        return;
+    }
+
+    const SemanticSymbolInfo* local = findSymbol(inspected.result, "xs", SemanticSymbolKind::Local);
+    KAI_CHECK(local != nullptr);
+    if (local != nullptr) {
+        KAI_CHECK(local->type.isArray());
+        if (local->type.isArray()) {
+            KAI_CHECK(inspected.model.arrayElementType(local->type) == kai::semantic::Type::i32());
+            KAI_CHECK(inspected.model.arrayLength(local->type) == 3);
+            KAI_CHECK(typeName(local->type, inspected.model) == "[i32; 3]");
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -314,6 +349,7 @@ int main() {
     testBuiltinsAreExcluded();
     testSourcePositionsAreCorrect();
     testForLoopVariableIsDiscoveredAsALocal();
+    testArrayLocalReportsCanonicalArrayType();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }

@@ -43,7 +43,7 @@ int runInspectCommand(SourceManager& sources, const std::filesystem::path& input
     // established policy for the exact same three passes.
     if (!model.errors().empty()) {
         for (const semantic::SemanticError& error : model.errors()) {
-            err << formatSemanticError(sources, error) << '\n';
+            err << formatSemanticError(sources, error, model) << '\n';
         }
         return 5;
     }
@@ -53,7 +53,7 @@ int runInspectCommand(SourceManager& sources, const std::filesystem::path& input
 
     // stdout gets EXACTLY the JSON plus one trailing newline - no other
     // text is ever written to `out` on this path (M1 spec §27).
-    out << semantic::writeSemanticInspectionJson(result) << '\n';
+    out << semantic::writeSemanticInspectionJson(result, model) << '\n';
     return 0;
 }
 

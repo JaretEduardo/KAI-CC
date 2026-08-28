@@ -46,7 +46,7 @@ int runSemanticQueryCommand(SemanticQueryKind kind, SourceManager& sources, cons
     // established policy for the exact same three passes.
     if (!model.errors().empty()) {
         for (const semantic::SemanticError& error : model.errors()) {
-            err << formatSemanticError(sources, error) << '\n';
+            err << formatSemanticError(sources, error, model) << '\n';
         }
         return 5;
     }
@@ -58,9 +58,9 @@ int runSemanticQueryCommand(SemanticQueryKind kind, SourceManager& sources, cons
     // stdout gets EXACTLY the JSON plus one trailing newline - no other
     // text is ever written to `out` on this path (M1/M2 spec §27).
     if (kind == SemanticQueryKind::Definition) {
-        out << semantic::writeDefinitionJson(envelope, query.findDefinition(position)) << '\n';
+        out << semantic::writeDefinitionJson(envelope, query.findDefinition(position), model) << '\n';
     } else {
-        out << semantic::writeReferencesJson(envelope, query.findReferences(position)) << '\n';
+        out << semantic::writeReferencesJson(envelope, query.findReferences(position), model) << '\n';
     }
     return 0;
 }

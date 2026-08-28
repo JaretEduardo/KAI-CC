@@ -158,7 +158,7 @@ void testFileNameRequiringEscapingIsEncodedSafely() {
 
     const kai::semantic::SemanticInspector inspector(sm, model);
     const kai::semantic::SemanticInspectionResult result = inspector.inspect(*parsed);
-    const std::string json = kai::semantic::writeSemanticInspectionJson(result);
+    const std::string json = kai::semantic::writeSemanticInspectionJson(result, model);
 
     // Both the embedded quote and the embedded backslash must be
     // escaped - a naive concatenation would otherwise produce invalid,

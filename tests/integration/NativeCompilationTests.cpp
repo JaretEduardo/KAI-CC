@@ -385,6 +385,267 @@ void testForLoopEndpointsEvaluatedOnceEndToEnd() {
     KAI_CHECK_STDOUT_BYTES(result.stdoutText, "100\n200\n0\n1\n2\n");
 }
 
+// --- KAI LANGUAGE M7B (post-alpha.2): local fixed-size arrays + checked
+// indexing, real native execution ---
+
+// A. REQUIRED: basic read.
+void testArrayLiteralIndexedReadEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    let xs = [10, 20, 30]\n"
+                                "    print(xs[0])\n"
+                                "    print(xs[2])\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_read.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "10\n30\n");
+}
+
+// B. REQUIRED: mutable element write.
+void testArrayIndexedWriteEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    mut xs = [10, 20, 30]\n"
+                                "    xs[1] = 99\n"
+                                "    print(xs[1])\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_write.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "99\n");
+}
+
+// C. REQUIRED: M6 for-range read integration.
+void testArrayM6ForRangeReadEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    let xs = [10, 20, 30]\n"
+                                "    for i in 0..3 {\n"
+                                "        print(xs[i])\n"
+                                "    }\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_for_read.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "10\n20\n30\n");
+}
+
+// D. REQUIRED: M6 for-range mutation integration.
+void testArrayM6ForRangeMutationEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    mut xs = [10, 20, 30]\n"
+                                "    for i in 0..3 {\n"
+                                "        xs[i] = xs[i] + 1\n"
+                                "    }\n"
+                                "    for i in 0..3 {\n"
+                                "        print(xs[i])\n"
+                                "    }\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_for_mutate.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "11\n21\n31\n");
+}
+
+// E. REQUIRED: array literal evaluation order / exactly once.
+void testArrayLiteralEvaluationOrderEndToEnd() {
+    const std::string source = "fn a() -> i32 {\n"
+                                "    print(100)\n"
+                                "    return 1\n"
+                                "}\n"
+                                "fn b() -> i32 {\n"
+                                "    print(200)\n"
+                                "    return 2\n"
+                                "}\n"
+                                "fn main() {\n"
+                                "    let xs = [a(), b()]\n"
+                                "    print(xs[0])\n"
+                                "    print(xs[1])\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_eval_order.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "100\n200\n1\n2\n");
+}
+
+// F. REQUIRED: dynamic in-bounds signed index.
+void testArrayDynamicSignedInBoundsEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    let xs = [10, 20, 30]\n"
+                                "    mut i: i32 = 1\n"
+                                "    print(xs[i])\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_dyn_signed_ok.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "20\n");
+}
+
+// G. REQUIRED: dynamic out-of-bounds upper-bound index traps. Per M7B
+// spec §15/§18: no stable OS exit code is asserted for llvm.trap - only
+// that the process does NOT report successful completion, and that no
+// output past the trapping access ever appears (a fixed marker BEFORE
+// the trapping print proves the program made it that far and no
+// further - see this test's own "999" sentinel and its absence check,
+// not asserted as surviving the abrupt termination itself, only as the
+// LAST thing that could possibly appear).
+void testArrayDynamicSignedUpperBoundTrapsEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    let xs = [10, 20, 30]\n"
+                                "    mut i: i32 = 3\n"
+                                "    print(xs[i])\n"
+                                "    print(888)\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_dyn_signed_oob.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    // The statement AFTER the trapping index is provably unreachable
+    // (the trap block ends in `unreachable`, never falling through) -
+    // its own output must never appear, regardless of stdio buffering
+    // around the abrupt termination itself.
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// H. REQUIRED: dynamic negative signed index traps.
+void testArrayDynamicSignedNegativeTrapsEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    let xs = [10, 20, 30]\n"
+                                "    mut i: i32 = -1\n"
+                                "    print(xs[i])\n"
+                                "    print(888)\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_dyn_signed_negative.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// I. REQUIRED: dynamic unsigned in-bounds succeeds, out-of-bounds traps.
+void testArrayDynamicUnsignedInBoundsEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    let xs = [10, 20, 30]\n"
+                                "    mut i: u32 = 2\n"
+                                "    print(xs[i])\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_dyn_unsigned_ok.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "30\n");
+}
+
+void testArrayDynamicUnsignedOutOfBoundsTrapsEndToEnd() {
+    const std::string source = "fn main() {\n"
+                                "    let xs = [10, 20, 30]\n"
+                                "    mut i: u32 = 3\n"
+                                "    print(xs[i])\n"
+                                "    print(888)\n"
+                                "}";
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_dyn_unsigned_oob.kai", source);
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// J. REQUIRED: immutable indexed assignment fails in the FRONTEND
+// (exit 5, a real SemanticError) - never a backend/LLVM crash.
+void testArrayImmutableIndexedAssignmentFailsInFrontend() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_array_immutable_write.kai",
+                         "fn main() {\n    let xs = [1, 2, 3]\n    xs[0] = 5\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_array_immutable.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("assignment to immutable binding") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// Compile-time out-of-bounds diagnostics (M7B spec §15/§22): rejected
+// during semantic/type checking (exit 5), NEVER an LLVM/backend error.
+void testArrayCompileTimeOutOfBoundsDiagnostics() {
+    struct Case {
+        const char* index;
+        const char* label;
+    };
+    const Case cases[] = {
+        {"3", "kai_e2e_array_oob_upper.kai"},
+        {"999", "kai_e2e_array_oob_far.kai"},
+        {"-1", "kai_e2e_array_oob_negative.kai"},
+    };
+
+    for (const Case& testCase : cases) {
+        const std::filesystem::path sourcePath = writeTempSource(
+            testCase.label,
+            std::string("fn main() {\n    let xs = [1, 2, 3]\n    print(xs[") + testCase.index + "])\n}");
+        std::error_code ignored;
+
+        SourceManager sm;
+        std::ostringstream err;
+        const int exitCode = kai::cli::runCompileCommand(
+            sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_array_oob.out", err);
+
+        KAI_CHECK(exitCode == 5);
+        KAI_CHECK(err.str().find("array index out of bounds") != std::string::npos);
+
+        std::filesystem::remove(sourcePath, ignored);
+    }
+
+    // The valid boundary (length - 1) must NOT be rejected.
+    const std::filesystem::path validPath =
+        writeTempSource("kai_e2e_array_oob_boundary_valid.kai", "fn main() {\n    let xs = [1, 2, 3]\n    print(xs[2])\n}");
+    const std::filesystem::path validOutputPath = std::filesystem::temp_directory_path() / "kai_e2e_array_oob_valid.out";
+    std::error_code ignored;
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(sm, validPath, validOutputPath, err);
+    KAI_CHECK(exitCode == 0);
+    std::filesystem::remove(validPath, ignored);
+    std::filesystem::remove(kai::cli::resolveNativeExecutablePath(validOutputPath), ignored);
+}
+
 // FRONTEND/BACKEND FAILURE BEHAVIOR (M7 spec §18/§19): no executable is
 // ever produced from a failed attempt.
 
@@ -815,6 +1076,19 @@ int main() {
     testForLoopReturnInsideBodyEndToEnd();
     testForLoopOuterVariableShadowingEndToEnd();
     testForLoopEndpointsEvaluatedOnceEndToEnd();
+
+    testArrayLiteralIndexedReadEndToEnd();
+    testArrayIndexedWriteEndToEnd();
+    testArrayM6ForRangeReadEndToEnd();
+    testArrayM6ForRangeMutationEndToEnd();
+    testArrayLiteralEvaluationOrderEndToEnd();
+    testArrayDynamicSignedInBoundsEndToEnd();
+    testArrayDynamicSignedUpperBoundTrapsEndToEnd();
+    testArrayDynamicSignedNegativeTrapsEndToEnd();
+    testArrayDynamicUnsignedInBoundsEndToEnd();
+    testArrayDynamicUnsignedOutOfBoundsTrapsEndToEnd();
+    testArrayImmutableIndexedAssignmentFailsInFrontend();
+    testArrayCompileTimeOutOfBoundsDiagnostics();
 
     testCompileFailsCleanlyOnSemanticError();
     testCompileFailsCleanlyWithNoMain();

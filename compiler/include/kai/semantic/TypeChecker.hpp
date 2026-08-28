@@ -10,6 +10,7 @@
 #include "kai/source/SourceManager.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -66,14 +67,19 @@ namespace kai::semantic {
 /// `return` is checked as though it returned Type::unit() - no AST node
 /// is fabricated for this; it is a purely local value used only for the
 /// comparison. This milestone still does NOT implement all-paths-return
-/// analysis, missing-return-at-function-end diagnostics, unreachable-code
-/// analysis, or for-iterable validation - `ForStmt::iterable()` is still
-/// only traversed for its own independent errors, never type-checked.
+/// analysis or missing-return-at-function-end diagnostics (that arrives
+/// later, via the separate ControlFlowAnalyzer pass) or unreachable-code
+/// analysis. `ForStmt::iterable()` validation (KAI LANGUAGE M6) and real
+/// array `IndexExpr` typing/bounds checking (KAI LANGUAGE M7B) are
+/// covered separately - see checkForStmt()/checkIndexExpr() in
+/// TypeChecker.cpp for the current, non-deferred rules for each.
 ///
-/// Reference/range/borrow-mutation semantics remain deferred - every such
+/// Reference/member-mutation semantics remain deferred - every such
 /// outer expression kind is still fully traversed (its children are
-/// checked) but recorded as Type::unresolved() (see checkIndexExpr()/etc.
-/// in TypeChecker.cpp for the full per-ExprKind rules).
+/// checked) but recorded as Type::unresolved() (see checkMemberExpr() in
+/// TypeChecker.cpp). A bare Range as a first-class runtime value (`let r
+/// = 0..10`, outside a `for` loop's own iterable position) remains
+/// similarly deferred (see checkBinaryExpr()'s own Range case).
 ///
 /// typeOf() three-state contract (see SemanticModel::typeOf()):
 /// std::nullopt means an ast::Expr was never visited by this pass;
@@ -372,17 +378,104 @@ private:
     /// Type::error().
     Type checkInvalidAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
 
-    /// A MemberExpr/IndexExpr target (spec #10): checks the target
-    /// through its own existing, unmodified checkMemberExpr()/
-    /// checkIndexExpr() traversal and the RHS with no context, and
+    /// A MemberExpr target (spec #10, KAI LANGUAGE M7B narrows this to
+    /// Member only - see checkIndexAssignmentTarget() below for Index):
+    /// checks the target through its own existing, unmodified
+    /// checkMemberExpr() traversal and the RHS with no context, and
     /// always returns Type::unresolved() with no diagnostic - even when a
     /// child or the RHS is itself Error - because this assignment FORM
-    /// remains intentionally deferred, mirroring the Range/Ref/RefMut/
-    /// Builtin-call "deferred construct" rule rather than the "Error
-    /// child propagates" rule implemented constructs use.
+    /// remains intentionally deferred (structs/member assignment don't
+    /// exist yet), mirroring the Range/Ref/RefMut/Builtin-call "deferred
+    /// construct" rule rather than the "Error child propagates" rule
+    /// implemented constructs use.
     Type checkDeferredAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
-    Type checkArrayLiteralExpr(const ast::ArrayLiteralExpr& array, SemanticModel& model) const;
+
+    /// KAI LANGUAGE M7B: an IndexExpr target (`xs[index] = value`).
+    /// Checks the index expression itself through the SAME
+    /// checkIndexExpr() a plain read uses (never a second copy of the
+    /// object-is-array/index-domain/compile-time-bounds rules), then
+    /// supports EXACTLY the straightforward shape M7B's spec approves:
+    /// `xs` is a direct (through transparent ParenExpr only, via
+    /// unwrapAssignmentTargetIdentifier()) identifier resolving to a
+    /// SymbolKind::Local. For that shape, once the index itself
+    /// type-checked to a real (non-Error/Unresolved) element Type:
+    /// mutability is checked first (an immutable `xs` short-circuits to
+    /// the EXISTING AssignmentToImmutableBinding diagnostic - no new,
+    /// index-specific immutability error), then the RHS is checked
+    /// contextually against the element Type exactly like
+    /// checkVariableAssignmentTarget() already does for a plain
+    /// identifier target, comparing via the existing TypeMismatch shape.
+    /// Any OTHER shape (a non-identifier/non-Local base, i.e. nested
+    /// indexing, a call/member/parameter base - all "generalized nested
+    /// lvalue mutation," explicitly deferred per M7B's own spec) falls
+    /// back to the SAME Type::unresolved()/no-diagnostic behavior
+    /// checkDeferredAssignmentTarget() already used for every IndexExpr
+    /// target before M7B.
+    Type checkIndexAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
+    /// KAI LANGUAGE M7A: produces a real fixed-size array Type
+    /// `[ElementType; N]` for a non-empty, homogeneous literal - reusing
+    /// the SAME sibling/contextual-literal-adaptation spirit
+    /// checkMatchedOperands() already uses for binary operators,
+    /// generalized to N elements (an explicit `expected` array element
+    /// type always wins; otherwise the first non-"flexible" element's
+    /// own no-context type becomes the anchor offered to the rest; if
+    /// every element is flexible, each simply defaults independently -
+    /// still coherent, since a flexible literal's default never depends
+    /// on position). Error/Unresolved propagate exactly like
+    /// resolveMatchedOperatorResult() does. An inhomogeneous literal
+    /// (e.g. `[1, true, 3]`) is rejected via
+    /// SemanticErrorKind::IncompatibleArrayElementType. An empty literal
+    /// `[]` is accepted ONLY when `expected` supplies a concrete array
+    /// element type (M7A spec #10 - "no standalone inferred element
+    /// type"); otherwise SemanticErrorKind::AmbiguousEmptyArrayLiteral.
+    /// Never checks any element more than once (each element is checked
+    /// EXACTLY once, whether or not it becomes the anchor). No length
+    /// mismatch against `expected` is special-cased here at all: the
+    /// literal's OWN structural type (element type + actual element
+    /// count) is always what's returned, and the CALLER's existing
+    /// generic `initializerType == declaredType` comparison
+    /// (checkVarDecl()) already rejects a length mismatch correctly, for
+    /// free, now that `[i32; 3] != [i32; 4]` is real Type inequality -
+    /// no new length-specific diagnostic is invented here.
+    Type checkArrayLiteralExpr(const ast::ArrayLiteralExpr& array, std::optional<Type> expected,
+                                SemanticModel& model) const;
+
+    /// KAI LANGUAGE M7B: real `object[index]` typing. `object` must be a
+    /// concrete fixed-size array Type (SemanticErrorKind::
+    /// InvalidIndexTarget otherwise) and `index` must be one of the
+    /// eight concrete integer types (SemanticErrorKind::InvalidIndexType
+    /// otherwise - float/bool/char/str/unit/array all rejected; array
+    /// indexing and `str` indexing remain entirely separate features, no
+    /// accidental sharing). A compile-time-constant index (a bare or
+    /// directly-negated integer literal, via tryDecodeConstantIndex())
+    /// PROVABLY outside `[0, length)` is rejected at compile time
+    /// (SemanticErrorKind::ArrayIndexOutOfBounds) - a non-constant index
+    /// is NOT bounds-checked here at all (TYPE_SYSTEM.md §18's approved
+    /// design: dynamic bounds checking is a runtime/backend concern, an
+    /// `llvm.trap`, never a SemanticError). Error/Unresolved propagate
+    /// from either operand exactly like every other expression in this
+    /// file. Result type on success: the array's own element Type.
     Type checkIndexExpr(const ast::IndexExpr& index, SemanticModel& model) const;
+
+    /// KAI LANGUAGE M7B: a small structural fact independent of any
+    /// checker POLICY (mirrors unwrapAdaptableLiteral()'s own "structural
+    /// only" spirit) - `expr` is a compile-time-constant integer exactly
+    /// when it is a bare integer LiteralExpr, or a UnaryExpr::Negate
+    /// directly wrapping one (transparent ParenExpr wrappers permitted
+    /// either way). Reuses decodeIntegerMagnitude() (TypeChecker.cpp) -
+    /// the SAME digit-decoding TypeChecker already uses for a value
+    /// literal's own magnitude - never a second decoder. Deliberately
+    /// does NOT fold `let i = 3; xs[i]` or any other identifier/
+    /// expression-based "constant" (M7B spec §4: "do not build a general
+    /// constant-folding engine solely for M7B") - std::nullopt for
+    /// anything but the two literal shapes above, which the caller
+    /// (checkIndexExpr()) then treats as a purely dynamic (runtime-
+    /// checked) index instead of a compile-time one.
+    struct ConstantIndexValue {
+        bool isNegative;
+        std::uint64_t magnitude;
+    };
+    std::optional<ConstantIndexValue> tryDecodeConstantIndex(const ast::Expr& expr) const;
     Type checkMemberExpr(const ast::MemberExpr& member, SemanticModel& model) const;
     Type checkErrorPropagationExpr(const ast::ErrorPropagationExpr& errorPropagation, SemanticModel& model) const;
 

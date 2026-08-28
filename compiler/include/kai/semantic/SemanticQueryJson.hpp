@@ -33,7 +33,11 @@ struct QueryJsonEnvelope {
 /// different symbol rendering (M2 spec §25). schemaVersion stays 1 (M1's
 /// existing inspect schema is unchanged; this is an additive schema,
 /// not a breaking one - M2 spec §21).
-std::string writeDefinitionJson(const QueryJsonEnvelope& envelope, const DefinitionResult& result);
+/// `model` MUST be the SAME SemanticModel `result`'s symbol (if any) was
+/// resolved against - see appendSymbolJson()'s own doc comment (KAI
+/// LANGUAGE M7A).
+std::string writeDefinitionJson(const QueryJsonEnvelope& envelope, const DefinitionResult& result,
+                                 const SemanticModel& model);
 
 /// Serializes a references-query result to:
 ///
@@ -49,6 +53,7 @@ std::string writeDefinitionJson(const QueryJsonEnvelope& envelope, const Definit
 /// exactly `result.references`' own order - SOURCE order, guaranteed by
 /// SemanticQuery's own single, source-ordered AST traversal (never
 /// re-sorted here).
-std::string writeReferencesJson(const QueryJsonEnvelope& envelope, const ReferencesResult& result);
+std::string writeReferencesJson(const QueryJsonEnvelope& envelope, const ReferencesResult& result,
+                                 const SemanticModel& model);
 
 } // namespace kai::semantic

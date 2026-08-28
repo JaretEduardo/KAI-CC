@@ -53,7 +53,7 @@ bool runFrontend(SourceManager& sources, const std::filesystem::path& inputPath,
 
     if (!outModel.errors().empty()) {
         for (const semantic::SemanticError& error : outModel.errors()) {
-            err << formatSemanticError(sources, error) << '\n';
+            err << formatSemanticError(sources, error, outModel) << '\n';
         }
         outExitCodeOnFailure = 5;
         return false;
@@ -80,9 +80,9 @@ int runCallQueryCommand(CallQueryKind kind, SourceManager& sources, const std::f
     const semantic::CallQueryJsonEnvelope envelope{std::string(sources.fileName(*file)), position};
 
     if (kind == CallQueryKind::Callers) {
-        out << semantic::writeCallRelationJson(envelope, query.findCallers(position), "callers") << '\n';
+        out << semantic::writeCallRelationJson(envelope, query.findCallers(position), "callers", model) << '\n';
     } else {
-        out << semantic::writeCallRelationJson(envelope, query.findCallees(position), "callees") << '\n';
+        out << semantic::writeCallRelationJson(envelope, query.findCallees(position), "callees", model) << '\n';
     }
     return 0;
 }
@@ -99,7 +99,7 @@ int runCallGraphCommand(SourceManager& sources, const std::filesystem::path& inp
     }
 
     const semantic::SemanticCallQuery query(sources, model, *parsed);
-    out << semantic::writeCallGraphJson(std::string(sources.fileName(*file)), query.directCallGraph()) << '\n';
+    out << semantic::writeCallGraphJson(std::string(sources.fileName(*file)), query.directCallGraph(), model) << '\n';
     return 0;
 }
 

@@ -586,9 +586,18 @@ void testMemberTargetUnresolvedNoDiagnostic() {
     }
 }
 
-void testIndexTargetUnresolvedNoDiagnostic() {
+// KAI LANGUAGE M7B: RETARGETED - this test's original premise ("indexed
+// assignment into ANYTHING stays deferred with no diagnostic") is
+// superseded outright: `xs[index] = value` for a mutable LOCAL array now
+// really type-checks (see ArrayIndexAssignmentTests.cpp for that full
+// coverage). The one shape that remains genuinely deferred - explicitly,
+// per M7B's own spec §12/§1 ("generalized nested lvalue mutation"/
+// "arrays as parameters" both stay out of scope) - is indexing into an
+// array-typed PARAMETER (not a Local): arrays-as-parameters don't exist
+// yet, so this can never become the "supported local array base" case.
+void testIndexIntoArrayParameterTargetUnresolvedNoDiagnostic() {
     SourceManager sm;
-    Checked result = analyzeAndCheck(sm, "fn f(arr: i32) {\n    arr[0] = 1\n}");
+    Checked result = analyzeAndCheck(sm, "fn f(arr: [i32; 3]) {\n    arr[0] = 1\n}");
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
         return;
@@ -776,7 +785,7 @@ int main() {
     testTargetErrorPreventsDownstreamBinaryOperandsCascade();
 
     testMemberTargetUnresolvedNoDiagnostic();
-    testIndexTargetUnresolvedNoDiagnostic();
+    testIndexIntoArrayParameterTargetUnresolvedNoDiagnostic();
     testDeferredMemberTargetRhsErrorStillUnresolved();
 
     testLetYEqualsParenAssignInfersUnit();

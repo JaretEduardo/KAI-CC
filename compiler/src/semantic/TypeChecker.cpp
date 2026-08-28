@@ -100,6 +100,7 @@ std::optional<IntegerRange> integerRangeFor(Type type) {
         case TypeKind::Bool:
         case TypeKind::Char:
         case TypeKind::Str:
+        case TypeKind::Array: // KAI LANGUAGE M7A: never an integer type itself
             return std::nullopt;
     }
     return std::nullopt;
@@ -570,7 +571,7 @@ Type TypeChecker::checkExpr(const ast::Expr& expr, std::optional<Type> expected,
             return checkAssignmentExpr(static_cast<const ast::AssignmentExpr&>(expr), model);
 
         case ast::ExprKind::ArrayLiteral:
-            return checkArrayLiteralExpr(static_cast<const ast::ArrayLiteralExpr&>(expr), model);
+            return checkArrayLiteralExpr(static_cast<const ast::ArrayLiteralExpr&>(expr), expected, model);
 
         case ast::ExprKind::Index:
             return checkIndexExpr(static_cast<const ast::IndexExpr&>(expr), model);
@@ -1158,7 +1159,11 @@ Type TypeChecker::checkAssignmentExpr(const ast::AssignmentExpr& assignment, Sem
         return result;
     }
 
-    if (assignment.target().kind() == ast::ExprKind::Member || assignment.target().kind() == ast::ExprKind::Index) {
+    if (assignment.target().kind() == ast::ExprKind::Index) {
+        return checkIndexAssignmentTarget(assignment, model);
+    }
+
+    if (assignment.target().kind() == ast::ExprKind::Member) {
         return checkDeferredAssignmentTarget(assignment, model);
     }
 
@@ -1267,19 +1272,287 @@ Type TypeChecker::checkDeferredAssignmentTarget(const ast::AssignmentExpr& assig
     return result;
 }
 
-Type TypeChecker::checkArrayLiteralExpr(const ast::ArrayLiteralExpr& array, SemanticModel& model) const {
-    for (const auto& element : array.elements()) {
-        inferExpr(*element, model);
+Type TypeChecker::checkIndexAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const {
+    const auto& indexTarget = static_cast<const ast::IndexExpr&>(assignment.target());
+    const ast::Expr& value = assignment.value();
+
+    // Reuses the EXACT same read-path validation a plain `xs[index]`
+    // gets - object-is-array, index-domain, compile-time bounds - never
+    // a second copy of those rules for the assignment-target shape.
+    const Type elementType = checkIndexExpr(indexTarget, model);
+
+    // M7B spec §12: only `xs[index] = value` where `xs` is a direct
+    // (through transparent ParenExpr only) identifier resolving to a
+    // SymbolKind::Local supports real mutation - any other base
+    // (nested indexing, a call/member/parameter base, ...) is
+    // "generalized nested lvalue mutation," explicitly deferred.
+    const ast::IdentifierExpr* rootIdentifier = unwrapAssignmentTargetIdentifier(indexTarget.object());
+    const std::optional<SymbolId> rootId = rootIdentifier ? model.resolution(*rootIdentifier) : std::nullopt;
+    const bool isSupportedLocalArrayBase =
+        rootId.has_value() && model.symbol(*rootId).kind == SymbolKind::Local && !elementType.isError() &&
+        !elementType.isUnresolved();
+
+    if (!isSupportedLocalArrayBase) {
+        // Deferred shape - the RHS is still checked (independent errors
+        // surface), but with no target-type context, and the whole
+        // assignment stays Type::unresolved() with no NEW diagnostic -
+        // exactly checkDeferredAssignmentTarget()'s own pre-M7B
+        // behavior, unless checkIndexExpr() ITSELF already reported a
+        // real problem (invalid target/index type, OOB), in which case
+        // Error propagates instead of being silently swallowed.
+        inferExpr(value, model);
+        const Type result = elementType.isError() ? Type::error() : Type::unresolved();
+        model.setExpressionType(assignment, result);
+        return result;
     }
-    const Type result = Type::unresolved();
+
+    const Symbol& rootSymbol = model.symbol(*rootId);
+    if (!rootSymbol.isMutable) {
+        // Existing AssignmentToImmutableBinding path - no new, index-
+        // specific immutability diagnostic. The RHS is still checked
+        // (independent errors surface), but with no target-type context,
+        // matching checkVariableAssignmentTarget()'s own identical rule.
+        inferExpr(value, model);
+        model.addError(SemanticError{
+            SemanticErrorKind::AssignmentToImmutableBinding,
+            indexTarget.object().span(),
+            rootSymbol.declaredAt,
+            std::nullopt,
+            std::nullopt,
+        });
+        const Type result = Type::error();
+        model.setExpressionType(assignment, result);
+        return result;
+    }
+
+    // Mutable local array, valid index: the RHS is checked contextually
+    // against the element Type exactly like checkVariableAssignmentTarget()
+    // already does for a plain identifier target - the SAME assignment-
+    // compatibility rule, never a second one invented for indexing.
+    const Type valueType = checkExpr(value, elementType, model);
+
+    Type result = Type::unit();
+    if (valueType.isError()) {
+        result = Type::error();
+    } else if (!valueType.isUnresolved() && !(valueType == elementType)) {
+        model.addError(SemanticError{
+            SemanticErrorKind::TypeMismatch,
+            value.span(),
+            std::nullopt,
+            elementType,
+            valueType,
+        });
+        result = Type::error();
+    }
+
+    model.setExpressionType(assignment, result);
+    return result;
+}
+
+Type TypeChecker::checkArrayLiteralExpr(const ast::ArrayLiteralExpr& array, std::optional<Type> expected,
+                                         SemanticModel& model) const {
+    const std::vector<ast::ExprPtr>& elements = array.elements();
+    const std::optional<Type> context = usableContext(expected);
+    const std::optional<Type> expectedElementType =
+        (context.has_value() && context->isArray()) ? std::optional<Type>(model.arrayElementType(*context))
+                                                      : std::nullopt;
+
+    if (elements.empty()) {
+        // M7A spec #10: "[]" has no standalone inferred element type -
+        // accepted only when an explicit contextual array Type supplies
+        // one. The literal's own length is always 0 regardless of
+        // `expected`'s own declared length - a mismatch there (e.g.
+        // `let xs: [i32; 3] = []`) is not special-cased here at all; it
+        // falls out for free from checkVarDecl()'s ordinary
+        // `initializerType == declaredType` comparison, exactly like a
+        // non-empty literal's length mismatch does (see this method's
+        // own header doc comment).
+        if (expectedElementType.has_value()) {
+            const Type result = model.internArray(*expectedElementType, 0);
+            model.setExpressionType(array, result);
+            return result;
+        }
+        model.addError(SemanticError{
+            SemanticErrorKind::AmbiguousEmptyArrayLiteral,
+            array.span(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+        });
+        const Type result = Type::error();
+        model.setExpressionType(array, result);
+        return result;
+    }
+
+    // Determine the ONE context every element is checked against - an
+    // explicit contextual element type always wins; otherwise the first
+    // non-"flexible" element (canAcceptNumericContext()) is checked here,
+    // ONCE, to discover its own type as the anchor for the rest (same
+    // asymmetric-anchor spirit as checkMatchedOperands(), generalized
+    // from two operands to N elements). If every element is flexible,
+    // `elementContext` stays nullopt and each defaults independently -
+    // still coherent, since a flexible literal's own default (i32/f64)
+    // never depends on its position or its siblings.
+    std::optional<Type> elementContext = expectedElementType;
+    std::size_t anchorIndex = elements.size(); // sentinel: no element pre-checked below
+    if (!elementContext.has_value()) {
+        for (std::size_t i = 0; i < elements.size(); ++i) {
+            if (!canAcceptNumericContext(*elements[i])) {
+                elementContext = checkExpr(*elements[i], std::nullopt, model);
+                anchorIndex = i;
+                break;
+            }
+        }
+    }
+
+    std::vector<Type> elementTypes;
+    elementTypes.reserve(elements.size());
+    for (std::size_t i = 0; i < elements.size(); ++i) {
+        if (i == anchorIndex) {
+            // Already checked above while discovering the anchor - never
+            // check the same element twice (a second checkExpr() call on
+            // e.g. a CallExpr anchor would duplicate its own diagnostics).
+            elementTypes.push_back(*elementContext);
+            continue;
+        }
+        elementTypes.push_back(checkExpr(*elements[i], elementContext, model));
+    }
+
+    bool anyError = false;
+    bool anyUnresolved = false;
+    for (const Type& elementType : elementTypes) {
+        anyError = anyError || elementType.isError();
+        anyUnresolved = anyUnresolved || elementType.isUnresolved();
+    }
+
+    Type result = Type::error();
+    if (anyError) {
+        result = Type::error();
+    } else if (anyUnresolved) {
+        result = Type::unresolved();
+    } else {
+        std::optional<std::size_t> mismatchIndex;
+        for (std::size_t i = 1; i < elementTypes.size(); ++i) {
+            if (!(elementTypes[i] == elementTypes[0])) {
+                mismatchIndex = i;
+                break;
+            }
+        }
+        if (!mismatchIndex.has_value()) {
+            result = model.internArray(elementTypes[0], elementTypes.size());
+        } else {
+            model.addError(SemanticError{
+                SemanticErrorKind::IncompatibleArrayElementType,
+                elements[*mismatchIndex]->span(),
+                elements[0]->span(),
+                elementTypes[0],
+                elementTypes[*mismatchIndex],
+            });
+            result = Type::error();
+        }
+    }
+
     model.setExpressionType(array, result);
     return result;
 }
 
+std::optional<TypeChecker::ConstantIndexValue> TypeChecker::tryDecodeConstantIndex(const ast::Expr& expr) const {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return tryDecodeConstantIndex(static_cast<const ast::ParenExpr&>(expr).inner());
+    }
+    if (expr.kind() == ast::ExprKind::Unary) {
+        const auto& unary = static_cast<const ast::UnaryExpr&>(expr);
+        if (unary.op() != ast::UnaryOperator::Negate) {
+            return std::nullopt;
+        }
+        // "- -5" never reaches here as a double negation of ONE constant
+        // (each Negate wraps its own operand) - defensively rejected
+        // anyway rather than assumed, since the grammar does allow
+        // stacking unary operators syntactically.
+        const std::optional<ConstantIndexValue> inner = tryDecodeConstantIndex(unary.operand());
+        if (!inner.has_value() || inner->isNegative) {
+            return std::nullopt;
+        }
+        return ConstantIndexValue{true, inner->magnitude};
+    }
+    if (expr.kind() != ast::ExprKind::Literal) {
+        return std::nullopt;
+    }
+    const auto& literal = static_cast<const ast::LiteralExpr&>(expr);
+    if (literal.literalKind() != ast::LiteralKind::Integer) {
+        return std::nullopt;
+    }
+    const std::optional<std::uint64_t> magnitude = decodeIntegerMagnitude(sources_.text(literal.span()));
+    if (!magnitude.has_value()) {
+        return std::nullopt;
+    }
+    return ConstantIndexValue{false, *magnitude};
+}
+
 Type TypeChecker::checkIndexExpr(const ast::IndexExpr& index, SemanticModel& model) const {
-    inferExpr(index.object(), model);
-    inferExpr(index.index(), model);
-    const Type result = Type::unresolved();
+    const Type objectType = inferExpr(index.object(), model);
+    const Type indexType = inferExpr(index.index(), model);
+
+    Type result = Type::error();
+    if (objectType.isError() || indexType.isError()) {
+        result = Type::error();
+    } else if (objectType.isUnresolved() || indexType.isUnresolved()) {
+        result = Type::unresolved();
+    } else if (!objectType.isArray()) {
+        // Array indexing and `str` indexing are separate, unrelated
+        // features (M7B spec §3) - a `str`-typed (or any other non-
+        // array) `object` is rejected here, never silently routed into
+        // some string-indexing behavior that does not exist.
+        model.addError(SemanticError{
+            SemanticErrorKind::InvalidIndexTarget,
+            index.object().span(),
+            std::nullopt,
+            std::nullopt,
+            objectType,
+        });
+        result = Type::error();
+    } else if (!indexType.isInteger()) {
+        model.addError(SemanticError{
+            SemanticErrorKind::InvalidIndexType,
+            index.index().span(),
+            std::nullopt,
+            std::nullopt,
+            indexType,
+        });
+        result = Type::error();
+    } else {
+        const Type elementType = model.arrayElementType(objectType);
+        const std::uint64_t length = model.arrayLength(objectType);
+
+        bool outOfBounds = false;
+        if (const std::optional<ConstantIndexValue> constant = tryDecodeConstantIndex(index.index())) {
+            // M7B spec §4: only a compile-time-KNOWN index (a bare or
+            // directly-negated integer literal) is checked here - no
+            // general constant-folding engine. `xs[-0]` (isNegative with
+            // magnitude 0) is index 0, not negative - only a genuinely
+            // negative magnitude is out of bounds on the low side.
+            outOfBounds = (constant->isNegative && constant->magnitude != 0) ||
+                          (!constant->isNegative && constant->magnitude >= length);
+        }
+        // A non-constant index is intentionally NOT bounds-checked here
+        // at all (TYPE_SYSTEM.md §18): dynamic bounds checking is a
+        // runtime/backend concern (LLVMCodeGenerator emits the actual
+        // llvm.trap-guarded check), never a compile-time SemanticError.
+
+        if (outOfBounds) {
+            model.addError(SemanticError{
+                SemanticErrorKind::ArrayIndexOutOfBounds,
+                index.index().span(),
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+            });
+            result = Type::error();
+        } else {
+            result = elementType;
+        }
+    }
+
     model.setExpressionType(index, result);
     return result;
 }

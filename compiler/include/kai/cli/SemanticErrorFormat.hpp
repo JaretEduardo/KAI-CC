@@ -19,6 +19,15 @@ namespace kai::cli {
 /// Shared by every CLI command that runs the semantic passes and needs
 /// to report their errors (CompileCommand, InspectCommand, ...) so this
 /// rendering is never duplicated across them.
-std::string formatSemanticError(const SourceManager& sources, const semantic::SemanticError& error);
+///
+/// `model` MUST be the SAME SemanticModel `error` was recorded against
+/// (every call site already has it in scope, from the same frontend run
+/// that produced `error` in the first place) - needed as of KAI LANGUAGE
+/// M7A so a TypeMismatch/LiteralOutOfRange/IncompatibleArrayElementType
+/// error whose expected/actual Type is a fixed-size array can render it
+/// as "[i32; 3]" via semantic::typeName() rather than a bare, structure-
+/// less type name.
+std::string formatSemanticError(const SourceManager& sources, const semantic::SemanticError& error,
+                                 const semantic::SemanticModel& model);
 
 } // namespace kai::cli

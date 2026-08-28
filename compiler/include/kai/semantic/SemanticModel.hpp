@@ -48,6 +48,44 @@ enum class SemanticErrorKind : std::uint8_t {
     /// silently left Unresolved and deferred to a confusing backend
     /// failure later.
     UnsupportedForIterable,
+
+    /// KAI LANGUAGE M7A (fixed-size arrays): an array literal `[]` with
+    /// no elements AND no usable contextual array Type (e.g. an
+    /// explicit `let xs: [T; N] = ...` annotation) to determine its
+    /// element type from. `[]` has no standalone inferred element type -
+    /// approved language rule, not an implementation gap - see
+    /// TypeChecker.cpp's checkArrayLiteralExpr().
+    AmbiguousEmptyArrayLiteral,
+
+    /// KAI LANGUAGE M7A (fixed-size arrays): an array literal whose
+    /// elements do not all share one concrete type, e.g. `[1, true, 3]`.
+    /// Reuses TypeMismatch's own expectedType/actualType fields
+    /// (expectedType: the type every earlier element already
+    /// established; actualType: this element's own type) rather than
+    /// inventing a new error shape - see TypeChecker.cpp's
+    /// checkArrayLiteralExpr().
+    IncompatibleArrayElementType,
+
+    /// KAI LANGUAGE M7B: `xs[index]` where `xs`'s own Type is not a
+    /// fixed-size array (e.g. `5[0]`, or indexing a `str`/scalar local -
+    /// array indexing and string indexing remain separate, unrelated
+    /// features). `actualType` records what `xs` actually is.
+    InvalidIndexTarget,
+
+    /// KAI LANGUAGE M7B: `xs[index]` where `index`'s own Type is not one
+    /// of the eight concrete integer types (float/bool/char/str/unit/
+    /// array all rejected). `actualType` records what `index` actually
+    /// is.
+    InvalidIndexType,
+
+    /// KAI LANGUAGE M7B: `xs[index]` where `index` is a compile-time
+    /// constant (a bare or directly-negated integer literal) PROVABLY
+    /// outside `xs`'s fixed length - e.g. `xs[3]`/`xs[-1]` for a
+    /// length-3 array. A DYNAMIC out-of-bounds index is intentionally
+    /// NOT a SemanticError at all (TYPE_SYSTEM.md §18's approved
+    /// design): it is checked at runtime and traps via `llvm.trap`, a
+    /// backend/runtime mechanism, never a compile-time diagnostic.
+    ArrayIndexOutOfBounds,
 };
 
 /// A minimal, message-free description of a semantic failure - the
@@ -172,6 +210,30 @@ public:
         return it->second;
     }
 
+    /// KAI LANGUAGE M7A: `type`'s element Type - `type` MUST be an array
+    /// Type this SAME SemanticModel issued (via internArray(), directly
+    /// or through a fixed-size-array TypeSyntax resolution) - see
+    /// CompoundTypeId's own class comment for why a Type from a
+    /// DIFFERENT SemanticModel is never a valid argument here, even one
+    /// built from identical source text. Callers (SemanticInspector,
+    /// SemanticTypeName, a future LLVMCodeGenerator array lowering, ...)
+    /// use this - and arrayLength() below - instead of ever inspecting
+    /// CompoundTypeId/the interning table directly, exactly the "clean
+    /// API, no internal ID leakage" contract Type::isArray()'s own
+    /// comment describes.
+    Type arrayElementType(Type type) const {
+        assert(type.isArray());
+        return arrayTypes_[type.compoundId().rawId()].elementType;
+    }
+
+    /// KAI LANGUAGE M7A: `type`'s compile-time element count. Same
+    /// "must be an array Type issued by THIS model" precondition as
+    /// arrayElementType() above.
+    std::uint64_t arrayLength(Type type) const {
+        assert(type.isArray());
+        return arrayTypes_[type.compoundId().rawId()].length;
+    }
+
 private:
     // Only a future SemanticAnalyzer populates a SemanticModel. Nothing
     // else - not even tests - should be able to construct an arbitrary
@@ -212,11 +274,50 @@ private:
         symbols_[id.rawId()].type = type;
     }
 
+    /// KAI LANGUAGE M7A: the one compile-scoped compound-type interner
+    /// this model owns (see Type.hpp's CompoundTypeId/Type class
+    /// comments for the full design rationale). `elementType` must
+    /// itself already be a Type this SAME model produced/resolved -
+    /// SemanticAnalyzer's resolveTypeSyntax() and TypeChecker's
+    /// checkArrayLiteralExpr() are the only two callers (both already
+    /// friends of SemanticModel, mirroring every other mutator here).
+    ///
+    /// Canonicalization: a linear scan for a structurally-equal existing
+    /// entry (same elementType, same length) - deliberately not a hash
+    /// map keyed on (Type, uint64_t), since ONE compilation's total
+    /// distinct array-type-shape count is expected to stay small (this
+    /// is source-declared shapes, not runtime values), and a linear scan
+    /// keeps this interner trivially correct with no custom hash/equal
+    /// functor to maintain. Reusing an existing entry - rather than
+    /// always appending - is what makes `[i32, i32, i32]`'s array
+    /// literal Type and a separately-written `[i32; 3]` annotation
+    /// compare `==` to each other: both resolve to the SAME
+    /// CompoundTypeId.
+    Type internArray(Type elementType, std::uint64_t length) {
+        for (std::size_t i = 0; i < arrayTypes_.size(); ++i) {
+            if (arrayTypes_[i].elementType == elementType && arrayTypes_[i].length == length) {
+                return Type(TypeKind::Array, CompoundTypeId(static_cast<std::uint32_t>(i)));
+            }
+        }
+        arrayTypes_.push_back(ArrayTypeInfo{elementType, length});
+        return Type(TypeKind::Array, CompoundTypeId(static_cast<std::uint32_t>(arrayTypes_.size() - 1)));
+    }
+
+    /// KAI LANGUAGE M7A: the compound-type interning table's own storage
+    /// shape - never exposed outside SemanticModel (see
+    /// arrayElementType()/arrayLength() above for the public, ID-free
+    /// read API every other consumer uses instead).
+    struct ArrayTypeInfo {
+        Type elementType;
+        std::uint64_t length;
+    };
+
     std::vector<Symbol> symbols_;
     std::unordered_map<const ast::IdentifierExpr*, SymbolId> identifierResolutions_;
     std::unordered_map<const ast::Identifier*, SymbolId> declarationSymbols_;
     std::vector<SemanticError> errors_;
     std::unordered_map<const ast::Expr*, Type> expressionTypes_;
+    std::vector<ArrayTypeInfo> arrayTypes_;
 };
 
 } // namespace kai::semantic

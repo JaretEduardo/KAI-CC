@@ -1,9 +1,11 @@
 #include "kai/semantic/Type.hpp"
 
+#include "kai/semantic/SemanticModel.hpp"
 #include "kai/semantic/SemanticTypeName.hpp"
 
 #include "support/check.hpp"
 
+using kai::semantic::SemanticModel;
 using kai::semantic::Type;
 using kai::semantic::typeName;
 using kai::semantic::TypeKind;
@@ -87,8 +89,18 @@ void testStrFactory() {
 // The canonical semantic-tooling renderer (SemanticTypeName.hpp) must
 // stay total over TypeKind - Str renders as "str" (M8 spec #17), the same
 // name kaicc inspect's JSON output uses for an inferred string local.
+// `model` is a fresh, otherwise-unused SemanticModel: every primitive
+// TypeKind (Str included) ignores it entirely - see typeName()'s own
+// doc comment (KAI LANGUAGE M7A) - so any model is a valid argument
+// here. Array-type rendering (which DOES need a real, populated model)
+// is covered separately - see ArrayTypeTests.cpp/type_checker/
+// ArrayLiteralTests.cpp - since SemanticModel's compound-type interner
+// is only ever populated through SemanticAnalyzer/TypeChecker (friend-
+// only mutation, deliberately not constructible ad hoc even from a
+// test - see SemanticModel.hpp's own class comment).
 void testTypeNameOfStr() {
-    KAI_CHECK(typeName(Type::str()) == "str");
+    const SemanticModel model;
+    KAI_CHECK(typeName(Type::str(), model) == "str");
 }
 
 // --- None of the primitive/unit factories ever report as Error/Unresolved ---
