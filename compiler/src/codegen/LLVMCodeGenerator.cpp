@@ -149,14 +149,31 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
         // language contract this now implements (direct LLVM aggregate
         // parameter, per the M8B-approved ABI strategy - no sret/byval,
         // no hidden pointer, no reference).
+        //
+        // KAI LANGUAGE M10B: a bare Slice parameter IS fully supported
+        // (lowerType() now lowers it - see below), but an ARRAY that
+        // recursively contains a Slice anywhere in its element chain
+        // (`[[i32]; 2]`, ...) is explicitly rejected HERE, before
+        // lowerType() is even called - allowing it would let an M8-style
+        // aggregate array parameter carry a borrowed view this
+        // milestone's restricted lifetime rule was never designed to
+        // track through nested storage (spec §6/§29). `typeContainsSlice()`
+        // is true for a bare Slice too, so the `isArray()` guard is what
+        // keeps a bare Slice parameter from being caught by this specific
+        // check - it is meant to reach lowerType() normally instead.
+        if (signature.parameterTypes[i].isArray() && typeContainsSlice(signature.parameterTypes[i], model)) {
+            recordUnsupportedConstruct("code generation is not yet supported for this parameter's type",
+                                        fn.params()[i].type->span());
+            return false;
+        }
         llvm::Type* llvmParamType = lowerType(signature.parameterTypes[i], model);
         if (llvmParamType == nullptr) {
             // RELEASE HARDENING M2: a parameter type that never resolved
-            // to a lowerable Type (slices/references/structs/... - see
-            // lowerType()'s own exhaustive switch) fails HERE, in Pass 1,
-            // before this function's body is ever reached - e.g.
-            // `fn sum(values: [i32]) -> i32` never gets far enough to
-            // report its `for` loop as the culprit otherwise.
+            // to a lowerable Type (references/structs/still-deferred
+            // shapes - see lowerType()'s own exhaustive switch) fails
+            // HERE, in Pass 1, before this function's body is ever
+            // reached - e.g. `fn sum(values: &i32) -> i32` never gets far
+            // enough to report its `for` loop as the culprit otherwise.
             recordUnsupportedConstruct("code generation is not yet supported for this parameter's type",
                                         fn.params()[i].type->span());
             return false;
@@ -166,6 +183,20 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
 
     // KAI LANGUAGE M8B: array RETURN values likewise now use lowerType()
     // directly - a direct LLVM aggregate return, no sret.
+    //
+    // KAI LANGUAGE M10B spec §5/§6: unlike a PARAMETER, a bare Slice
+    // RETURN type is explicitly unsupported too (not just an array
+    // recursively containing one) - Slice returns remain deliberately
+    // disallowed regardless of the direct-aggregate ABI's own technical
+    // viability, since KAI has no lifetime/provenance analysis yet to
+    // make returning a borrowed view sound. `typeContainsSlice()` alone
+    // (with no `isArray()` guard, unlike the parameter check above)
+    // covers both cases with one check.
+    if (typeContainsSlice(signature.returnType, model)) {
+        const SourceSpan span = fn.returnType() != nullptr ? fn.returnType()->span() : fn.name().span;
+        recordUnsupportedConstruct("code generation is not yet supported for this function's return type", span);
+        return false;
+    }
     llvm::Type* returnType = lowerType(signature.returnType, model);
     if (returnType == nullptr) {
         const SourceSpan span = fn.returnType() != nullptr ? fn.returnType()->span() : fn.name().span;
@@ -609,6 +640,21 @@ bool LLVMCodeGenerator::generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llv
     // by this one code path - the initializer's own AST shape is never
     // inspected to decide the local's type.
     const Symbol& symbol = model.symbol(*id);
+
+    // KAI LANGUAGE M10B spec §6/§29: a bare Slice LOCAL is fully
+    // supported (falls through to the generic path below, once
+    // lowerType() gives it a real Type just like any other), but an
+    // ARRAY local that recursively contains a Slice anywhere in its
+    // nested element chain is not - see declareFunction()'s own
+    // identical guard for the full rationale (an M8-style array
+    // aggregate must never silently carry a borrowed view, whether
+    // through a function boundary or through plain local storage). This
+    // is checked BEFORE lowerType() is even called, mirroring
+    // declareFunction()'s own ordering.
+    if (symbol.type.isArray() && typeContainsSlice(symbol.type, model)) {
+        return false;
+    }
+
     llvm::Type* llvmType = lowerType(symbol.type, model);
     if (llvmType == nullptr || llvmType->isVoidTy()) {
         // nullptr: Error/Unresolved/Char, same as everywhere else.
@@ -862,6 +908,23 @@ llvm::Type* LLVMCodeGenerator::lowerType(Type type, const SemanticModel& model) 
         case TypeKind::Error:
         case TypeKind::Char:
             return nullptr;
+        case TypeKind::Slice:
+            // KAI LANGUAGE M10B: a real `{ptr, i64}` aggregate - an
+            // opaque data pointer to the first element (never element-
+            // typed, exactly like Str's own pointer field) plus a
+            // runtime element COUNT (never a byte length, unlike Str's
+            // otherwise-identical-looking field). Internal backend
+            // representation only - never a promised stable external C
+            // ABI, never source-visible struct syntax (TYPE_SYSTEM.md's
+            // own "Slices" section). This makes lowerType() fully
+            // permissive for Slice, including when nested inside an
+            // Array below - the language-level restriction against an
+            // EXECUTABLE array/parameter/return/local recursively
+            // containing a Slice is enforced separately, at the specific
+            // call sites that matter (see typeContainsSlice()'s own doc
+            // comment in the header), never inside this function.
+            return llvm::StructType::get(context_,
+                                          {llvm::PointerType::get(context_, 0), llvm::Type::getInt64Ty(context_)});
         case TypeKind::Array: {
             // KAI LANGUAGE M7B: a real `[N x ElementType]` LLVM array
             // type - driven entirely by whatever this SAME lowerType()
@@ -878,6 +941,16 @@ llvm::Type* LLVMCodeGenerator::lowerType(Type type, const SemanticModel& model) 
         }
     }
     return nullptr;
+}
+
+bool LLVMCodeGenerator::typeContainsSlice(Type type, const SemanticModel& model) const {
+    if (type.isSlice()) {
+        return true;
+    }
+    if (type.isArray()) {
+        return typeContainsSlice(model.arrayElementType(type), model);
+    }
+    return false;
 }
 
 llvm::AllocaInst* LLVMCodeGenerator::createEntryBlockAlloca(llvm::Function& function, llvm::Type* type,

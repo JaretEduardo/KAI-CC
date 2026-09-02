@@ -304,17 +304,24 @@ private:
     /// (through transparent ParenExpr wrappers only, via
     /// unwrapDirectCalleeIdentifier() in TypeChecker.cpp) into: a direct
     /// Function-resolving identifier (checkUserFunctionCall()); a direct
-    /// Builtin-resolving identifier (checkBuiltinCall()); or - for every
-    /// other callee shape (a non-function-typed Local/Parameter, a
+    /// Builtin-resolving identifier - dispatched by `symbol.name` (KAI
+    /// LANGUAGE M10B) to checkSliceBuiltinCall()/checkLenBuiltinCall() for
+    /// `slice`/`len` specifically, or checkBuiltinCall() for every other
+    /// Builtin name (`print`/`panic`/`assert`); or - for every other
+    /// callee shape (a non-function-typed Local/Parameter, a
     /// literal, a deferred Member/Index/ErrorPropagation/Call expression,
     /// an unresolved identifier, ...) - a generic path that checks the
     /// callee with no expected context and classifies purely from its
     /// resulting Type: Error stays Error, Unresolved stays Unresolved
     /// (neither ever emits NotCallable), and any other concrete Type
     /// emits NotCallable and becomes Error. Classification never inspects
-    /// identifier source text - only SemanticModel::resolution()/
-    /// SymbolKind decide it - so a user function shadowing a Builtin
-    /// (Milestone 3 spec #21) is handled correctly with no special-casing.
+    /// identifier source text FOR RESOLUTION - only SemanticModel::
+    /// resolution()/SymbolKind decide it, so a user function shadowing a
+    /// Builtin (Milestone 3 spec #21) is handled correctly with no
+    /// special-casing; the `symbol.name` string comparison above only
+    /// ever runs once `symbol.kind == SymbolKind::Builtin` is already
+    /// established this way, mirroring LLVMExpressionLowering.cpp's own
+    /// identical `builtinSymbol.name`-based codegen dispatch.
     Type checkCallExpr(const ast::CallExpr& call, SemanticModel& model) const;
 
     /// A resolved SymbolKind::Builtin callee (spec #20): the callee and
@@ -327,6 +334,34 @@ private:
     /// semantics) are what remain deferred - builtin signatures are not
     /// committed (STANDARD_LIBRARY.md).
     Type checkBuiltinCall(const ast::CallExpr& call, SemanticModel& model) const;
+
+    /// KAI LANGUAGE M10B: `slice(x)` - the ONE narrow, PRECISELY-checked
+    /// exception to checkBuiltinCall()'s own fully-deferred convention
+    /// above (checkCallExpr() branches on `symbol.name` before ever
+    /// reaching checkBuiltinCall() - see its own comment). Requires
+    /// exactly one argument (InvalidArgumentCount otherwise, matching
+    /// checkUserFunctionCall()'s own arity diagnostic); that argument
+    /// must be a direct (through transparent ParenExpr only) identifier
+    /// resolving to a SymbolKind::Local or SymbolKind::Parameter binding
+    /// whose OWN Type is a fixed-size array (spec §3) - any other shape
+    /// (a literal, a call result, an index/member expression, an
+    /// existing slice, a non-array type, ...) is InvalidSliceSource. An
+    /// already-Error or still-Unresolved argument Type propagates
+    /// silently (no redundant/guessed diagnostic on top of whatever
+    /// already reported or deferred it). On success, the result is
+    /// `model.internSlice(model.arrayElementType(argumentType))` - the
+    /// SAME canonicalizing interner M10A already established, never a
+    /// fabricated ad hoc Type.
+    Type checkSliceBuiltinCall(const ast::CallExpr& call, SemanticModel& model) const;
+
+    /// KAI LANGUAGE M10B: `len(x)` - like checkSliceBuiltinCall() above,
+    /// a precisely-checked exception to checkBuiltinCall()'s deferred
+    /// convention. Requires exactly one argument (InvalidArgumentCount
+    /// otherwise); accepts a fixed-size array, a slice, or `str`
+    /// (InvalidLenOperand for anything else, once the argument's own
+    /// Type is concrete) - result is always `Type::u64()`. Does not
+    /// reinterpret `str` as a byte slice or add any new operand domain.
+    Type checkLenBuiltinCall(const ast::CallExpr& call, SemanticModel& model) const;
 
     /// A resolved SymbolKind::Function callee (spec #6-#16): validates
     /// argument count, checks each shared-prefix argument against its

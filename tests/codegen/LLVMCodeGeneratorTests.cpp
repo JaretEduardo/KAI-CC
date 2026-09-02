@@ -272,15 +272,21 @@ void testUnsupportedConstructDoesNotLeakAcrossGenerateCalls() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
 
-    // (1) an unsupported (array/slice) RETURN type sets
-    // unsupportedConstruct() on this call. KAI LANGUAGE M6: `for`
-    // statements are no longer usable for this - a supported integer-
-    // range `for` now lowers successfully (see the M6 test group below),
-    // and an unsupported iterable shape is rejected by TypeChecker
+    // (1) an unsupported (slice) RETURN type sets unsupportedConstruct()
+    // on this call. KAI LANGUAGE M6: `for` statements are no longer
+    // usable for this - a supported integer-range `for` now lowers
+    // successfully (see the M6 test group below), and an unsupported
+    // iterable shape is rejected by TypeChecker
     // (SemanticErrorKind::UnsupportedForIterable) before codegen ever
     // runs, so it can no longer exercise THIS unsupported-construct path
-    // either.
-    Generated first = compileToLLVM(sm, codegen, "fn f() -> [i32] {\n    return 0\n}");
+    // either. KAI LANGUAGE M10A: `[i32]` is now a real semantic Slice
+    // Type, so `return 0` against it would be a genuine TypeMismatch
+    // (never reaching codegen at all, per compileToLLVM()'s own
+    // model.errors().empty() gate above) - `return f()` recurses instead,
+    // giving the return expression the EXACT SAME (self-referential)
+    // Slice type the declared signature already has, so this still
+    // type-checks with zero errors while remaining backend-unsupported.
+    Generated first = compileToLLVM(sm, codegen, "fn f() -> [i32] {\n    return f()\n}");
     KAI_CHECK(first.model.errors().empty());
     KAI_CHECK(!first.generationSucceeded);
     KAI_CHECK(codegen.unsupportedConstruct().has_value());
@@ -298,10 +304,15 @@ void testUnsupportedConstructDoesNotLeakAcrossGenerateCalls() {
     KAI_CHECK(!codegen.unsupportedConstruct().has_value());
 
     // (3) a THIRD call, failing again via a DIFFERENT unsupported
-    // construct (an array/slice parameter type, not a `for` statement),
-    // must capture ITS OWN message fresh - proving the reset-then-
-    // recapture cycle works repeatedly, not merely once.
-    Generated third = compileToLLVM(sm, codegen, "fn sum(values: [i32]) -> i32 {\n    return 0\n}");
+    // construct (an array-of-Slice parameter type, not a `for`
+    // statement), must capture ITS OWN message fresh - proving the
+    // reset-then-recapture cycle works repeatedly, not merely once. KAI
+    // LANGUAGE M10B: a BARE slice parameter (`values: [i32]`) is now
+    // genuinely executable (spec §1/§20 - see this file's own M10B
+    // section further below), so this uses `[[i32]; 2]` (an array that
+    // recursively contains a Slice) instead, which remains explicitly
+    // unsupported (spec §6/`typeContainsSlice()`).
+    Generated third = compileToLLVM(sm, codegen, "fn sum(values: [[i32]; 2]) -> i32 {\n    return 0\n}");
     KAI_CHECK(third.model.errors().empty());
     KAI_CHECK(!third.generationSucceeded);
     KAI_CHECK(codegen.unsupportedConstruct().has_value());
@@ -3753,6 +3764,563 @@ void testNestedArrayReturnIndexingVerifies() {
     }
 }
 
+// --- KAI LANGUAGE M10A: slice TYPE foundation - backend clean-failure
+// coverage (spec §23) ---
+//
+// TypeKind::Slice is now a real semantic Type (SemanticAnalyzer::
+// resolveSliceTypeSyntax()/SemanticModel::internSlice() - see
+// SliceTypeTests.cpp for the full type-resolution coverage). KAI
+// LANGUAGE M10B then made a BARE slice parameter genuinely executable
+// (see this file's own dedicated M10B section further below for that
+// positive coverage) - what remains backend-unsupported is an ARRAY that
+// recursively contains a Slice, and a Slice RETURN type (both
+// deliberate, spec §5/§6), covered here.
+
+// RETARGETED (KAI LANGUAGE M10B): a bare slice PARAMETER is no longer
+// unsupported (see testSliceParameterAndArgumentGenerateSuccessfully()
+// in this file's own M10B section) - an ARRAY that recursively contains
+// a Slice remains the unsupported shape, via the SAME "unsupported
+// parameter type" unsupportedConstruct() message every other unsupported
+// parameter type already produces.
+void testArrayContainingSliceParameterFailsCleanlyAtBackend() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn sum(xs: [[i32]; 2]) -> i32 {\n    return 0\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+    KAI_CHECK(codegen.unsupportedConstruct().has_value());
+    if (codegen.unsupportedConstruct().has_value()) {
+        KAI_CHECK(codegen.unsupportedConstruct()->description ==
+                  "code generation is not yet supported for this parameter's type");
+    }
+}
+
+// A Slice RETURN type fails cleanly, unconditionally (spec §5) - unlike a
+// PARAMETER, a bare Slice return remains unsupported even though it
+// mechanically COULD lower (the ABI itself is not the problem; lifetime
+// safety is). `return xs` (relaying the slice parameter back out) keeps
+// this semantically well-typed (zero TypeChecker errors) so
+// compileToLLVM() actually reaches codegen.generate() at all - see
+// compileToLLVM()'s own model.errors().empty() gate.
+void testSliceReturnTypeFailsCleanlyAtBackend() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn identity(xs: [i32]) -> [i32] {\n    return xs\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+    KAI_CHECK(codegen.unsupportedConstruct().has_value());
+    if (codegen.unsupportedConstruct().has_value()) {
+        // KAI LANGUAGE M10B: `xs`'s own PARAMETER type now succeeds (a
+        // bare Slice parameter is executable) - declareFunction()'s
+        // parameter loop no longer fails first, so this is now the
+        // RETURN-type-specific message, not the parameter one.
+        KAI_CHECK(codegen.unsupportedConstruct()->description ==
+                  "code generation is not yet supported for this function's return type");
+    }
+}
+
+// --- KAI LANGUAGE M10B: immutable slice VALUES + checked indexing ---
+//
+// M10A's Slice TYPE foundation now has a real runtime representation and
+// executable codegen: `slice(array)`, `len(...)`, local Slice storage/
+// copy, checked Slice indexing, and Slice function parameters. Slice
+// RETURNS and any executable aggregate recursively containing a Slice
+// remain deliberately unsupported (see the two tests immediately above).
+
+// LLVM {ptr, i64} type for Slice, and a local Slice storage alloca of
+// exactly that type.
+void testSliceLLVMTypeAndLocalStorage() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() {\n    let a = [10, 20, 30]\n    let s = slice(a)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    const llvm::AllocaInst* sliceAlloca = nullptr;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&inst)) {
+            if (llvm::isa<llvm::StructType>(alloca->getAllocatedType())) {
+                sliceAlloca = alloca;
+            }
+        }
+    }
+    KAI_CHECK(sliceAlloca != nullptr);
+    if (sliceAlloca == nullptr) {
+        return;
+    }
+    const auto* sliceType = llvm::cast<llvm::StructType>(sliceAlloca->getAllocatedType());
+    KAI_CHECK(sliceType->getNumElements() == 2);
+    KAI_CHECK(sliceType->getElementType(0)->isPointerTy());
+    KAI_CHECK(sliceType->getElementType(1)->isIntegerTy(64));
+}
+
+// `slice(a)`'s pointer field is a GEP directly into `a`'s OWN backing
+// storage - never a copy into a temporary, never a heap allocation (spec
+// §25).
+void testSliceOfLocalArrayReferencesOriginalStorage() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() {\n    let a = [10, 20, 30]\n    let s = slice(a)\n}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    const llvm::AllocaInst* arrayAlloca = nullptr;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&inst)) {
+            if (llvm::isa<llvm::ArrayType>(alloca->getAllocatedType())) {
+                arrayAlloca = alloca;
+            }
+        }
+    }
+    KAI_CHECK(arrayAlloca != nullptr);
+    if (arrayAlloca == nullptr) {
+        return;
+    }
+
+    bool sawGepIntoArrayFeedingInsertValue = false;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst)) {
+            if (gep->getPointerOperand() == arrayAlloca) {
+                for (const llvm::Use& use : gep->uses()) {
+                    if (llvm::isa<llvm::InsertValueInst>(use.getUser())) {
+                        sawGepIntoArrayFeedingInsertValue = true;
+                    }
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawGepIntoArrayFeedingInsertValue);
+}
+
+// `slice(xs)` for an array PARAMETER references the callee's own
+// parameter storage (M8's own binding), not a copy.
+void testSliceOfArrayParameterReferencesParameterStorage() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn f(xs: [i32; 3]) {\n    let s = slice(xs)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// `len(array)` lowers to a compile-time CONSTANT - never a runtime memory
+// read.
+void testLenOfArrayIsCompileTimeConstant() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    let a = [1, 2, 3]\n    print(len(a))\n}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    // len()'s own result Type is u64 (spec §8), so `print` dispatches to
+    // kai_print_u64 - never kai_print_i64.
+    bool sawConstantThreeCallArgument = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "kai_print_u64") {
+                    if (const auto* c = llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(0))) {
+                        sawConstantThreeCallArgument = c->getZExtValue() == 3;
+                    }
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawConstantThreeCallArgument);
+}
+
+// `len(slice)` extracts the Slice's own runtime length field - never a
+// constant.
+void testLenOfSliceExtractsRuntimeField() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn main() {\n    let a = [1, 2, 3]\n    let s = slice(a)\n    print(len(s))\n}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    bool sawExtractValueFieldOne = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* extract = llvm::dyn_cast<llvm::ExtractValueInst>(&inst)) {
+                if (extract->getIndices().size() == 1 && extract->getIndices()[0] == 1) {
+                    sawExtractValueFieldOne = true;
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawExtractValueFieldOne);
+}
+
+// `len(str)` extracts Str's own byte-length field (field 1) - the SAME
+// extraction shape as `len(slice)`, since both are `{ptr,i64}`
+// aggregates, but reusing lowerPrintCall()'s own established Str
+// extraction, never a second implementation. Uses a `str` PARAMETER
+// (never a bare string LITERAL) deliberately: a literal's own
+// `{ptr,i64}` value is a compile-time llvm::ConstantStruct (see
+// lowerLiteralExpr()'s own String case), so CreateExtractValue on it
+// constant-folds away into a plain ConstantInt with no ExtractValueInst
+// instruction ever appearing at all - a parameter's str value is a
+// genuine runtime SSA value instead, so the extraction survives as a
+// real instruction to assert against.
+void testLenOfStrExtractsByteLengthField() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn f(text: str) -> u64 {\n    return len(text)\n}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("f");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    bool sawExtractValueFieldOne = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* extract = llvm::dyn_cast<llvm::ExtractValueInst>(&inst)) {
+                if (extract->getIndices().size() == 1 && extract->getIndices()[0] == 1) {
+                    sawExtractValueFieldOne = true;
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawExtractValueFieldOne);
+}
+
+// Checked SIGNED Slice index CFG: SGE (non-negativity) + ULT (upper
+// bound, against the Slice's own RUNTIME length field, not a constant) +
+// trap + unreachable - mirrors array indexing's own CFG shape exactly
+// (lowerCheckedIndexBounds() is shared between the two).
+void testSignedDynamicSliceIndexBoundsCFG() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let a = [10, 20, 30]\n"
+                                      "    let s = slice(a)\n"
+                                      "    mut i: i32 = 1\n"
+                                      "    print(s[i])\n"
+                                      "}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    bool sawSGE = false;
+    bool sawULTAgainstNonConstant = false;
+    bool sawTrapCall = false;
+    const llvm::BasicBlock* trapBlock = nullptr;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                sawSGE |= cmp->getPredicate() == llvm::ICmpInst::ICMP_SGE;
+                if (cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT) {
+                    // The Slice's runtime length field, not a
+                    // ConstantInt (which array indexing would use
+                    // instead) - proves this is a genuine RUNTIME bound.
+                    sawULTAgainstNonConstant |= !llvm::isa<llvm::ConstantInt>(cmp->getOperand(1));
+                }
+            }
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "llvm.trap") {
+                    sawTrapCall = true;
+                    trapBlock = &block;
+                }
+            }
+        }
+    }
+    KAI_CHECK(sawSGE);
+    KAI_CHECK(sawULTAgainstNonConstant);
+    KAI_CHECK(sawTrapCall);
+    KAI_CHECK(trapBlock != nullptr);
+    if (trapBlock != nullptr) {
+        KAI_CHECK(llvm::isa<llvm::UnreachableInst>(trapBlock->getTerminator()));
+        // No element GEP/load in the trap block - the element address is
+        // only ever computed in the in-bounds successor (spec §18).
+        for (const llvm::Instruction& inst : *trapBlock) {
+            KAI_CHECK(!llvm::isa<llvm::GetElementPtrInst>(inst));
+            KAI_CHECK(!llvm::isa<llvm::LoadInst>(inst));
+        }
+    }
+}
+
+// Checked UNSIGNED Slice index CFG: skips the SGE non-negativity check
+// entirely - only the ULT upper-bound comparison remains (spec §15/§16).
+void testUnsignedDynamicSliceIndexBoundsCFG() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let a = [10, 20, 30]\n"
+                                      "    let s = slice(a)\n"
+                                      "    mut i: u32 = 1\n"
+                                      "    print(s[i])\n"
+                                      "}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    bool sawSGE = false;
+    bool sawULT = false;
+    bool sawTrapCall = false;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                sawSGE |= cmp->getPredicate() == llvm::ICmpInst::ICMP_SGE;
+                sawULT |= cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT;
+            }
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "llvm.trap") {
+                    sawTrapCall = true;
+                }
+            }
+        }
+    }
+    KAI_CHECK(!sawSGE);
+    KAI_CHECK(sawULT);
+    KAI_CHECK(sawTrapCall);
+}
+
+// Index evaluated EXACTLY ONCE for a Slice read - a side-effecting index
+// expression must appear in the call sequence exactly once (spec §19).
+void testSliceIndexEvaluatedExactlyOnce() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn idx() -> i32 {\n    print(100)\n    return 1\n}\n"
+                                      "fn main() {\n"
+                                      "    let a = [10, 20, 30]\n"
+                                      "    let s = slice(a)\n"
+                                      "    print(s[idx()])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* idxFn = codegen.module().getFunction("idx");
+    const llvm::Function* mainFn = codegen.module().getFunction("main");
+    KAI_CHECK(idxFn != nullptr && mainFn != nullptr);
+    if (idxFn == nullptr || mainFn == nullptr) {
+        return;
+    }
+
+    int callCount = 0;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() == idxFn) {
+                    ++callCount;
+                }
+            }
+        }
+    }
+    KAI_CHECK(callCount == 1);
+}
+
+// Slice copy (`let t = s`) is a SINGLE aggregate load+store - never an
+// element-by-element loop (spec §22).
+void testSliceCopyIsAggregateNotElementLoop() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen,
+        "fn main() {\n    let a = [10, 20, 30]\n    let s = slice(a)\n    let t = s\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    // No loop (no basic block branches back to an earlier one) - a
+    // single, straight-line entry block covers the whole function.
+    KAI_CHECK(fn->size() == 1);
+    bool sawAggregateStoreOfStructType = false;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+            if (llvm::isa<llvm::StructType>(store->getValueOperand()->getType()) &&
+                llvm::isa<llvm::LoadInst>(store->getValueOperand())) {
+                sawAggregateStoreOfStructType = true;
+            }
+        }
+    }
+    KAI_CHECK(sawAggregateStoreOfStructType);
+}
+
+// Slice function PARAMETER signature: a direct `{ptr,i64}` aggregate
+// argument - no sret/byval/hidden pointer, mirroring M8B's own array ABI
+// assertions exactly (spec §21).
+void testSliceParameterUsesDirectAggregateFunctionType() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn first(xs: [i32]) -> i32 {\n    return xs[0]\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    llvm::Function* first = codegen.module().getFunction("first");
+    KAI_CHECK(first != nullptr);
+    if (first == nullptr) {
+        return;
+    }
+    llvm::FunctionType* fnType = first->getFunctionType();
+    KAI_CHECK(fnType->getNumParams() == 1);
+    KAI_CHECK(fnType->getParamType(0)->isStructTy());
+    KAI_CHECK(!first->hasStructRetAttr());
+    KAI_CHECK(!first->getAttributes().hasParamAttr(0, llvm::Attribute::ByVal));
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+}
+
+// Explicit `slice(a)` used directly as a call argument - the required
+// explicit-conversion form (spec §2/§20).
+void testExplicitSliceCallArgumentVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn first(xs: [i32]) -> i32 {\n"
+                                      "    return xs[0]\n"
+                                      "}\n"
+                                      "fn main() {\n"
+                                      "    let a = [10, 20, 30]\n"
+                                      "    print(first(slice(a)))\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// Zero-length Slice: `slice()` over `[i32; 0]` verifies, with a runtime
+// length of 0 (never dereferenced, since no in-bounds element exists).
+void testZeroLengthSliceVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn main() {\n    let a: [i32; 0] = []\n    let s = slice(a)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// Recursive guard: an array RETURN type that recursively contains a
+// Slice (`[[i32]; 2]`) is rejected exactly like a bare Slice return -
+// never silently allowed just because M8's own array-return machinery
+// could otherwise lower it mechanically (spec §6/§28/§29).
+void testArrayContainingSliceReturnTypeFailsCleanly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn make(xs: [i32]) -> [[i32]; 2] {\n"
+                                      "    return [xs, xs]\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+    KAI_CHECK(codegen.unsupportedConstruct().has_value());
+    if (codegen.unsupportedConstruct().has_value()) {
+        KAI_CHECK(codegen.unsupportedConstruct()->description ==
+                  "code generation is not yet supported for this function's return type");
+    }
+}
+
+// A slice-typed LOCAL is fully supported (KAI LANGUAGE M10B) - unlike
+// M10A, there is now a real way to construct a slice VALUE (`slice(a)`),
+// so this is no longer merely a hypothetical relay case.
+void testSliceLocalGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn main() {\n    let a = [1, 2, 3]\n    let s = slice(a)\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// An array LOCAL that recursively contains a Slice fails cleanly too
+// (`generateVarDeclStmt()`'s own guard, mirroring declareFunction()'s).
+void testArrayContainingSliceLocalFailsCleanly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn f(xs: [i32]) {\n    let m = [xs, xs]\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+}
+
+
 } // namespace
 
 int main() {
@@ -3899,6 +4467,26 @@ int main() {
     testArrayValuedIntermediateIndexExprCopiesIndependently();
     testNestedArrayParameterIndexingVerifies();
     testNestedArrayReturnIndexingVerifies();
+
+    testArrayContainingSliceParameterFailsCleanlyAtBackend();
+    testSliceReturnTypeFailsCleanlyAtBackend();
+
+    testSliceLLVMTypeAndLocalStorage();
+    testSliceOfLocalArrayReferencesOriginalStorage();
+    testSliceOfArrayParameterReferencesParameterStorage();
+    testLenOfArrayIsCompileTimeConstant();
+    testLenOfSliceExtractsRuntimeField();
+    testLenOfStrExtractsByteLengthField();
+    testSignedDynamicSliceIndexBoundsCFG();
+    testUnsignedDynamicSliceIndexBoundsCFG();
+    testSliceIndexEvaluatedExactlyOnce();
+    testSliceCopyIsAggregateNotElementLoop();
+    testSliceParameterUsesDirectAggregateFunctionType();
+    testExplicitSliceCallArgumentVerifies();
+    testZeroLengthSliceVerifies();
+    testArrayContainingSliceReturnTypeFailsCleanly();
+    testSliceLocalGeneratesSuccessfully();
+    testArrayContainingSliceLocalFailsCleanly();
 
     testPrintLiteralI32SignExtendsToI64();
     testPrintVariableI64();

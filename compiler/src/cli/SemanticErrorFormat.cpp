@@ -51,6 +51,14 @@ const char* semanticErrorKindName(semantic::SemanticErrorKind kind) {
             return "invalid index type";
         case semantic::SemanticErrorKind::ArrayIndexOutOfBounds:
             return "array index out of bounds";
+        case semantic::SemanticErrorKind::SliceIndexOutOfBounds:
+            return "slice index out of bounds";
+        case semantic::SemanticErrorKind::AssignmentThroughImmutableSlice:
+            return "assignment through immutable slice";
+        case semantic::SemanticErrorKind::InvalidSliceSource:
+            return "invalid slice source";
+        case semantic::SemanticErrorKind::InvalidLenOperand:
+            return "invalid len operand";
     }
     return "semantic error";
 }
@@ -80,7 +88,9 @@ std::string formatSemanticError(const SourceManager& sources, const semantic::Se
     } else if (error.kind == semantic::SemanticErrorKind::LiteralOutOfRange && error.expectedType.has_value()) {
         message << ": does not fit in " << semantic::typeName(*error.expectedType, model);
     } else if ((error.kind == semantic::SemanticErrorKind::InvalidIndexTarget ||
-                error.kind == semantic::SemanticErrorKind::InvalidIndexType) &&
+                error.kind == semantic::SemanticErrorKind::InvalidIndexType ||
+                error.kind == semantic::SemanticErrorKind::InvalidSliceSource ||
+                error.kind == semantic::SemanticErrorKind::InvalidLenOperand) &&
                error.actualType.has_value()) {
         message << ": " << semantic::typeName(*error.actualType, model);
     }

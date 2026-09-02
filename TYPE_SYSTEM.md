@@ -771,8 +771,11 @@ argument/result - see §18's "ABI vs. language semantics" below), and
 whole-array assignment/copy (`let b = a` / `a = b` for two array-typed
 values). KAI LANGUAGE M9 (post-alpha.2) then implemented general checked
 indexing through nested fixed arrays at any depth (`m[0][1]`, and deeper -
-see "Nested Fixed-Array Indexing" below). Still NOT implemented: slices
-(`[T]`, still `Type::unresolved()`).
+see "Nested Fixed-Array Indexing" below). Slices (`[T]`) are a real,
+distinct semantic type as of KAI LANGUAGE M10A, executable (explicit
+`slice(array)` construction, checked indexed reads, `len(...)`, a slice
+function parameter) as of KAI LANGUAGE M10B - see §20's own "Slices"
+section below for the complete model.
 
 The backend representation for a supported element type is LLVM's own
 fixed-size aggregate:
@@ -945,10 +948,13 @@ binding rules - no new mutable-parameter syntax was introduced to
 express "by value, no caller aliasing"; that property is already implied
 by ordinary value semantics, not by mutability.
 
-**No array decay:** `[T; N]` never implicitly becomes `[T]`, a pointer,
-a reference, or any future slice form - at a function boundary or
-anywhere else. Slices remain an entirely distinct, still-unimplemented
-future type; there is no array-to-slice conversion in KAI 0.1.
+**No array decay:** `[T; N]` never IMPLICITLY becomes `[T]`, a pointer,
+or a reference - at a function boundary or anywhere else; passing a
+`[T; N]` value where a `[T]` parameter is expected remains an ordinary
+`TypeMismatch` unless the caller writes the EXPLICIT `slice(...)`
+builtin conversion KAI LANGUAGE M10B introduces (§20 below) - there is
+still no IMPLICIT array-to-slice conversion, and never C-style decay to
+a raw pointer.
 
 **ABI vs. language semantics:** the LANGUAGE guarantees value semantics
 as described above. The language does NOT promise a stable, external,
@@ -1039,91 +1045,377 @@ COMPILER_ARCHITECTURE.md's own M8A/M8B note.
 
 # 20. Slices
 
-A slice is a borrowed view into a contiguous sequence of elements.
+> **Historical note:** an earlier draft of this section (and the former
+> §21, "Unsized Slice Type," now folded into this section - see §21
+> below for the redirect) sketched slices as requiring an explicit
+> reference wrapper -
+> `&[T]`/`&mut [T]` - with bare `[T]` declared "not valid as an
+> independent variable type." KAI LANGUAGE M10A (post-alpha.2)
+> supersedes that sketch with a human-approved decision: KAI slices use
+> BARE `[T]` syntax directly (no `&`/`&mut` wrapper), matching what
+> GRAMMAR.md/SYNTAX.md and the parser's own `SliceTypeSyntax` already
+> established, and matching how `[T; N]` (fixed arrays) already work.
+> This section now describes the ACTUAL, current design; the old sketch
+> is preserved here only as historical context, not as a live
+> alternative.
 
-Slices do not own their elements. This is the fundamental distinction
-from a fixed-size array (§18 above), which DOES own its N elements
-inline: a slice and an array are separate, non-interchangeable types.
-`[T]` (bare slice syntax) never resolves to the Array semantic type, and
-still has no semantic Type representation at all as of KAI LANGUAGE M7A
-- it remains explicitly deferred, unlike `[T; N]`.
+A slice `[T]` is a NON-OWNING, IMMUTABLE, contiguous VIEW into a
+sequence of `T` elements, with a runtime-determined length.
 
-Immutable slice:
+Conceptually:
 
 ```text
-&[T]
+Slice<T> {
+    ptr: pointer to first element
+    len: runtime length
+}
 ```
 
-Mutable slice:
+This is NOT source-visible struct syntax - there is no way to spell
+`Slice<T>`, `.ptr`, or `.len` as a field access in KAI source. It
+describes the backend representation (`{ptr, i64}`, a runtime element
+COUNT, not a byte length), implemented as of KAI LANGUAGE M10B (see
+"Implementation status" below) - internal only, never a promised stable
+external C ABI.
+
+A slice does not own or free its elements, and does not imply copying
+them - it is a small view value, cheap to copy (copying the VIEW, never
+the elements it points at - see "Copy-the-view semantics" below).
+
+## Array vs. Slice
+
+A fixed-size array `[T; N]` (§18 above) and a slice `[T]` are
+DISTINCT, non-interchangeable types - never AUTOMATICALLY converted
+between each other (see "Array-to-slice conversion" below for the
+explicit, non-automatic `slice(...)` builtin that does exist):
+
+| | Fixed array `[T; N]` | Slice `[T]` |
+|---|---|---|
+| Ownership | Owns N elements inline | Non-owning view |
+| Length | Part of the TYPE (compile-time) | Runtime data, NOT part of the type |
+| Copy semantics | Copies every element (§19 above) | Copies only the view (ptr+len) |
+| Structural identity | Element type AND length | Element type ONLY |
+
+Therefore:
 
 ```text
-&mut [T]
+[i32; 3] != [i32]
+[i32; 4] != [i32]
+[i32]    == [i32]     (regardless of runtime length)
 ```
 
-Example:
+There is no special zero-length slice type: `[i32]` represents every
+possible runtime length uniformly (0, 1, 100, ...) - KAI does not invent
+a `[T; ?]` or similar distinct type for "a slice of unknown length,"
+because ordinary `[T]` already means exactly that.
+
+## Mutability
+
+KAI 0.1 initially supports IMMUTABLE slices only. `[T]` means a
+read-only, non-owning view of `T` elements. There is no `[mut T]`,
+`mut [T]`, `&mut [T]`, mutable slice reference, or writable slice
+indexing.
+
+A BINDING containing a slice may still be `mut` under KAI's ordinary
+binding rules - that governs whether the binding can later be
+REASSIGNED to a different slice value, never whether the VIEWED elements
+become mutable:
 
 ```kai
-fn sum(values: &[i32]) -> i32 {
+mut s = slice(a)
+s = slice(b)    // valid (KAI LANGUAGE M10B): rebinds the VIEW - `s` now
+                // observes `b`'s elements instead of `a`'s
+s[0] = 5        // INVALID, unconditionally - rejected via the dedicated
+                // AssignmentThroughImmutableSlice diagnostic, never
+                // AssignmentToImmutableBinding (which would misreport
+                // this as if `s` itself were `let`)
+```
+
+Element mutation through a slice remains unsupported until a future,
+explicit mutable-view design.
+
+## Copy-the-view semantics
+
+Slices are Copy-like VIEW values - deliberately different from
+`[T; N]`'s own value-copy semantics (§19 above):
+
+```kai
+let b = a   // both `a` and `b` are slices
+```
+
+- `ptr` is copied
+- `len` is copied
+- the underlying elements are NOT copied
+- both `a` and `b` view the SAME storage
+
+No refcount, no allocation, no copy-on-write - implemented (KAI LANGUAGE
+M10B) as a single aggregate load+store, never an element-by-element
+copy loop. Because no mutation exists through a slice, two slices
+viewing the same storage is safe: there is no aliasing hazard between
+read-only views.
+
+## Lifetime model
+
+KAI does not yet have a general borrow checker. KAI LANGUAGE M10B
+implements a DELIBERATELY RESTRICTED lifetime rule instead - narrow
+enough to enforce with no dedicated lifetime-checker infrastructure at
+all, by construction rather than by analysis:
+
+- a Slice may be constructed (`slice(x)`) ONLY from a direct identifier
+  naming a local fixed array or a fixed-array function parameter - never
+  from an array literal, a call result, an indexing/member expression, or
+  an existing slice (see "Explicit construction: `slice(...)`" below);
+  this alone rules out the "slice of a temporary" hazard entirely
+- a Slice value may be copied between local bindings, passed BY VALUE
+  into a nested call, read/indexed, and queried with `len()` - all
+  within the SAME function invocation whose backing storage it views
+- a Slice may NOT be returned from a function (see "Function returns"
+  below), stored inside an executable aggregate that would let it escape
+  through a RETURNED value (see "Slice-containing aggregates" below), or
+  otherwise outlive the current invocation's backing storage
+
+Together, these three rules mean a Slice's backing storage is always,
+structurally, guaranteed to dominate every use of that Slice - conceptually:
+
+```kai
+fn bad() -> [i32] {
+    let a = [1, 2, 3]
+    return slice(a)   // REJECTED at code generation: a Slice return
+                       // type is unconditionally unsupported (see
+                       // "Function returns" below), specifically to
+                       // prevent exactly this - a view into storage
+                       // that no longer exists once `bad` returns
+}
+```
+
+This is a real, ENFORCED restriction (not merely documented, as it was
+under M10A) - but it is still deliberately narrow, not a general borrow
+system: it says nothing about ordinary function CALLS threading a Slice
+several levels deep (which remains "within the current invocation
+chain" and is supported), and a future, more general lifetime/escape
+design remains possible without contradicting this one (MEMORY_MODEL.md
+§13's own "no borrow checker planned for KAI 0.1" stance is unaffected -
+this is deliberately much narrower than a borrow checker).
+
+## Explicit construction: `slice(...)`
+
+A Slice is never produced implicitly. The only way to obtain one is the
+compiler builtin `slice(...)`:
+
+```kai
+let values = [10, 20, 30]
+let s = slice(values)
+```
+
+Semantically, `slice(array)` where `array: [T; N]` produces `[T]`:
+`ptr` is the address of `array`'s own first element (never a copy into a
+temporary, never a heap allocation - the view always points into
+storage that is genuinely part of the current function invocation), and
+`len` is `N`. Per the Lifetime model above, `array` must be a direct
+(through transparent parentheses) identifier naming a local fixed array
+or a fixed-array parameter - `slice([1, 2, 3])` (a literal),
+`slice(f())` (a call result), `slice(a[0])` (an index expression),
+`slice(existingSlice)` (Slice-of-Slice), and `slice(123)`/`slice("x")`
+(a non-array Type) are all rejected with the same `InvalidSliceSource`
+diagnostic. No element copy, no allocation, no ownership transfer, no
+refcount.
+
+There is NO implicit array-to-slice conversion, anywhere, including at a
+call site:
+
+```kai
+fn sum(xs: [i32]) -> i32 { ... }
+
+let a = [1, 2, 3]
+sum(a)           // TypeMismatch: expected [i32], got [i32; 3]
+sum(slice(a))    // valid - the explicit conversion the caller must write
+```
+
+## Function parameters
+
+A slice function parameter receives a COPY OF THE VIEW - pointer +
+length by value:
+
+```kai
+fn sum(xs: [i32]) -> i32 {
     ...
 }
 ```
 
-The function reads the elements but does not own them.
+The underlying elements are never copied, and no ownership transfer
+occurs. No aliasing GUARANTEE exists between multiple immutable slice
+parameters (two slices may view overlapping or identical storage) - this
+is safe only because no mutation exists through a slice. The physical
+ABI (a direct `{ptr, i64}` aggregate argument - the same M8B-approved
+"no sret/byval/hidden pointer" strategy `[T; N]` already uses, §18
+above) remains compiler-private - no C-compatible ABI is promised.
 
-Mutable example:
+## Function returns
+
+A Slice RETURN type is UNCONDITIONALLY unsupported, even though the
+direct-aggregate ABI could mechanically lower one with no technical
+difficulty - this is a deliberate lifetime-safety restriction, not a
+lowering gap:
+
+- the slice return TYPE (syntax and semantic Type) may exist and
+  type-check fine (`fn identity(xs: [i32]) -> [i32] { return xs }` is
+  semantically well-typed - a parameter's own slice value can flow
+  straight to `return xs`)
+- code generation rejects it explicitly and cleanly regardless (the
+  SAME actionable diagnostic every other unsupported function return
+  already uses - never a crash)
+- this remains true even for a value that would, if allowed, have been
+  perfectly SOUND under the Lifetime model above (e.g. relaying a
+  parameter's own slice straight back out) - M10B does not yet
+  distinguish "sound to return" from "unsound to return," so ALL Slice
+  returns are rejected uniformly until a real lifetime/provenance
+  analysis can draw that distinction safely
+
+Do not conflate TYPE correctness with safe EXECUTABLE behavior - they
+are answered by different layers of this compiler (SemanticAnalyzer/
+TypeChecker vs. LLVMCodeGenerator), exactly as COMPILER_ARCHITECTURE.md's
+own "Semantic value passing vs. physical ABI lowering" note already
+establishes for `[T; N]`.
+
+## Slice-containing aggregates
+
+An executable array that recursively contains a Slice anywhere in its
+nested element chain (`[[i32]; 2]`, `[[[i32]]; 4]`, ...) is explicitly
+UNSUPPORTED as a function parameter, function return, or local - even
+though the semantic TYPE itself resolves and type-checks fine (M10A's
+own array/slice composition rules are unaffected), and even though
+`LLVMCodeGenerator::lowerType()` could mechanically lower the resulting
+LLVM aggregate. This exists specifically to prevent an M8-style array
+aggregate from indirectly smuggling a borrowed Slice view out through a
+RETURNED array value - the same lifetime hazard "Function returns"
+above blocks for a bare Slice return, generalized to any array wrapping
+one. A bare Slice parameter/local remains fully supported; only an ARRAY
+that wraps one is rejected.
+
+## Indexing
+
+Checked Slice indexing (KAI LANGUAGE M10B) mirrors array indexing (§18
+above) exactly, with one necessary difference (length is runtime data):
+
+- accepted index types: `i8 i16 i32 i64 u8 u16 u32 u64`
+- rejected: `float`, `bool`, `char`, `str`, `unit`, an array/slice itself
+- normal indexing is CHECKED: `0 <= index < slice.len` - but because
+  length is RUNTIME data (unlike an array's compile-time length), a
+  positive constant index generally cannot be proven in-bounds at
+  compile time; only a constant NEGATIVE index is rejected at compile
+  time (via the dedicated `SliceIndexOutOfBounds` diagnostic - never
+  `ArrayIndexOutOfBounds`, whose own wording would be misleading for a
+  runtime-length type), exactly mirroring how a negative constant array
+  index is rejected
+- a dynamic out-of-bounds access uses the SAME failure model as array
+  indexing (§18 above): `llvm.trap` + `unreachable`, never KAI `panic`,
+  no unwind/recovery, no stable OS exit-code guarantee, and no
+  unchecked "normal" indexing path
+- the index expression is evaluated EXACTLY ONCE, and no element address
+  is ever computed before the bounds check succeeds - the SAME
+  `lowerCheckedIndexBounds()` helper array indexing uses
+
+## Array-to-slice conversion
+
+**Resolved (KAI LANGUAGE M10B):** the mechanism is an EXPLICIT compiler
+builtin, `slice(array)` - see "Explicit construction: `slice(...)`"
+above - never implicit at a call site or anywhere else, and never
+C-style array decay: KAI does not and will not describe `[T; N]` as
+automatically becoming a raw pointer, and `slice(...)` preserves length
+and produces a typed, bounds-aware view, never a bare pointer type. M10A
+had audited TYPE_SYSTEM.md/LANGUAGE_DESIGN.md/DESIGN_QUESTIONS.md/
+SYNTAX.md and found no existing rule to reuse; M10B settles it with this
+narrow, explicit builtin rather than inventing general implicit-
+coercion syntax.
+
+## Length operation
+
+**Resolved (KAI LANGUAGE M10B):** the compiler builtin `len(x)`, result
+type always `u64`:
 
 ```kai
-fn reset(values: &mut [i32]) {
-    ...
-}
+len(fixedArray)   // compile-time structural data (part of the Type
+                   // itself, §18 above) - never inspects runtime memory
+len(slice)         // the Slice's own runtime element-count field
+len(str)           // the existing str byte-length contract (§15 below) -
+                   // bytes only, no UTF-8 codepoint/grapheme counting
 ```
 
-The function may modify the underlying elements.
+M10A had audited the existing language/docs and found no `len(x)`/
+`sizeof` builtin, `x.len` reserved only as illustrative, unimplemented
+example syntax for a future `String`/`Buffer<T>` (STANDARD_LIBRARY.md
+§4/§6) since member access itself is not semantically resolved yet.
+M10B does not change that - `len(x)` is a dedicated builtin, not member
+access, and `x.len`/`sizeof(x)`/a spellable `usize` type remain
+uninvented.
+
+## Slice literals
+
+There is no distinct slice literal syntax. The existing `[1, 2, 3]`
+remains exactly what it already is - a fixed-size array literal,
+inferred as `[i32; 3]` (or whatever the contextual element type/length
+call for) - never a slice. Slices arise only from the explicit
+`slice(...)` builtin (see above), never from literal syntax.
+
+## `str` relationship
+
+`str` is ALREADY conceptually an immutable, non-owning `{ptr, len}`
+UTF-8 byte/text view (§15 below) - structurally similar to a slice's own
+`{ptr, len}` shape (both happen to lower to the identical LLVM struct
+shape as of M10B, though `str`'s own `len` field is a BYTE length while
+a Slice's is an ELEMENT count - the two Types remain entirely distinct
+at the KAI language level regardless of this backend coincidence). KAI
+does NOT redefine `str` as `[u8]`, and introduces NO implicit conversion
+between `str` and a byte slice: `str` and `[u8]` (or any other slice)
+remain distinct language types with distinct semantics (`str` carries a
+UTF-8 text contract; a `[u8]` slice is an arbitrary byte view with no
+such contract), and `slice(...)` does not accept a `str` argument at all
+(`str` is not a fixed array). This keeps text semantics and arbitrary
+byte-sequence semantics from being conflated merely because their
+backend shapes happen to look alike.
+
+## Implementation status
+
+**KAI LANGUAGE M10A (post-alpha.2) established the TYPE foundation;
+KAI LANGUAGE M10B (post-alpha.2) made immutable slices genuinely
+EXECUTABLE.** `[T]` resolves to a real, structural `TypeKind::Slice`
+semantic type (Type.hpp/SemanticModel's own `internSlice()`/
+`sliceElementType()`), canonicalized and rendered exactly like every
+other Type, with nested composition with Array in either direction
+(`[[i32; 3]]`, `[[i32]]`, `[[i32]; 3]`), and semantic tooling rendering
+it canonically with no internal ID ever leaked (schemaVersion unchanged,
+and neither `slice` nor `len` ever appears as a fake declared symbol -
+both are `SymbolKind::Builtin` prelude entries, exactly like `print`,
+with no AST declaration node for tooling to enumerate). M10B implements:
+a real `{ptr, i64}` LLVM representation (`LLVMCodeGenerator::lowerType()`);
+the `slice(array)` and `len(x)` builtins, each with precise argument-
+count/type checking (`TypeChecker::checkSliceBuiltinCall()`/
+`checkLenBuiltinCall()`) rather than the fully-deferred behavior every
+other builtin (`print`/`panic`/`assert`) still has; local Slice storage/
+copy/rebinding; checked Slice indexed reads (`llvm.trap`-guarded runtime
+bounds, index evaluated exactly once, no element address computed before
+the check succeeds); and a Slice function parameter using the SAME
+direct-aggregate, no-sret/byval/hidden-pointer strategy `[T; N]` already
+uses. Slice indexed WRITES remain unconditionally rejected
+(`AssignmentThroughImmutableSlice`), a Slice RETURN type remains
+unconditionally rejected at code generation (a deliberate lifetime-
+safety restriction, not a lowering gap), and an executable array that
+recursively contains a Slice remains rejected the same way, at every
+position (parameter, return, local) - see "Function returns" and
+"Slice-containing aggregates" above. A rejected case never crashes,
+never lowers to malformed IR, and never silently treats Slice as Array
+or `str`. See COMPILER_ARCHITECTURE.md's own M10A/M10B notes.
 
 ---
 
-# 21. Unsized Slice Type
+# 21. (Folded into §20)
 
-The type:
-
-```text
-[T]
-```
-
-represents the underlying slice type conceptually but cannot normally exist directly as a local value.
-
-Valid:
-
-```text
-&[i32]
-&mut [i32]
-```
-
-Not valid as an independent variable type:
-
-```text
-[i32]
-```
-
-This avoids ambiguity between:
-
-* fixed arrays
-* borrowed slices
-* dynamically owned collections
-
-Earlier experimental KAI examples that used:
-
-```kai
-fn sum(values: [i32])
-```
-
-should eventually be updated to:
-
-```kai
-fn sum(values: &[i32])
-```
-
-when the function only reads the sequence.
+The former "Unsized Slice Type" section (which asserted bare `[i32]` is
+"not valid as an independent variable type" and required `&[i32]`/`&mut
+[i32]`) has been folded into §20 above and superseded by KAI LANGUAGE
+M10A's own approved model - bare `[T]` is the real, current slice
+syntax. This section number is kept, rather than removed, purely so
+every later section's own number stays stable across this revision.
 
 ---
 

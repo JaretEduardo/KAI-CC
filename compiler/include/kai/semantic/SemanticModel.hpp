@@ -86,6 +86,48 @@ enum class SemanticErrorKind : std::uint8_t {
     /// design): it is checked at runtime and traps via `llvm.trap`, a
     /// backend/runtime mechanism, never a compile-time diagnostic.
     ArrayIndexOutOfBounds,
+
+    /// KAI LANGUAGE M10B: `s[index]` where `s` is a slice and `index` is
+    /// a compile-time-constant NEGATIVE integer (a directly-negated
+    /// literal, e.g. `s[-1]`) - provably invalid regardless of `s`'s
+    /// runtime length, so this is rejected exactly like a negative
+    /// constant array index. Deliberately a DIFFERENT kind from
+    /// ArrayIndexOutOfBounds (not reused): a slice's length is RUNTIME
+    /// data (TYPE_SYSTEM.md's own "Slices" section), so a POSITIVE
+    /// constant index can never be proven out of bounds here the way an
+    /// array's compile-time length lets one be - only the
+    /// always-invalid-regardless-of-length negative case is caught at
+    /// this layer; reusing "array" wording for a slice diagnostic would
+    /// be actively misleading. See TypeChecker.cpp's checkIndexExpr().
+    SliceIndexOutOfBounds,
+
+    /// KAI LANGUAGE M10B: `s[index] = value` where `s`'s own Type is a
+    /// slice - ALWAYS rejected, regardless of whether the slice BINDING
+    /// itself is mutable (`mut s = slice(a)` may still be validly
+    /// reassigned as a WHOLE view; that is unrelated to element
+    /// mutability). Deliberately a DIFFERENT kind from
+    /// AssignmentToImmutableBinding: that kind describes an immutable
+    /// BINDING, and reusing it here would misreport this case as if `s`
+    /// itself were `let` rather than `mut` when it may well be `mut`.
+    /// See TypeChecker.cpp's checkIndexAssignmentTarget().
+    AssignmentThroughImmutableSlice,
+
+    /// KAI LANGUAGE M10B: `slice(x)` where `x` is not an eligible source
+    /// - anything other than a direct (through transparent ParenExpr
+    /// only) IdentifierExpr resolving to a SymbolKind::Local or
+    /// SymbolKind::Parameter fixed-size-array binding (a non-array type,
+    /// an array literal, a call result, an index/member expression, an
+    /// existing slice, ...). `actualType` records `x`'s own concrete
+    /// Type when one exists (nullopt for a structurally ineligible shape
+    /// like an array literal, where `x`'s own Type may still be a real
+    /// Array - the rejection here is about the SHAPE, not the Type, in
+    /// that case). See TypeChecker.cpp's checkSliceBuiltinCall().
+    InvalidSliceSource,
+
+    /// KAI LANGUAGE M10B: `len(x)` where `x`'s own Type is not one of
+    /// the three accepted domains (a fixed-size array, a slice, or
+    /// `str`). `actualType` records what `x` actually is.
+    InvalidLenOperand,
 };
 
 /// A minimal, message-free description of a semantic failure - the
@@ -234,6 +276,18 @@ public:
         return arrayTypes_[type.compoundId().rawId()].length;
     }
 
+    /// KAI LANGUAGE M10A: `type`'s element Type - `type` MUST be a slice
+    /// Type this SAME SemanticModel issued (via internSlice(), directly
+    /// or through a slice TypeSyntax resolution) - same "must be issued
+    /// by THIS model" lifetime contract as arrayElementType() above.
+    /// There is no sliceLength() counterpart: a slice's length is runtime
+    /// data, never part of the type itself (TYPE_SYSTEM.md's own
+    /// "Slices" section).
+    Type sliceElementType(Type type) const {
+        assert(type.isSlice());
+        return sliceTypes_[type.compoundId().rawId()].elementType;
+    }
+
 private:
     // Only a future SemanticAnalyzer populates a SemanticModel. Nothing
     // else - not even tests - should be able to construct an arbitrary
@@ -303,6 +357,31 @@ private:
         return Type(TypeKind::Array, CompoundTypeId(static_cast<std::uint32_t>(arrayTypes_.size() - 1)));
     }
 
+    /// KAI LANGUAGE M10A: the slice-type counterpart to internArray()
+    /// above - same canonicalizing-linear-scan design, same "elementType
+    /// must already be a Type this SAME model produced/resolved"
+    /// precondition, same friend-only-caller contract
+    /// (SemanticAnalyzer::resolveSliceTypeSyntax() is the only caller).
+    /// A SEPARATE table from arrayTypes_ (see this class's own §10 design
+    /// note in SemanticModel.hpp's implementation for the reasoning) -
+    /// deliberately NOT unified into one tagged compound-type table:
+    /// Array and Slice have different structural shapes (length vs. no
+    /// length), so a shared table would need a variant/tagged payload for
+    /// exactly two current cases, adding indirection with no present
+    /// benefit. Two small sibling tables, one per compound kind, is the
+    /// least-invasive extension of M7A's existing design, and generalizes
+    /// cleanly to a THIRD compound kind later (another sibling table) far
+    /// more simply than retrofitting a tagged union would.
+    Type internSlice(Type elementType) {
+        for (std::size_t i = 0; i < sliceTypes_.size(); ++i) {
+            if (sliceTypes_[i].elementType == elementType) {
+                return Type(TypeKind::Slice, CompoundTypeId(static_cast<std::uint32_t>(i)));
+            }
+        }
+        sliceTypes_.push_back(SliceTypeInfo{elementType});
+        return Type(TypeKind::Slice, CompoundTypeId(static_cast<std::uint32_t>(sliceTypes_.size() - 1)));
+    }
+
     /// KAI LANGUAGE M7A: the compound-type interning table's own storage
     /// shape - never exposed outside SemanticModel (see
     /// arrayElementType()/arrayLength() above for the public, ID-free
@@ -312,12 +391,21 @@ private:
         std::uint64_t length;
     };
 
+    /// KAI LANGUAGE M10A: Slice's own interning-table storage shape - see
+    /// ArrayTypeInfo's own comment above for the identical rationale.
+    /// Deliberately no `length` field: a slice's length is runtime data,
+    /// never part of the type's own structural identity.
+    struct SliceTypeInfo {
+        Type elementType;
+    };
+
     std::vector<Symbol> symbols_;
     std::unordered_map<const ast::IdentifierExpr*, SymbolId> identifierResolutions_;
     std::unordered_map<const ast::Identifier*, SymbolId> declarationSymbols_;
     std::vector<SemanticError> errors_;
     std::unordered_map<const ast::Expr*, Type> expressionTypes_;
     std::vector<ArrayTypeInfo> arrayTypes_;
+    std::vector<SliceTypeInfo> sliceTypes_;
 };
 
 } // namespace kai::semantic

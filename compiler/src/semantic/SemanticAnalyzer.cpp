@@ -174,8 +174,15 @@ Type SemanticAnalyzer::resolveTypeSyntax(const ast::TypeSyntax& type, SemanticMo
             return Type::unit();
         case ast::TypeSyntaxKind::Array:
             return resolveArrayTypeSyntax(static_cast<const ast::ArrayTypeSyntax&>(type), model);
-        case ast::TypeSyntaxKind::Reference:
         case ast::TypeSyntaxKind::Slice:
+            // KAI LANGUAGE M10A: `[T]` now resolves to a real, distinct
+            // slice Type - see resolveSliceTypeSyntax()'s own doc
+            // comment. It is STILL never resolved to Array or to
+            // anything else (KAI LANGUAGE M7A spec §4's own invariant),
+            // it simply now has its own real semantic representation
+            // instead of staying Unresolved.
+            return resolveSliceTypeSyntax(static_cast<const ast::SliceTypeSyntax&>(type), model);
+        case ast::TypeSyntaxKind::Reference:
         case ast::TypeSyntaxKind::Generic:
             // Deferred: this phase does not model these semantic shapes
             // yet. Type::unresolved(), not Type::error() - nothing was
@@ -183,11 +190,7 @@ Type SemanticAnalyzer::resolveTypeSyntax(const ast::TypeSyntax& type, SemanticMo
             // Unresolved-vs-Error distinction). No SemanticError, and no
             // partial inspection of what's nested inside an entirely
             // deferred shape: e.g. `&Foo`'s `Foo` is never looked at
-            // here, even though `Foo` alone would be UnknownType. Slice
-            // (`[T]`) stays here DELIBERATELY (KAI LANGUAGE M7A spec §4):
-            // it is a distinct, still-future, non-owning view type - it
-            // must never resolve to Array or to anything else this
-            // phase invents.
+            // here, even though `Foo` alone would be UnknownType.
             return Type::unresolved();
     }
 
@@ -229,10 +232,12 @@ Type SemanticAnalyzer::resolveArrayTypeSyntax(const ast::ArrayTypeSyntax& type, 
     }
     if (elementType.isUnresolved()) {
         // The element itself is a still-deferred shape (Reference/
-        // Slice/Generic) - nothing was attempted for it, so nothing was
-        // attempted for the array built from it either. Same
-        // Unresolved-propagates-silently convention as every other
-        // compound expression/type in this codebase.
+        // Generic - Slice itself resolves to a real Type as of KAI
+        // LANGUAGE M10A, so `[[i32]; 3]` no longer hits this branch) -
+        // nothing was attempted for it, so nothing was attempted for the
+        // array built from it either. Same Unresolved-propagates-
+        // silently convention as every other compound expression/type in
+        // this codebase.
         return Type::unresolved();
     }
 
@@ -263,11 +268,53 @@ Type SemanticAnalyzer::resolveArrayTypeSyntax(const ast::ArrayTypeSyntax& type, 
     return model.internArray(elementType, *length);
 }
 
+Type SemanticAnalyzer::resolveSliceTypeSyntax(const ast::SliceTypeSyntax& type, SemanticModel& model) const {
+    // Recurse through the SAME dispatch every other type position uses -
+    // mirrors resolveArrayTypeSyntax()'s own discipline exactly. `[[i32;
+    // 3]]`'s array element, or `[Foo]`'s unknown `Foo`, already gets
+    // exactly the diagnostic/deferral that shape would get anywhere
+    // else; nothing slice-specific is re-implemented here.
+    const Type elementType = resolveTypeSyntax(type.element(), model);
+
+    if (elementType.isError()) {
+        // The element's own resolution already reported why (e.g.
+        // UnknownType) - propagate Error without a second, redundant
+        // diagnostic about the slice as a whole.
+        return Type::error();
+    }
+    if (elementType.isUnresolved()) {
+        // The element itself is a still-deferred shape (Reference/
+        // Generic) - nothing was attempted for it, so nothing was
+        // attempted for the slice built from it either.
+        return Type::unresolved();
+    }
+
+    // Unlike resolveArrayTypeSyntax(), there is no length to decode - a
+    // slice's structural identity is the element Type alone
+    // (TYPE_SYSTEM.md's own "Slices" section: length is runtime data,
+    // never part of the type).
+    return model.internSlice(elementType);
+}
+
 // --- Pass 2: function-body declaration/scope/name analysis ---
 
 SemanticAnalyzer::Scope SemanticAnalyzer::buildPreludeScope(SemanticModel& model) const {
     Scope prelude;
-    for (const std::string_view name : {"print", "panic", "assert"}) {
+    // KAI LANGUAGE M10B: `slice`/`len` join the prelude as ordinary
+    // SymbolKind::Builtin entries, exactly like `print`/`panic`/`assert`
+    // - no new symbol kind, no fabricated FunctionSignature/declaration
+    // site (see this loop's own comment below), and no distinct
+    // resolution mechanism. Unlike `print`/`panic`/`assert` (which
+    // TypeChecker's checkBuiltinCall() leaves fully deferred -
+    // Type::unresolved(), no argument-count/type checking at all), a
+    // CALL to `slice`/`len` specifically gets PRECISE checking
+    // (checkCallExpr() branches on `symbol.name` once it already knows
+    // `symbol.kind == SymbolKind::Builtin` - see checkSliceBuiltinCall()/
+    // checkLenBuiltinCall()), mirroring how LLVMExpressionLowering.cpp's
+    // lowerBuiltinCallExpr() already branches on `builtinSymbol.name` for
+    // codegen. This is a deliberate, narrow generalization of the
+    // existing builtin mechanism - not a new one.
+    for (const std::string_view name : {"print", "panic", "assert", "slice", "len"}) {
         // No signature (nullopt, not a fabricated "() -> ()"), no
         // declaredAt (nullopt - there is no source declaration), no
         // declarationSymbol() mapping (there is no ast::Identifier to

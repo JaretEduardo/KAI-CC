@@ -67,6 +67,22 @@ const ast::IdentifierExpr* unwrapDirectCalleeIdentifier(const ast::Expr& expr) {
     return nullptr;
 }
 
+// KAI LANGUAGE M10B: structural-only unwrap, mirroring TypeChecker's own
+// unwrapSliceSourceIdentifier() in TypeChecker.cpp exactly - `slice(x)`'s
+// eligible-source shape has already been fully validated there; this is
+// the SAME structural check repeated here only because codegen needs the
+// identifier itself (to resolve its SymbolId/storage), never a second,
+// independent decision about whether it is eligible.
+const ast::IdentifierExpr* unwrapSliceSourceIdentifier(const ast::Expr& expr) {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return unwrapSliceSourceIdentifier(static_cast<const ast::ParenExpr&>(expr).inner());
+    }
+    if (expr.kind() == ast::ExprKind::Identifier) {
+        return &static_cast<const ast::IdentifierExpr&>(expr);
+    }
+    return nullptr;
+}
+
 // The ONE narrow, structurally-identified exception to lowerExpr()'s
 // Unresolved gate (M6 spec §8): true only for a CallExpr whose direct
 // callee resolves - via `model.resolution()`/SymbolKind, never identifier
@@ -746,6 +762,67 @@ std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerAr
     return ArrayElementAddress{arraySlot, arrayType};
 }
 
+llvm::Value* LLVMCodeGenerator::lowerCheckedIndexBounds(llvm::Value* indexValue, Type indexSemanticType,
+                                                          llvm::Value* runtimeLength, llvm::IRBuilder<>& builder) {
+    // M7B spec §6: normalize to an unsigned i64 for a single, width-safe
+    // comparison against the length, regardless of the index's own
+    // concrete width (including i64/u64 itself, where a plain
+    // CreateSExt/CreateZExt would violate LLVM's own "strictly widening"
+    // precondition) - CreateSExtOrTrunc/CreateZExtOrTrunc are exactly
+    // LLVM's own answer to "the source may already be the target width."
+    // A signed index is ADDITIONALLY checked for non-negativity at its
+    // OWN width first: sign-extending a negative value to i64 would
+    // itself already be numerically wrong to compare against an unsigned
+    // length (e.g. i8 -1 sign-extends to the all-ones i64 pattern, which
+    // is NOT "a huge positive number" once compared via an UNSIGNED
+    // predicate - it IS the maximum u64 value, so it would incorrectly
+    // compare "in bounds" against any nonzero length without this
+    // separate, explicit sign check).
+    llvm::Type* i64Type = llvm::Type::getInt64Ty(context_);
+    llvm::Value* isNonNegative = llvm::ConstantInt::getTrue(context_);
+    llvm::Value* indexAsI64;
+    if (indexSemanticType.isSignedInteger()) {
+        llvm::Value* zeroAtSourceWidth = llvm::ConstantInt::get(indexValue->getType(), 0);
+        isNonNegative = builder.CreateICmpSGE(indexValue, zeroAtSourceWidth);
+        indexAsI64 = builder.CreateSExtOrTrunc(indexValue, i64Type);
+    } else {
+        // An unsigned value is never negative - isNonNegative stays the
+        // constant `true` above; no wrapping/reinterpretation involved.
+        indexAsI64 = builder.CreateZExtOrTrunc(indexValue, i64Type);
+    }
+    llvm::Value* belowLength = builder.CreateICmpULT(indexAsI64, runtimeLength);
+    llvm::Value* inBounds = builder.CreateAnd(isNonNegative, belowLength);
+
+    // lowerExpr() (for the index, in the caller) may have moved `builder`
+    // (a short-circuit index expression) - the CondBr below always
+    // originates from wherever it ACTUALLY left `builder`, same
+    // discipline as generateIfStmt()'s/generateWhileStmt()'s own
+    // condition lowering.
+    llvm::BasicBlock* checkEndBlock = builder.GetInsertBlock();
+    llvm::Function* function = checkEndBlock->getParent();
+    llvm::BasicBlock* inBoundsBlock = llvm::BasicBlock::Create(context_, "index.inbounds", function);
+    llvm::BasicBlock* outOfBoundsBlock = llvm::BasicBlock::Create(context_, "index.outofbounds", function);
+    builder.SetInsertPoint(checkEndBlock);
+    builder.CreateCondBr(inBounds, inBoundsBlock, outOfBoundsBlock);
+
+    // M7B spec §5: NOT KAI `panic` - a non-recoverable trap, no unwind,
+    // no stable exit-code guarantee. No element address is ever computed
+    // in this block, and this block never reaches a `ret`/back-edge/any
+    // other continuation - `unreachable` is the actual, literal
+    // terminator, not merely a naming convention.
+    builder.SetInsertPoint(outOfBoundsBlock);
+    llvm::Function* trapFn = llvm::Intrinsic::getOrInsertDeclaration(module_.get(), llvm::Intrinsic::trap);
+    builder.CreateCall(trapFn);
+    builder.CreateUnreachable();
+
+    // Only reached once the bounds check has ALREADY succeeded - the
+    // caller's own element-address GEP (and, from there, the load/store
+    // through it) never executes on any path that didn't pass through
+    // this branch.
+    builder.SetInsertPoint(inBoundsBlock);
+    return indexAsI64;
+}
+
 std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerArrayElementAddress(
     const ast::IndexExpr& indexExpr, const SemanticModel& model, llvm::IRBuilder<>& builder) {
     // KAI LANGUAGE M9: lowerArrayBase() resolves `indexExpr.object()` -
@@ -777,61 +854,13 @@ std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerAr
         return std::nullopt;
     }
 
-    // M7B spec §6: normalize to an unsigned i64 for a single, width-safe
-    // comparison against the array's own uint64 length, regardless of
-    // the index's own concrete width (including i64/u64 itself, where a
-    // plain CreateSExt/CreateZExt would violate LLVM's own "strictly
-    // widening" precondition) - CreateSExtOrTrunc/CreateZExtOrTrunc are
-    // exactly LLVM's own answer to "the source may already be the target
-    // width." A signed index is ADDITIONALLY checked for non-negativity
-    // at its OWN width first: sign-extending a negative value to i64
-    // would itself already be numerically wrong to compare against an
-    // unsigned length (e.g. i8 -1 sign-extends to the all-ones i64
-    // pattern, which is NOT "a huge positive number" once compared via
-    // an UNSIGNED predicate - it IS the maximum u64 value, so it would
-    // incorrectly compare "in bounds" against any nonzero length without
-    // this separate, explicit sign check).
-    llvm::Type* i64Type = llvm::Type::getInt64Ty(context_);
-    llvm::Value* isNonNegative = llvm::ConstantInt::getTrue(context_);
-    llvm::Value* indexAsI64;
-    if (indexSemanticType->isSignedInteger()) {
-        llvm::Value* zeroAtSourceWidth = llvm::ConstantInt::get((*indexValue)->getType(), 0);
-        isNonNegative = builder.CreateICmpSGE(*indexValue, zeroAtSourceWidth);
-        indexAsI64 = builder.CreateSExtOrTrunc(*indexValue, i64Type);
-    } else {
-        // An unsigned value is never negative - isNonNegative stays the
-        // constant `true` above; no wrapping/reinterpretation involved.
-        indexAsI64 = builder.CreateZExtOrTrunc(*indexValue, i64Type);
-    }
-    llvm::Value* lengthConstant = llvm::ConstantInt::get(i64Type, length);
-    llvm::Value* belowLength = builder.CreateICmpULT(indexAsI64, lengthConstant);
-    llvm::Value* inBounds = builder.CreateAnd(isNonNegative, belowLength);
+    llvm::Value* lengthConstant = llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), length);
+    llvm::Value* indexAsI64 = lowerCheckedIndexBounds(*indexValue, *indexSemanticType, lengthConstant, builder);
 
-    // lowerExpr() above may have moved `builder` (a short-circuit index
-    // expression) - the CondBr below always originates from wherever it
-    // ACTUALLY left `builder`, same discipline as generateIfStmt()'s/
-    // generateWhileStmt()'s own condition lowering.
-    llvm::BasicBlock* checkEndBlock = builder.GetInsertBlock();
-    llvm::Function* function = checkEndBlock->getParent();
-    llvm::BasicBlock* inBoundsBlock = llvm::BasicBlock::Create(context_, "index.inbounds", function);
-    llvm::BasicBlock* outOfBoundsBlock = llvm::BasicBlock::Create(context_, "index.outofbounds", function);
-    builder.SetInsertPoint(checkEndBlock);
-    builder.CreateCondBr(inBounds, inBoundsBlock, outOfBoundsBlock);
-
-    // M7B spec §5: NOT KAI `panic` - a non-recoverable trap, no unwind,
-    // no stable exit-code guarantee. No element address is ever computed
-    // in this block, and this block never reaches a `ret`/back-edge/any
-    // other continuation - `unreachable` is the actual, literal
-    // terminator, not merely a naming convention.
-    builder.SetInsertPoint(outOfBoundsBlock);
-    llvm::Function* trapFn = llvm::Intrinsic::getOrInsertDeclaration(module_.get(), llvm::Intrinsic::trap);
-    builder.CreateCall(trapFn);
-    builder.CreateUnreachable();
-
-    // Only reached once the bounds check has ALREADY succeeded - the GEP
-    // (and, in the caller, the load/store through it) never executes on
-    // any path that didn't pass through this branch.
-    builder.SetInsertPoint(inBoundsBlock);
+    // `builder` is now positioned in the in-bounds successor block
+    // (lowerCheckedIndexBounds()'s own postcondition) - the GEP (and, in
+    // the caller, the load/store through it) never executes on any path
+    // that didn't pass through that check.
     llvm::Value* zero32 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(context_), 0);
     llvm::Value* elementAddress =
         builder.CreateGEP(arrayType, arraySlot, {zero32, indexAsI64}, "index.addr");
@@ -841,11 +870,79 @@ std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerAr
 
 std::optional<llvm::Value*> LLVMCodeGenerator::lowerIndexExpr(const ast::IndexExpr& index, const SemanticModel& model,
                                                                llvm::IRBuilder<>& builder) {
+    // KAI LANGUAGE M10B: a Slice object dispatches to its own address
+    // computation entirely - see lowerSliceIndexExpr()'s own doc comment.
+    // `model.typeOf(index.object())` reads back a fact TypeChecker's
+    // earlier pass already recorded - a side-effect-free lookup, never a
+    // second type-check pass.
+    const std::optional<Type> objectType = model.typeOf(index.object());
+    if (objectType.has_value() && objectType->isSlice()) {
+        return lowerSliceIndexExpr(index, model, builder);
+    }
+
     const std::optional<ArrayElementAddress> address = lowerArrayElementAddress(index, model, builder);
     if (!address.has_value()) {
         return std::nullopt;
     }
     return builder.CreateLoad(address->elementType, address->pointer);
+}
+
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerSliceIndexExpr(const ast::IndexExpr& index,
+                                                                     const SemanticModel& model,
+                                                                     llvm::IRBuilder<>& builder) {
+    // The Slice object is lowered as an ORDINARY value (an identifier
+    // load, a call result, ...) - never through array-storage machinery,
+    // since a Slice is a small `{ptr,i64}` aggregate VALUE, not
+    // alloca-backed array storage.
+    const std::optional<llvm::Value*> sliceValue = lowerExpr(index.object(), model, builder);
+    if (!sliceValue.has_value() || *sliceValue == nullptr) {
+        return std::nullopt;
+    }
+    const std::optional<Type> objectType = model.typeOf(index.object());
+    if (!objectType.has_value() || !objectType->isSlice()) {
+        // Defensive only - lowerIndexExpr() already dispatched here
+        // specifically because this was a Slice object.
+        return std::nullopt;
+    }
+    llvm::Type* elementType = lowerType(model.sliceElementType(*objectType), model);
+    if (elementType == nullptr) {
+        return std::nullopt;
+    }
+
+    // The Slice's own `ptr`/`len` fields - `ptr` already addresses the
+    // FIRST element directly (unlike an array's own alloca, which
+    // addresses the whole aggregate), and `len` is genuinely RUNTIME
+    // data, never a compile-time constant the way an array's own length
+    // is (TYPE_SYSTEM.md's own "Slices" section).
+    llvm::Value* dataPointer = builder.CreateExtractValue(*sliceValue, {0}, "slice.data");
+    llvm::Value* runtimeLength = builder.CreateExtractValue(*sliceValue, {1}, "slice.len");
+
+    // The index expression is evaluated EXACTLY ONCE here, and the
+    // resulting SSA value is reused for both the bounds comparison
+    // (inside lowerCheckedIndexBounds()) AND the GEP - never re-lowered,
+    // mirroring lowerArrayElementAddress()'s own exact discipline (M10B
+    // spec §19).
+    const std::optional<llvm::Value*> indexValue = lowerExpr(index.index(), model, builder);
+    if (!indexValue.has_value() || *indexValue == nullptr) {
+        return std::nullopt;
+    }
+    const std::optional<Type> indexSemanticType = model.typeOf(index.index());
+    if (!indexSemanticType.has_value() || !indexSemanticType->isInteger()) {
+        // Defensive only - checkIndexExpr() already guarantees an
+        // integer-domain index reaches here.
+        return std::nullopt;
+    }
+
+    llvm::Value* indexAsI64 = lowerCheckedIndexBounds(*indexValue, *indexSemanticType, runtimeLength, builder);
+
+    // `builder` is now positioned in the in-bounds successor block
+    // (lowerCheckedIndexBounds()'s own postcondition, M10B spec §18: no
+    // element address/load may occur before the check succeeds). A
+    // single-index GEP - `dataPointer` already addresses the first
+    // element, unlike an array's own two-index `{0, i}` GEP into its
+    // whole-aggregate storage.
+    llvm::Value* elementAddress = builder.CreateGEP(elementType, dataPointer, {indexAsI64}, "slice.index.addr");
+    return builder.CreateLoad(elementType, elementAddress);
 }
 
 std::optional<llvm::Value*> LLVMCodeGenerator::lowerIndexAssignmentExpr(const ast::IndexExpr& indexTarget,
@@ -931,9 +1028,10 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerCallExpr(const ast::CallExpr
 
     const Symbol& calleeSymbol = model.symbol(*calleeId);
     if (calleeSymbol.kind == SymbolKind::Builtin) {
-        // `type` (the CALL's own Type) is deliberately unused on this
-        // path - see lowerBuiltinCallExpr()'s own doc comment.
-        return lowerBuiltinCallExpr(call, calleeSymbol, model, builder);
+        // `type` is forwarded (KAI LANGUAGE M10B) - lowerSliceCall()
+        // needs the call's own concrete Slice Type; see
+        // lowerBuiltinCallExpr()'s own doc comment for the full picture.
+        return lowerBuiltinCallExpr(call, calleeSymbol, type, model, builder);
     }
     if (calleeSymbol.kind != SymbolKind::Function) {
         // Local/Parameter: not callable in this milestone (no first-class
@@ -998,11 +1096,17 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerCallExpr(const ast::CallExpr
 }
 
 std::optional<llvm::Value*> LLVMCodeGenerator::lowerBuiltinCallExpr(const ast::CallExpr& call,
-                                                                     const Symbol& builtinSymbol,
+                                                                     const Symbol& builtinSymbol, Type type,
                                                                      const SemanticModel& model,
                                                                      llvm::IRBuilder<>& builder) {
     if (builtinSymbol.name == "print") {
         return lowerPrintCall(call, model, builder);
+    }
+    if (builtinSymbol.name == "slice") {
+        return lowerSliceCall(call, type, model, builder);
+    }
+    if (builtinSymbol.name == "len") {
+        return lowerLenCall(call, model, builder);
     }
     // `panic`/`assert`/any other future prelude name: recognized (via
     // SymbolKind::Builtin) but not yet lowerable - explicit failure, M6
@@ -1086,6 +1190,133 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerPrintCall(const ast::CallExp
     // value. Same std::optional<llvm::Value*>{nullptr} convention as
     // lowerAssignmentExpr()/a Unit-returning user function call.
     return std::optional<llvm::Value*>(nullptr);
+}
+
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerSliceCall(const ast::CallExpr& call, Type type,
+                                                                const SemanticModel& model,
+                                                                llvm::IRBuilder<>& builder) {
+    // TypeChecker's checkSliceBuiltinCall() already guarantees exactly
+    // one argument - re-checked defensively rather than trusted blindly,
+    // same discipline as every other lowerX() method in this class.
+    if (call.arguments().size() != 1) {
+        return std::nullopt;
+    }
+
+    // KAI LANGUAGE M10B spec §3: the ONLY eligible source, a direct
+    // (through transparent ParenExpr only) identifier resolving to a
+    // SymbolKind::Local or SymbolKind::Parameter array binding - already
+    // validated by TypeChecker, trusted structurally here exactly like
+    // lowerArrayBase()'s own identifier-root case trusts its own
+    // frontend precondition.
+    const ast::IdentifierExpr* rootIdentifier = unwrapSliceSourceIdentifier(*call.arguments()[0]);
+    if (rootIdentifier == nullptr) {
+        return std::nullopt;
+    }
+    const std::optional<SymbolId> id = model.resolution(*rootIdentifier);
+    if (!id.has_value()) {
+        return std::nullopt;
+    }
+    const SymbolKind rootKind = model.symbol(*id).kind;
+    if (rootKind != SymbolKind::Local && rootKind != SymbolKind::Parameter) {
+        return std::nullopt;
+    }
+    llvm::AllocaInst* arraySlot = findLocalSlot(*id);
+    if (arraySlot == nullptr) {
+        return std::nullopt;
+    }
+    auto* arrayType = llvm::dyn_cast<llvm::ArrayType>(arraySlot->getAllocatedType());
+    if (arrayType == nullptr) {
+        return std::nullopt;
+    }
+
+    llvm::Type* sliceType = lowerType(type, model);
+    if (sliceType == nullptr) {
+        return std::nullopt;
+    }
+
+    // KAI LANGUAGE M10B spec §25: the address of the array's OWN backing
+    // storage directly - never a copy into a temporary, never a heap
+    // allocation. `{0, 0}`: the first index selects the (only) array
+    // object itself, the second selects its first element - the SAME GEP
+    // shape array indexing's own `index.addr` uses with a constant 0,
+    // just without any bounds check (a zero-length array's own "first
+    // element" address is still well-defined POINTER ARITHMETIC in LLVM,
+    // never dereferenced unless an actual in-bounds element access
+    // follows - spec §26: "need not be dereferenceable").
+    llvm::Type* i32Type = llvm::Type::getInt32Ty(context_);
+    llvm::Value* zero32 = llvm::ConstantInt::get(i32Type, 0);
+    llvm::Value* dataPointer = builder.CreateGEP(arrayType, arraySlot, {zero32, zero32}, "slice.ptr");
+
+    // The array's own COMPILE-TIME length (TYPE_SYSTEM.md §18) - never
+    // read from runtime memory.
+    llvm::Value* length = llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), arrayType->getNumElements());
+
+    // Not llvm::ConstantStruct::get() (lowerLiteralExpr()'s own approach
+    // for a string literal's {ptr,i64}): `dataPointer` here is a runtime
+    // SSA address (an alloca-derived GEP), never a compile-time constant
+    // the way a string literal's own global-backed pointer is - CreateInsertValue
+    // into a PoisonValue base (immediately, fully overwritten by both
+    // inserts before any use) is the ordinary IRBuilder idiom for
+    // building a non-constant aggregate value.
+    llvm::Value* result = llvm::PoisonValue::get(sliceType);
+    result = builder.CreateInsertValue(result, dataPointer, {0});
+    result = builder.CreateInsertValue(result, length, {1});
+    return result;
+}
+
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerLenCall(const ast::CallExpr& call, const SemanticModel& model,
+                                                              llvm::IRBuilder<>& builder) {
+    if (call.arguments().size() != 1) {
+        return std::nullopt;
+    }
+
+    const ast::Expr& argument = *call.arguments()[0];
+    const std::optional<Type> argumentType = model.typeOf(argument);
+    if (!argumentType.has_value() || argumentType->isError() || argumentType->isUnresolved()) {
+        return std::nullopt;
+    }
+
+    llvm::Type* i64Type = llvm::Type::getInt64Ty(context_);
+
+    if (argumentType->isArray()) {
+        // KAI LANGUAGE M10B spec §8/§23: a fixed array's length is
+        // compile-time structural data (part of the TYPE itself, M7A) -
+        // `len()` never inspects runtime memory for it, and never
+        // constructs/inspects the array's own VALUE either (defensively
+        // rejecting the one remaining way an EXECUTABLE array-of-Slice
+        // aggregate could otherwise be materialized just to compute a
+        // length that was already known from the type alone - spec
+        // §6/§29). `argument` is still LOWERED exactly once, for its own
+        // independent side effects (this codebase's "never silently skip
+        // an expression's evaluation" discipline), but the resulting
+        // VALUE is deliberately discarded.
+        if (typeContainsSlice(*argumentType, model)) {
+            return std::nullopt;
+        }
+        const std::optional<llvm::Value*> discarded = lowerExpr(argument, model, builder);
+        if (!discarded.has_value()) {
+            return std::nullopt;
+        }
+        return llvm::ConstantInt::get(i64Type, model.arrayLength(*argumentType));
+    }
+
+    const std::optional<llvm::Value*> argumentValue = lowerExpr(argument, model, builder);
+    if (!argumentValue.has_value() || *argumentValue == nullptr) {
+        return std::nullopt;
+    }
+
+    if (argumentType->isSlice() || argumentType->isStr()) {
+        // Both Slice's `{ptr, i64 elementCount}` and Str's `{ptr, i64
+        // byteLength}` already store their own runtime length at field
+        // index 1 - reuse the EXACT same extraction lowerPrintCall()
+        // already established for Str, never a second implementation.
+        return builder.CreateExtractValue(*argumentValue, {1});
+    }
+
+    // Unreachable given a successfully checked frontend
+    // (checkLenBuiltinCall() only ever accepts Array/Slice/Str) - a
+    // defensive structural invariant, not a semantic re-check.
+    return std::nullopt;
 }
 
 } // namespace kai::codegen

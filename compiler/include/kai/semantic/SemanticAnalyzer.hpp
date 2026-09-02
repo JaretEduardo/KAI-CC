@@ -94,11 +94,12 @@ private:
     /// resolves to a primitive Type or Type::error() (with an
     /// UnknownType SemanticError); Unit resolves to Type::unit(); Array
     /// resolves to a real fixed-size array Type (KAI LANGUAGE M7A - see
-    /// resolveArrayTypeSyntax()); Reference/Slice/Generic all resolve to
-    /// Type::unresolved() with no SemanticError, since this phase does
-    /// not model those semantic shapes yet (see Type.hpp's Unresolved-
-    /// vs-Error distinction, and SemanticAnalyzer.cpp for the exact
-    /// rationale).
+    /// resolveArrayTypeSyntax()); Slice resolves to a real slice Type
+    /// (KAI LANGUAGE M10A - see resolveSliceTypeSyntax()); Reference/
+    /// Generic still resolve to Type::unresolved() with no SemanticError,
+    /// since this phase does not model those semantic shapes yet (see
+    /// Type.hpp's Unresolved-vs-Error distinction, and
+    /// SemanticAnalyzer.cpp for the exact rationale).
     Type resolveTypeSyntax(const ast::TypeSyntax& type, SemanticModel& model) const;
 
     Type resolveNamedTypeSyntax(const ast::NamedTypeSyntax& type, SemanticModel& model) const;
@@ -116,6 +117,19 @@ private:
     /// canonicalized via `model`'s own compound-type interner
     /// (SemanticModel::internArray()) - never a fabricated ad hoc Type.
     Type resolveArrayTypeSyntax(const ast::ArrayTypeSyntax& type, SemanticModel& model) const;
+
+    /// KAI LANGUAGE M10A: resolves `[T]` to a real, interned, structural
+    /// slice Type - the TYPE-FOUNDATION-ONLY counterpart to
+    /// resolveArrayTypeSyntax() above, mirroring its exact recursion/
+    /// Error/Unresolved-propagation discipline (`T` resolved through the
+    /// SAME resolveTypeSyntax() dispatch; a broken or still-deferred
+    /// element propagates with no new diagnostic invented here). Unlike
+    /// an array, a slice has no length to decode - its structural
+    /// identity is the element Type alone (SemanticModel::internSlice()),
+    /// since a slice's length is runtime data (TYPE_SYSTEM.md's own
+    /// "Slices" section). This resolves the TYPE only: no LLVM lowering,
+    /// no array-to-slice conversion, and no slice indexing exist yet.
+    Type resolveSliceTypeSyntax(const ast::SliceTypeSyntax& type, SemanticModel& model) const;
 
     // --- Pass 2: function-body declaration/scope/name analysis ---
 

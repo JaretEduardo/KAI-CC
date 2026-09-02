@@ -237,8 +237,9 @@ Fixed-size array literal:
 
     let values = [1, 2, 3, 4]
 
-Explicit type - `[T; N]`, NOT the slice syntax `[T]` (§16 below covers
-slices, a distinct, still-future, non-owning view type):
+Explicit type - `[T; N]`, NOT the slice syntax `[T]` (TYPE_SYSTEM.md's
+own "Slices" section covers slices - a distinct, non-owning view type;
+see this section's own M10A/M10B paragraph below for its current status):
 
     let values: [i32; 4] = [1, 2, 3, 4]
 
@@ -268,8 +269,9 @@ for a length-4 array) is rejected at compile time; a dynamic
 out-of-bounds index traps the program immediately at runtime (not the
 language `panic` mechanism - no unwinding, no recovery, no stable exit-
 code guarantee) rather than ever reading or writing out of bounds.
-Slice syntax (`[T]`, §16 below) remains fully deferred at the type level
-too, not a semantic type at all yet.
+Slice syntax (`[T]`) remained fully deferred at the type level too as
+of M7B, not a semantic type at all yet - see this section's own M10A/
+M10B paragraph below for its current (now executable) status.
 
 **KAI LANGUAGE M8A (post-alpha.2): value semantics resolved for the
 LANGUAGE; KAI LANGUAGE M8B (post-alpha.2): native execution
@@ -327,7 +329,49 @@ remains rejected exactly as a single-level write already was. An array-
 valued intermediate index result (`let row = matrix[1]`) is an ordinary
 independent value copy - mutating `row` never touches `matrix`. No
 source-level reference/lvalue system was introduced to support this. See
-TYPE_SYSTEM.md §18/§20 for the full rule.
+TYPE_SYSTEM.md §18's own "Nested Fixed-Array Indexing" subsection for
+the full rule.
+
+**KAI LANGUAGE M10A (post-alpha.2): slice TYPE foundation; KAI LANGUAGE
+M10B (post-alpha.2): immutable slices are executable.** `[T]` is a real
+semantic `TypeKind::Slice` type - a non-owning, immutable, runtime-length
+view, structurally distinct from `[T; N]` (`[i32]` and `[i32; 3]` are
+never interchangeable, and `[i32] == [i32]` regardless of runtime
+length, since a slice's length is not part of its type):
+
+    fn sum(xs: [i32]) -> i32 {
+        mut result: i32 = 0
+        for i in 0..len(xs) {
+            result = result + xs[i]
+        }
+        return result
+    }
+
+    let values = [10, 20, 30]
+    print(sum(slice(values)))
+
+A slice arises ONLY from the explicit `slice(array)` builtin - never an
+implicit conversion, anywhere (`sum(values)` directly, without
+`slice(...)`, remains a real `TypeMismatch`). `slice(array)` accepts
+only a direct identifier naming a local fixed array or a fixed-array
+parameter - never a literal, a call result, an index/member expression,
+or an existing slice. `len(x)` (a second builtin, result always `u64`)
+returns a fixed array's compile-time length, a slice's runtime element
+count, or a `str`'s existing byte length. Slice element reads (`xs[i]`)
+are CHECKED exactly like array reads (`llvm.trap` on a dynamic
+out-of-bounds access, a dedicated diagnostic for a compile-time-known
+negative index); slice element WRITES (`xs[i] = v`) remain
+unconditionally rejected, regardless of whether the slice BINDING itself
+is `mut` - only the whole VIEW may be reassigned (`s = slice(other)`),
+never an individual element. A slice function parameter/local/copy is
+fully executable (see `slices.kai` for a complete example); a slice
+RETURN type and any array that recursively contains a slice remain
+unconditionally rejected at code generation - a deliberate lifetime-
+safety restriction (KAI still has no general borrow checker), not a
+lowering gap. KAI 0.1 supports IMMUTABLE slices only - no `[mut T]`/
+`&mut [T]`/writable slice indexing exists or is planned yet. See
+TYPE_SYSTEM.md's own "Slices" section for the complete semantic model
+and DESIGN_QUESTIONS.md for the M10A/M10B resolution.
 
 ---
 

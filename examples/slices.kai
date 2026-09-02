@@ -1,0 +1,19 @@
+// KAI LANGUAGE M10B: immutable, non-owning slice views over a fixed
+// array - explicit `slice(array)` construction (no implicit array-to-
+// slice conversion), `len(...)`, checked reads, and a slice function
+// parameter.
+fn sum(xs: [i32]) -> i32 {
+    mut result: i32 = 0
+    for i in 0..len(xs) {
+        result = result + xs[i]
+    }
+    return result
+}
+
+fn main() {
+    let values = [10, 20, 30, 40]
+    let s = slice(values)
+
+    print(len(s))
+    print(sum(s))
+}
