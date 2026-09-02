@@ -670,30 +670,58 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerAssignmentExpr(const ast::As
     return std::optional<llvm::Value*>(nullptr);
 }
 
-std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerArrayElementAddress(
-    const ast::IndexExpr& indexExpr, const SemanticModel& model, llvm::IRBuilder<>& builder) {
-    // M7B spec §1/§12: only `xs[index]` where `xs` is a direct (through
-    // transparent ParenExpr only) identifier is supported (nested
-    // indexing, e.g. `m[0][1]`, stays unsupported).
-    //
-    // KAI LANGUAGE M8B: the root identifier may now resolve to a
-    // SymbolKind::Local OR a SymbolKind::Parameter array binding - array
-    // function parameters (M8B's own feature) need element READS to work
-    // the same way a local's do, and both are bound into the same
-    // `locals_` table via the same entry-alloca+store pattern (see
-    // declareFunction()'s parameter-binding loop), so `findLocalSlot()`
-    // already finds either uniformly. This does NOT reopen element
-    // WRITES through a parameter: lowerIndexAssignmentExpr() also calls
-    // this method, but TypeChecker's checkIndexAssignmentTarget() already
-    // rejects `xs[i] = v` for a non-Local (e.g. Parameter) base at the
-    // semantic layer - KAI parameters remain immutable - so this
-    // broadened check can never actually be reached for a write through a
-    // parameter in practice, and is not itself a mutability decision.
-    const ast::IdentifierExpr* rootIdentifier = unwrapAssignmentTargetIdentifier(indexExpr.object());
-    if (rootIdentifier == nullptr) {
+std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerArrayBase(
+    const ast::Expr& object, const SemanticModel& model, llvm::IRBuilder<>& builder) {
+    if (object.kind() == ast::ExprKind::Paren) {
+        return lowerArrayBase(static_cast<const ast::ParenExpr&>(object).inner(), model, builder);
+    }
+
+    if (object.kind() == ast::ExprKind::Index) {
+        // KAI LANGUAGE M9: `matrix[i][j]`'s outer IndexExpr has
+        // `matrix[i]` as its own object - recurse to get the ALREADY
+        // bounds-checked address of that nested array element (fully
+        // resolved, including its own trap-guarded check and GEP, before
+        // this call returns), and reuse it directly as this level's own
+        // array storage. This is what generalizes indexing from "a
+        // direct local/parameter identifier" to "any array-typed lvalue
+        // built from nested IndexExpr layers" - no source-level
+        // reference is ever introduced; the returned pointer is always,
+        // structurally, an address inside the root identifier's own
+        // allocation.
+        const std::optional<ArrayElementAddress> nested =
+            lowerArrayElementAddress(static_cast<const ast::IndexExpr&>(object), model, builder);
+        if (!nested.has_value() || !llvm::isa<llvm::ArrayType>(nested->elementType)) {
+            // The `!isa<ArrayType>` branch is defensive only: checkIndexExpr()
+            // already guarantees `object` is itself array-typed whenever its
+            // OWN object indexed successfully, so this cannot happen for a
+            // program that reached codegen at all.
+            return std::nullopt;
+        }
+        return nested;
+    }
+
+    if (object.kind() != ast::ExprKind::Identifier) {
+        // A call/member/... base - M9 does not introduce general lvalue
+        // references, matching the M7B scope this generalizes.
         return std::nullopt;
     }
-    const std::optional<SymbolId> rootId = model.resolution(*rootIdentifier);
+
+    // KAI LANGUAGE M8B: the root identifier may resolve to a
+    // SymbolKind::Local OR a SymbolKind::Parameter array binding - array
+    // function parameters need element READS to work the same way a
+    // local's do, and both are bound into the same `locals_` table via
+    // the same entry-alloca+store pattern (see declareFunction()'s
+    // parameter-binding loop), so `findLocalSlot()` already finds either
+    // uniformly. This does NOT reopen element WRITES through a
+    // parameter: lowerIndexAssignmentExpr() also reaches this method (via
+    // lowerArrayElementAddress()), but TypeChecker's
+    // checkIndexAssignmentTarget() already rejects `xs[i] = v` (at any
+    // nesting depth) for a non-Local root at the semantic layer - KAI
+    // parameters remain immutable - so this broadened check can never
+    // actually be reached for a write through a parameter in practice,
+    // and is not itself a mutability decision.
+    const auto& rootIdentifier = static_cast<const ast::IdentifierExpr&>(object);
+    const std::optional<SymbolId> rootId = model.resolution(rootIdentifier);
     if (!rootId.has_value()) {
         return std::nullopt;
     }
@@ -715,6 +743,23 @@ std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerAr
     // actual storage it addresses (same discipline as
     // lowerIdentifierExpr()'s own "the slot's own allocated type drives
     // the load" rule).
+    return ArrayElementAddress{arraySlot, arrayType};
+}
+
+std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerArrayElementAddress(
+    const ast::IndexExpr& indexExpr, const SemanticModel& model, llvm::IRBuilder<>& builder) {
+    // KAI LANGUAGE M9: lowerArrayBase() resolves `indexExpr.object()` -
+    // either a direct Local/Parameter identifier (M7B/M8B), or, now, a
+    // nested IndexExpr whose own address it fully resolves first (see
+    // lowerArrayBase()'s own doc comment). Everything below is otherwise
+    // unchanged from M7B: it addresses exactly ONE level of indexing into
+    // whatever array `base` names.
+    const std::optional<ArrayElementAddress> base = lowerArrayBase(indexExpr.object(), model, builder);
+    if (!base.has_value()) {
+        return std::nullopt;
+    }
+    auto* arrayType = llvm::cast<llvm::ArrayType>(base->elementType);
+    llvm::Value* arraySlot = base->pointer;
     llvm::Type* elementType = arrayType->getElementType();
     const std::uint64_t length = arrayType->getNumElements();
 

@@ -590,19 +590,24 @@ void testMemberTargetUnresolvedNoDiagnostic() {
 // assignment into ANYTHING stays deferred with no diagnostic") is
 // superseded outright: `xs[index] = value` for a mutable LOCAL array now
 // really type-checks (see ArrayIndexAssignmentTests.cpp for that full
-// coverage). The one shape that remains genuinely deferred - explicitly,
-// per M7B's own spec §12/§1 ("generalized nested lvalue mutation"/
-// "arrays as parameters" both stay out of scope) - is indexing into an
-// array-typed PARAMETER (not a Local): arrays-as-parameters don't exist
-// yet, so this can never become the "supported local array base" case.
-void testIndexIntoArrayParameterTargetUnresolvedNoDiagnostic() {
+// coverage). KAI LANGUAGE M9 FINAL CLEANUP further supersedes this
+// test's own M7B-era retargeting: indexing into an array-typed PARAMETER
+// is no longer silently deferred either - a Parameter root is now a
+// RECOGNIZED mutation target (same as a Local root), and since a
+// parameter is always immutable (GRAMMAR.md §10), it is rejected via the
+// EXISTING AssignmentToImmutableBinding diagnostic - the same diagnostic
+// `let xs = ...; xs[0] = 1` already gets, no new parameter-specific one.
+void testIndexIntoArrayParameterTargetRejectedAsImmutableBinding() {
     SourceManager sm;
     Checked result = analyzeAndCheck(sm, "fn f(arr: [i32; 3]) {\n    arr[0] = 1\n}");
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
         return;
     }
-    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.model.errors().size() == 1);
+    if (result.model.errors().size() == 1) {
+        KAI_CHECK(result.model.errors()[0].kind == SemanticErrorKind::AssignmentToImmutableBinding);
+    }
 
     const auto& fn = static_cast<const FunctionDecl&>(*result.parsed->declarations()[0]);
     const auto& assignStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
@@ -610,7 +615,7 @@ void testIndexIntoArrayParameterTargetUnresolvedNoDiagnostic() {
     const auto assignType = result.model.typeOf(assignment);
     KAI_CHECK(assignType.has_value());
     if (assignType) {
-        KAI_CHECK(assignType->isUnresolved());
+        KAI_CHECK(*assignType == Type::error());
     }
 }
 
@@ -785,7 +790,7 @@ int main() {
     testTargetErrorPreventsDownstreamBinaryOperandsCascade();
 
     testMemberTargetUnresolvedNoDiagnostic();
-    testIndexIntoArrayParameterTargetUnresolvedNoDiagnostic();
+    testIndexIntoArrayParameterTargetRejectedAsImmutableBinding();
     testDeferredMemberTargetRhsErrorStillUnresolved();
 
     testLetYEqualsParenAssignInfersUnit();

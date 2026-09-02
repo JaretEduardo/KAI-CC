@@ -754,8 +754,8 @@ any other statically-sized value.
 A zero-length array (`[T; 0]`) is a valid, ordinary fixed-size array
 type - it is not rejected merely because its length is zero.
 
-**Implementation status (KAI LANGUAGE M7A/M7B/M8B):** M7A established this
-as a real semantic type - `[T; N]` annotations resolve to it, array
+**Implementation status (KAI LANGUAGE M7A/M7B/M8B/M9):** M7A established
+this as a real semantic type - `[T; N]` annotations resolve to it, array
 literals infer it (homogeneous elements only, using the same contextual-
 literal-adaptation rules arithmetic already uses - no new implicit-
 conversion system), and semantic tooling renders it canonically as
@@ -769,10 +769,10 @@ and §19 for the full LANGUAGE semantics, resolved by KAI LANGUAGE M8A):
 arrays as a function parameter or return type (a direct LLVM aggregate
 argument/result - see §18's "ABI vs. language semantics" below), and
 whole-array assignment/copy (`let b = a` / `a = b` for two array-typed
-values). Still NOT implemented: slices (`[T]`, still
-`Type::unresolved()`), and indexing more than one level into a nested
-array (`m[0][1]` - a codegen-only limitation distinct from nested-array
-VALUE transport, which works).
+values). KAI LANGUAGE M9 (post-alpha.2) then implemented general checked
+indexing through nested fixed arrays at any depth (`m[0][1]`, and deeper -
+see "Nested Fixed-Array Indexing" below). Still NOT implemented: slices
+(`[T]`, still `Type::unresolved()`).
 
 The backend representation for a supported element type is LLVM's own
 fixed-size aggregate:
@@ -829,6 +829,73 @@ real SemanticError (never an LLVM/backend error), and a dynamic
 out-of-bounds index lowers to an actual `llvm.trap` + `unreachable`,
 guarded by a real runtime bounds check that always precedes the element
 address computation.
+
+## Nested Fixed-Array Indexing
+
+The semantic rule for `object[index]` is recursive and requires no
+multidimensional-specific concept: if `object` has type `[T; N]`, the
+result type is simply `T` - and `T` may itself be an array type. A
+"nested array" is nothing more than an array whose element type happens
+to be another array:
+
+```text
+[[i32; 2]; 2][0]    -> [i32; 2]
+[[i32; 2]; 2][0][1] -> i32
+```
+
+**Resolved and implemented (KAI LANGUAGE M9, post-alpha.2):** general
+indexing through nested fixed arrays, at any depth the type system
+supports, is real, native, executable code:
+
+```kai
+let matrix = [[1, 2], [3, 4]]
+print(matrix[1][0])   // 3
+
+mut m = [[1, 2], [3, 4]]
+m[1][0] = 99           // 99
+```
+
+Every level of a nested index is independently checked using the EXACT
+same rules "Array Indexing Is Checked" states above - `matrix[i][j]` is
+semantically equivalent to first checking `i` against `matrix`'s own
+length, then checking `j` against the resulting row's length; a
+compile-time-constant out-of-bounds index at ANY level is rejected via
+the SAME `ArrayIndexOutOfBounds` diagnostic a single-level index already
+gets (never a new "multidimensional bounds" diagnostic), and a dynamic
+out-of-bounds index at any level traps exactly like a single-level one.
+No level ever becomes unchecked, and an outer level's element address is
+never computed before that level's own check has already succeeded - a
+later level's check begins only once the earlier one has fully
+completed, GEP included.
+
+**Mutation and the root binding:** a nested indexed assignment such as
+`matrix[i][j] = value` is valid exactly when the ROOT of the index chain
+- `matrix`, found by walking through every nested `IndexExpr` layer to
+the identifier underneath - is a mutable local binding, using the exact
+same rule a single-level `xs[i] = value` already used. An intermediate
+array element (the "row" in `matrix[i]`) never introduces its own,
+independent mutability; mutability is a property of the root binding
+alone. Writing through an immutable root (`let matrix = ...`) is
+rejected via the existing `AssignmentToImmutableBinding` diagnostic, and
+writing through a function parameter root remains rejected exactly as a
+single-level parameter write already was - array parameters stay
+immutable under KAI's existing, unchanged parameter rules regardless of
+how deeply nested the indexing above them is.
+
+**Array-valued intermediate results:** when a nested `IndexExpr` is used
+in value position and does not resolve all the way to a scalar - `let
+row = matrix[1]` - the result is an ORDINARY array value, following the
+exact same value-copy rule §19 states for any other array value: `row`
+is an independent copy, never an alias, and mutating it (`row[0] = 99`)
+must never be observable through `matrix`.
+
+Nested-array function parameters and return values follow §18's existing
+"Fixed-Size Arrays at a Function Boundary" rule with no changes: indexing
+into a nested-array parameter (`fn get(m: [[i32; 2]; 2]) -> i32 { return
+m[1][0] }`) or into a local initialized from a nested-array-returning
+call works identically to indexing into a local nested array, since M9
+introduced no new physical ABI - the existing M8B direct-aggregate
+strategy is unchanged.
 
 ## Fixed-Size Arrays at a Function Boundary
 

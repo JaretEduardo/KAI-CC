@@ -81,21 +81,20 @@ Currently implemented and native-executable-verified on Fedora Linux x86_64 only
 Windows/macOS support yet): primitive integer/Bool/f32/f64 values and arithmetic/comparison/logical
 expressions (`&&`/`||` are FINAL short-circuit, not eager), local variables, mutability/assignment, function
 parameters/calls/forward-calls/recursion, `if`/`else`/`else if`, `while`, `for i in start..end` over an
-integer range (KAI LANGUAGE M6, post-alpha.2), a fixed-size array `[T; N]` with checked indexed reads/
-writes (KAI LANGUAGE M7B, post-alpha.2 - a compile-time-constant out-of-bounds index is a compile error; a
-dynamic one traps via `llvm.trap`, never an unchecked access), whole-array initialization/assignment/self-
-assignment and array function parameters/returns lowered as a direct LLVM aggregate `[N x T]` argument/result
-(KAI LANGUAGE M8B, post-alpha.2 - no `sret`/`byval`/hidden pointer, no promised stable external C ABI), Unit
-functions, a minimal `print` builtin for those primitive types (lowered to the tiny static C runtime
-described in §12, `runtime/kai_runtime.c`), native object emission (`LLVMObjectEmitter`), and static runtime
-linking into a real executable (`NativeLinker`, invoking the host C compiler driver) via
+integer range (KAI LANGUAGE M6, post-alpha.2), a fixed-size array `[T; N]` (including nested fixed arrays)
+with general checked indexed reads/writes at any nesting depth (KAI LANGUAGE M7B/M9, post-alpha.2 - a
+compile-time-constant out-of-bounds index is a compile error; a dynamic one traps via `llvm.trap`, never an
+unchecked access, independently checked at EACH level of a nested index), whole-array initialization/
+assignment/self-assignment and array function parameters/returns lowered as a direct LLVM aggregate `[N x T]`
+argument/result (KAI LANGUAGE M8B, post-alpha.2 - no `sret`/`byval`/hidden pointer, no promised stable
+external C ABI), Unit functions, a minimal `print` builtin for those primitive types (lowered to the tiny
+static C runtime described in §12, `runtime/kai_runtime.c`), native object emission (`LLVMObjectEmitter`),
+and static runtime linking into a real executable (`NativeLinker`, invoking the host C compiler driver) via
 `kaicc <file.kai> -o <output>`.
 
 Still unimplemented (backend/native execution only): general iterable/foreach semantics and array/slice
 iteration (`for x in someArray` - `for` only supports a literal `start..end` integer range, KAI LANGUAGE M6),
-a first-class `Range` value, indexing more than one level into a nested array (`m[0][1]` - a codegen-only
-limitation distinct from nested-array VALUE transport, which M8B makes real), slices (`[T]`, still
-no semantic Type at all), strings/`Char` as backend-
+a first-class `Range` value, slices (`[T]`, still no semantic Type at all), strings/`Char` as backend-
 lowerable values, references, ownership/borrowing, structs/enums/generics, `panic`/`assert` lowering,
 optimization passes, HIR, an LSP, and the higher-level `kai` CLI wrapper described in §14 (only `kaicc`
 itself exists today).
@@ -263,6 +262,27 @@ loaded once as a complete aggregate value) so it can be used as a call argument 
 only as a `VarDecl`'s own direct initializer. KAI still does not promise a stable, external, C-compatible ABI
 for how arrays cross a function boundary - the direct-aggregate choice remains an internal backend
 implementation detail, never a language-design guarantee (see DESIGN_QUESTIONS.md's own M8A/M8B resolution).
+
+**Nested fixed-array indexing (KAI LANGUAGE M9, post-alpha.2):** before M9, `matrix[0][1]` failed at code
+generation even though the FRONTEND already type-checked it correctly - `TypeChecker::checkIndexExpr()`'s own
+recursive `object`-type inference already handled arbitrary nesting depth with zero changes needed (the
+nested-array TYPE rule from M7A was never the gap). The gap was entirely in `LLVMCodeGenerator`:
+`lowerArrayElementAddress()` only accepted a direct (through transparent `ParenExpr` only) `IdentifierExpr` as
+an `IndexExpr`'s object, so the OUTER `IndexExpr` in `matrix[0][1]` (whose own object, `matrix[0]`, is itself
+an `IndexExpr`, not an identifier) was rejected outright - a real, narrow, codegen-only limitation, not a
+frontend one. M9 generalizes this via a new `lowerArrayBase()` helper that resolves an `IndexExpr`'s object to
+an address either way: a direct Local/Parameter identifier (M7B/M8B's own case, unchanged), or - new in M9 -
+another `IndexExpr`, resolved by recursing into `lowerArrayElementAddress()` itself, which fully computes
+THAT level's own bounds check and GEP before returning, before the caller ever treats the result as its own
+array storage. This makes `matrix[i][j]` (and deeper, `a[i][j][k]`) work by the SAME per-level function
+calling itself once per nesting level, each level's bounds check/GEP strictly ordered after the previous
+level's has already succeeded - no source-level reference/lvalue system was introduced to make this work. The
+one FRONTEND change M9 needed was narrower still: `checkIndexAssignmentTarget()`'s root-identifier lookup
+(previously a single-level-only unwrap) was generalized to
+`unwrapIndexAssignmentRootIdentifier()`, which walks through zero or more nested `IndexExpr` layers to the
+SAME kind of root a single-level `xs[i] = v` already required - a bare identifier resolving to a
+`SymbolKind::Local` binding - so mutability through `matrix[i][j] = v` is still decided by the ROOT binding
+alone, exactly as the language always intended (TYPE_SYSTEM.md §20), never by an intermediate array element.
 
 Example errors:
 

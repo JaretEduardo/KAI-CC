@@ -319,19 +319,25 @@ void testArrayParameterAssignmentRejectedLikeAnyParameter() {
     }
 }
 
-// N2. Indexed assignment through an array PARAMETER also stays
-// deferred (Unresolved, no diagnostic) - unaffected by M8A, exactly the
-// pre-existing M7B "only a Local array base is a supported indexed-
-// assignment target" rule (arrays-as-parameters were never in M7B's
-// indexed-assignment scope, and M8A does not change that).
-void testIndexedAssignmentThroughArrayParameterStaysDeferred() {
+// N2. RETARGETED (KAI LANGUAGE M9 FINAL CLEANUP): indexed assignment
+// through an array PARAMETER is no longer silently deferred - a
+// Parameter root is now a RECOGNIZED indexed-assignment target (same as
+// a Local root), and since a parameter is always immutable (GRAMMAR.md
+// §10), it is rejected via the EXISTING AssignmentToImmutableBinding
+// diagnostic - the SAME diagnostic testArrayParameterAssignmentRejectedLikeAnyParameter()
+// above already gets for a WHOLE-parameter assignment, and no new
+// parameter-specific or index-specific diagnostic was introduced.
+void testIndexedAssignmentThroughArrayParameterRejectedAsImmutableBinding() {
     SourceManager sm;
     Checked result = analyzeAndCheck(sm, "fn f(xs: [i32; 3]) {\n    xs[0] = 5\n}");
     KAI_CHECK(result.parsed.has_value());
     if (!result.parsed) {
         return;
     }
-    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.model.errors().size() == 1);
+    if (result.model.errors().size() == 1) {
+        KAI_CHECK(result.model.errors()[0].kind == SemanticErrorKind::AssignmentToImmutableBinding);
+    }
 
     const auto& fn = static_cast<const FunctionDecl&>(*result.parsed->declarations()[0]);
     const auto& assignStmt = static_cast<const ExprStmt&>(*fn.body().statements()[0]);
@@ -339,7 +345,7 @@ void testIndexedAssignmentThroughArrayParameterStaysDeferred() {
     const auto assignType = result.model.typeOf(assignment);
     KAI_CHECK(assignType.has_value());
     if (assignType) {
-        KAI_CHECK(assignType->isUnresolved());
+        KAI_CHECK(*assignType == Type::error());
     }
 }
 
@@ -435,7 +441,7 @@ int main() {
     testNestedArrayParameterAccepted();
     testStrArrayParameterAccepted();
     testArrayParameterAssignmentRejectedLikeAnyParameter();
-    testIndexedAssignmentThroughArrayParameterStaysDeferred();
+    testIndexedAssignmentThroughArrayParameterRejectedAsImmutableBinding();
 
     testArrayReturnLiteralMatchingTypeAccepted();
     testArrayReturnWrongLengthRejected();

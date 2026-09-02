@@ -246,6 +246,30 @@ const ast::Expr& unwrapParenExpr(const ast::Expr& expr) {
     return expr;
 }
 
+// KAI LANGUAGE M9 spec §9: finds the ROOT identifier of a (possibly
+// nested) indexed-assignment target such as `matrix[1][0]` by walking
+// through zero or more IndexExpr layers - through transparent ParenExpr
+// at each layer, exactly like unwrapAssignmentTargetIdentifier's own
+// unwrap discipline - until a bare IdentifierExpr is reached. For a
+// single-level target (`xs[i] = v`), this is identical to calling
+// unwrapAssignmentTargetIdentifier() on the IndexExpr's own object, so
+// M7B's existing single-level behavior is a strict special case of this,
+// never a separate rule. Returns nullptr for any other root shape (a
+// call/member/... base) - M9 does not broaden supported roots beyond a
+// plain identifier chain.
+const ast::IdentifierExpr* unwrapIndexAssignmentRootIdentifier(const ast::Expr& expr) {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return unwrapIndexAssignmentRootIdentifier(static_cast<const ast::ParenExpr&>(expr).inner());
+    }
+    if (expr.kind() == ast::ExprKind::Identifier) {
+        return &static_cast<const ast::IdentifierExpr&>(expr);
+    }
+    if (expr.kind() == ast::ExprKind::Index) {
+        return unwrapIndexAssignmentRootIdentifier(static_cast<const ast::IndexExpr&>(expr).object());
+    }
+    return nullptr;
+}
+
 } // namespace
 
 TypeChecker::TypeChecker(const SourceManager& sources) noexcept : sources_(sources) {}
@@ -1281,18 +1305,38 @@ Type TypeChecker::checkIndexAssignmentTarget(const ast::AssignmentExpr& assignme
     // a second copy of those rules for the assignment-target shape.
     const Type elementType = checkIndexExpr(indexTarget, model);
 
-    // M7B spec §12: only `xs[index] = value` where `xs` is a direct
-    // (through transparent ParenExpr only) identifier resolving to a
-    // SymbolKind::Local supports real mutation - any other base
-    // (nested indexing, a call/member/parameter base, ...) is
-    // "generalized nested lvalue mutation," explicitly deferred.
-    const ast::IdentifierExpr* rootIdentifier = unwrapAssignmentTargetIdentifier(indexTarget.object());
+    // M7B spec §12, generalized by KAI LANGUAGE M9 spec §9: `xs[index] =
+    // value` where `xs` is a direct (through transparent ParenExpr only)
+    // identifier resolving to a SymbolKind::Local OR SymbolKind::Parameter
+    // binding is a REAL, recognized mutation target - and so is
+    // `matrix[i][j] = value`/deeper nesting, walking through every
+    // intermediate IndexExpr layer to the SAME kind of root
+    // (unwrapIndexAssignmentRootIdentifier() is a strict generalization of
+    // the old single-level unwrapAssignmentTargetIdentifier() call this
+    // replaces - identical result for a single-level target). Any other
+    // root shape (a call/member/function/builtin base) remains
+    // "generalized nested lvalue mutation," explicitly deferred -
+    // mutability is always decided by the ROOT binding alone, never by an
+    // intermediate array element (M9 spec §8/§9).
+    //
+    // KAI LANGUAGE M9 FINAL CLEANUP: a Parameter root is included here
+    // (not routed to the deferred/Unresolved fallback below) specifically
+    // so it reaches the SAME `!rootSymbol.isMutable` check every other
+    // recognized root already goes through just below - parameter Symbols
+    // are always declared with isMutable=false (SemanticAnalyzer's own
+    // parameter-declaration call site), so this produces the EXISTING
+    // AssignmentToImmutableBinding diagnostic for free, with no new
+    // parameter-specific diagnostic or special-cased branch. This is not
+    // a new mutability decision, just recognizing a Parameter root as a
+    // real (rejected) target instead of silently deferring it.
+    const ast::IdentifierExpr* rootIdentifier = unwrapIndexAssignmentRootIdentifier(indexTarget.object());
     const std::optional<SymbolId> rootId = rootIdentifier ? model.resolution(*rootIdentifier) : std::nullopt;
-    const bool isSupportedLocalArrayBase =
-        rootId.has_value() && model.symbol(*rootId).kind == SymbolKind::Local && !elementType.isError() &&
-        !elementType.isUnresolved();
+    const bool isRecognizedArrayBase =
+        rootId.has_value() &&
+        (model.symbol(*rootId).kind == SymbolKind::Local || model.symbol(*rootId).kind == SymbolKind::Parameter) &&
+        !elementType.isError() && !elementType.isUnresolved();
 
-    if (!isSupportedLocalArrayBase) {
+    if (!isRecognizedArrayBase) {
         // Deferred shape - the RHS is still checked (independent errors
         // surface), but with no target-type context, and the whole
         // assignment stays Type::unresolved() with no NEW diagnostic -
@@ -1309,9 +1353,11 @@ Type TypeChecker::checkIndexAssignmentTarget(const ast::AssignmentExpr& assignme
     const Symbol& rootSymbol = model.symbol(*rootId);
     if (!rootSymbol.isMutable) {
         // Existing AssignmentToImmutableBinding path - no new, index-
-        // specific immutability diagnostic. The RHS is still checked
-        // (independent errors surface), but with no target-type context,
-        // matching checkVariableAssignmentTarget()'s own identical rule.
+        // specific (or parameter-specific) immutability diagnostic. The
+        // RHS is still checked (independent errors surface), but with no
+        // target-type context, matching checkVariableAssignmentTarget()'s
+        // own identical rule. Covers BOTH an immutable `let` local root
+        // and a Parameter root (always immutable per GRAMMAR.md §10).
         inferExpr(value, model);
         model.addError(SemanticError{
             SemanticErrorKind::AssignmentToImmutableBinding,

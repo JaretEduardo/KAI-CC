@@ -1010,6 +1010,363 @@ void testArrayReturnLiteralEvaluationOrderEndToEnd() {
     KAI_CHECK_STDOUT_BYTES(result.stdoutText, "1\n2\n3\n1\n2\n3\n");
 }
 
+// --- KAI LANGUAGE M9: nested fixed-array indexing, native E2E ---
+//
+// Before M9, `matrix[0][1]` failed codegen entirely (lowerArrayElementAddress()
+// only accepted a direct identifier as an IndexExpr's object) - see
+// LLVMCodeGeneratorTests.cpp's own M9 section header comment for the full
+// root-cause writeup. M9's lowerArrayBase() generalizes this by recursing
+// through nested IndexExpr layers; the frontend's own checkIndexExpr()
+// already supported the nested TYPE rule (needed no change), and
+// checkIndexAssignmentTarget() gained a root-identifier walk
+// (unwrapIndexAssignmentRootIdentifier()) so mutability is still decided
+// by the ROOT binding alone, however deeply nested the indexing above it.
+
+// A. Basic 2D read (spec §21.A).
+void testNestedArrayBasicReadEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_read.kai",
+                                                       "fn main() {\n"
+                                                       "    let m = [[1, 2], [3, 4]]\n"
+                                                       "    print(m[0][0])\n"
+                                                       "    print(m[0][1])\n"
+                                                       "    print(m[1][0])\n"
+                                                       "    print(m[1][1])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "1\n2\n3\n4\n");
+}
+
+// B. Nested write through a mutable local root (spec §21.B).
+void testNestedArrayWriteEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_write.kai",
+                                                       "fn main() {\n"
+                                                       "    mut m = [[1, 2], [3, 4]]\n"
+                                                       "    m[1][0] = 99\n"
+                                                       "    print(m[1][0])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "99\n");
+}
+
+// C. Immutable nested write rejection (spec §8/§21.C): rejected in the
+// FRONTEND (exit 5) via the SAME EXISTING AssignmentToImmutableBinding
+// diagnostic a single-level `let xs = ...; xs[0] = 5` already gets - no
+// new nested-specific diagnostic, and never a backend/LLVM crash.
+void testNestedArrayImmutableWriteFailsInFrontend() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_nested_immutable_write.kai",
+                         "fn main() {\n    let m = [[1, 2], [3, 4]]\n    m[1][0] = 99\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_nested_immutable.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("assignment to immutable binding") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// M9 FINAL CLEANUP: indexed mutation rooted at an ARRAY PARAMETER is
+// rejected via the SAME EXISTING AssignmentToImmutableBinding diagnostic
+// - never silently deferred to Unresolved, and never a new parameter-
+// specific diagnostic - at single-level, 2-level nested, and 3-level
+// nested depth (cleanup spec §1/§4.A-C).
+void testArrayParameterIndexedWriteFailsInFrontendAtEveryNestingDepth() {
+    struct Case {
+        const char* fileName;
+        const char* source;
+    };
+    const Case cases[] = {
+        {"kai_e2e_param_write_single.kai", "fn f(xs: [i32; 3]) {\n    xs[0] = 99\n}\nfn main() {}"},
+        {"kai_e2e_param_write_nested.kai",
+         "fn f(m: [[i32; 2]; 2]) {\n    m[0][0] = 99\n}\nfn main() {}"},
+        {"kai_e2e_param_write_3level.kai",
+         "fn f(cube: [[[i32; 2]; 2]; 2]) {\n    cube[0][0][0] = 99\n}\nfn main() {}"},
+    };
+
+    for (const Case& testCase : cases) {
+        const std::filesystem::path sourcePath = writeTempSource(testCase.fileName, testCase.source);
+        std::error_code ignored;
+
+        SourceManager sm;
+        std::ostringstream err;
+        const int exitCode = kai::cli::runCompileCommand(
+            sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_param_write.out", err);
+
+        KAI_CHECK(exitCode == 5);
+        KAI_CHECK(err.str().find("assignment to immutable binding") != std::string::npos);
+
+        std::filesystem::remove(sourcePath, ignored);
+    }
+}
+
+// D. Row value copy / no alias (spec §10/§21.D): `mut row = matrix[1]`
+// produces an INDEPENDENT array value - mutating `row` must never touch
+// `matrix`'s own storage.
+void testNestedArrayRowCopyNoAliasEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_row_copy.kai",
+                                                       "fn main() {\n"
+                                                       "    let matrix = [[1, 2], [3, 4]]\n"
+                                                       "    mut row = matrix[1]\n"
+                                                       "    row[0] = 99\n"
+                                                       "    print(row[0])\n"
+                                                       "    print(matrix[1][0])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "99\n3\n");
+}
+
+// E. Dynamic outer/inner indexes, both in bounds (spec §21.E).
+void testNestedArrayDynamicIndexesInBoundsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_dyn_ok.kai",
+                                                       "fn main() {\n"
+                                                       "    let m = [[1, 2], [3, 4]]\n"
+                                                       "    mut i: i32 = 1\n"
+                                                       "    mut j: i32 = 1\n"
+                                                       "    print(m[i][j])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "4\n");
+}
+
+// F. Outer dynamic out-of-bounds traps (spec §21.F). Same "no stable OS
+// exit code, no output past the trapping access" contract M7B established
+// for single-level dynamic OOB (spec §13).
+void testNestedArrayOuterDynamicOutOfBoundsTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_outer_oob.kai",
+                                                       "fn main() {\n"
+                                                       "    mut i: i32 = 5\n"
+                                                       "    let m = [[1, 2], [3, 4]]\n"
+                                                       "    print(m[i][0])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// G. Inner dynamic out-of-bounds traps (spec §21.G).
+void testNestedArrayInnerDynamicOutOfBoundsTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_inner_oob.kai",
+                                                       "fn main() {\n"
+                                                       "    mut j: i32 = 5\n"
+                                                       "    let m = [[1, 2], [3, 4]]\n"
+                                                       "    print(m[0][j])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// H. Negative signed outer AND inner index both trap (spec §21.H).
+void testNestedArrayNegativeSignedOuterTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_neg_outer.kai",
+                                                       "fn main() {\n"
+                                                       "    mut i: i32 = 0 - 1\n"
+                                                       "    let m = [[1, 2], [3, 4]]\n"
+                                                       "    print(m[i][0])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+void testNestedArrayNegativeSignedInnerTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_neg_inner.kai",
+                                                       "fn main() {\n"
+                                                       "    mut j: i32 = 0 - 1\n"
+                                                       "    let m = [[1, 2], [3, 4]]\n"
+                                                       "    print(m[0][j])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// I. Unsigned nested indexing: in bounds succeeds, out of bounds traps
+// (spec §21.I).
+void testNestedArrayUnsignedInBoundsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_unsigned_ok.kai",
+                                                       "fn main() {\n"
+                                                       "    let m: [[i32; 2]; 2] = [[1, 2], [3, 4]]\n"
+                                                       "    mut i: u32 = 1\n"
+                                                       "    mut j: u32 = 0\n"
+                                                       "    print(m[i][j])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n");
+}
+
+void testNestedArrayUnsignedOutOfBoundsTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_unsigned_oob.kai",
+                                                       "fn main() {\n"
+                                                       "    let m = [[1, 2], [3, 4]]\n"
+                                                       "    mut j: u32 = 9\n"
+                                                       "    print(m[0][j])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// J. Exactly-once / evaluation order, for both a nested READ (spec §5)
+// and a nested WRITE's full `object[outer][inner] = value` chain (spec
+// §15) - each side-effecting index/value expression appears in stdout
+// EXACTLY once, strictly in source (left-to-right, outer-before-inner)
+// order.
+void testNestedArrayReadEvaluationOrderEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_eval_order_read.kai",
+                                                       "fn outer() -> i32 {\n    print(100)\n    return 1\n}\n"
+                                                       "fn inner() -> i32 {\n    print(200)\n    return 0\n}\n"
+                                                       "fn main() {\n"
+                                                       "    let matrix = [[1, 2], [3, 4]]\n"
+                                                       "    print(matrix[outer()][inner()])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "100\n200\n3\n");
+}
+
+void testNestedArrayWriteEvaluationOrderEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_eval_order_write.kai",
+                                                       "fn f() -> i32 {\n    print(100)\n    return 1\n}\n"
+                                                       "fn g() -> i32 {\n    print(200)\n    return 0\n}\n"
+                                                       "fn h() -> i32 {\n    print(300)\n    return 42\n}\n"
+                                                       "fn main() {\n"
+                                                       "    mut matrix = [[1, 2], [3, 4]]\n"
+                                                       "    matrix[f()][g()] = h()\n"
+                                                       "    print(matrix[1][0])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "100\n200\n300\n42\n");
+}
+
+// K. 3-level indexing (spec §16/§21.K) - the recursion is not hardcoded
+// to depth 2.
+void testNestedArrayThreeLevelIndexingEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_3level.kai",
+                                                       "fn main() {\n"
+                                                       "    let cube = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]\n"
+                                                       "    print(cube[1][0][1])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "6\n");
+}
+
+// L. Nested-array parameter indexing (spec §11/§21.L) - no ABI change
+// from M8B's direct aggregate strategy.
+void testNestedArrayParameterIndexingEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_param.kai",
+                                                       "fn get(m: [[i32; 2]; 2]) -> i32 {\n"
+                                                       "    return m[1][0]\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let m = [[1, 2], [3, 4]]\n"
+                                                       "    print(get(m))\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n");
+}
+
+// M. Returned nested-array indexing (spec §11/§21.M).
+void testNestedArrayReturnIndexingEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_return.kai",
+                                                       "fn make() -> [[i32; 2]; 2] {\n"
+                                                       "    return [[1, 2], [3, 4]]\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let m = make()\n"
+                                                       "    print(m[1][1])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "4\n");
+}
+
+// N. Zero-length nested-dimension OOB behavior (spec §18/§21.N): a
+// CONSTANT index into a zero-length dimension is a compile-time error
+// (the SAME ArrayIndexOutOfBounds diagnostic every other constant OOB
+// index gets - never a new "multidimensional bounds" diagnostic), and a
+// DYNAMIC index into one traps at runtime, same as any other dynamic OOB.
+void testNestedArrayZeroLengthDimensionConstantOOBFailsInFrontend() {
+    const std::filesystem::path sourcePath = writeTempSource(
+        "kai_e2e_nested_zero_length_const_oob.kai",
+        "fn main() {\n    let m: [[i32; 0]; 2] = [[], []]\n    print(m[0][0])\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_nested_zero_length_const_oob.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("array index out of bounds") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+void testNestedArrayZeroLengthDimensionDynamicTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_nested_zero_length_dyn_oob.kai",
+                                                       "fn main() {\n"
+                                                       "    let m: [[i32; 0]; 2] = [[], []]\n"
+                                                       "    mut j = 0\n"
+                                                       "    print(m[0][j])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
 // NATIVE LINKER (M7 spec §22): emit an object, link it with kai_runtime
 // via NativeLinker directly, confirm the executable exists AND runs.
 
@@ -1350,6 +1707,26 @@ int main() {
     testArrayStrElementValueTransportEndToEnd();
     testArrayZeroLengthParameterAndReturnEndToEnd();
     testArrayReturnLiteralEvaluationOrderEndToEnd();
+
+    testNestedArrayBasicReadEndToEnd();
+    testNestedArrayWriteEndToEnd();
+    testNestedArrayImmutableWriteFailsInFrontend();
+    testArrayParameterIndexedWriteFailsInFrontendAtEveryNestingDepth();
+    testNestedArrayRowCopyNoAliasEndToEnd();
+    testNestedArrayDynamicIndexesInBoundsEndToEnd();
+    testNestedArrayOuterDynamicOutOfBoundsTrapsEndToEnd();
+    testNestedArrayInnerDynamicOutOfBoundsTrapsEndToEnd();
+    testNestedArrayNegativeSignedOuterTrapsEndToEnd();
+    testNestedArrayNegativeSignedInnerTrapsEndToEnd();
+    testNestedArrayUnsignedInBoundsEndToEnd();
+    testNestedArrayUnsignedOutOfBoundsTrapsEndToEnd();
+    testNestedArrayReadEvaluationOrderEndToEnd();
+    testNestedArrayWriteEvaluationOrderEndToEnd();
+    testNestedArrayThreeLevelIndexingEndToEnd();
+    testNestedArrayParameterIndexingEndToEnd();
+    testNestedArrayReturnIndexingEndToEnd();
+    testNestedArrayZeroLengthDimensionConstantOOBFailsInFrontend();
+    testNestedArrayZeroLengthDimensionDynamicTrapsEndToEnd();
 
     testNativeLinkerProducesRunnableExecutable();
 
