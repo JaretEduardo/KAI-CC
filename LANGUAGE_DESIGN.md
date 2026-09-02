@@ -184,6 +184,18 @@ narrow, concrete instance of the still-open direction above, not a declaration t
 borrowing model is finalized - see TYPE_SYSTEM.md §19 for the complete rule and DESIGN_QUESTIONS.md for what
 remains open.
 
+**A second, narrower instance (KAI LANGUAGE M10A/M10B):** an immutable slice `[T]` is a NON-OWNING view -
+KAI's first non-owning reference-like value, introduced without a general borrow checker. Rather than
+designing full lifetime analysis, M10B enforces a deliberately restricted rule BY CONSTRUCTION: a slice may
+only be built (via the explicit `slice(array)` builtin) from a direct local or parameter array binding, may
+never be returned from a function, and may never be smuggled out through a returned aggregate that wraps one -
+so a slice's backing storage is always guaranteed to dominate every use of it within the current function
+invocation, with no dedicated checker pass required to prove it. This is explicitly NOT the "exact ownership
+and borrowing model" this section still calls unfinalized above - it is a narrow, source-restricted special
+case, simpler than Rust's own borrow checking by a wide margin, kept only as far as the immediate `slice(...)`
+use case requires. See TYPE_SYSTEM.md's own "Slices" section for the complete rule and DESIGN_QUESTIONS.md for
+what remains open (general slice-return safety, sub-slicing, mutable slices).
+
 ---
 
 ## 5. AI Semantic Tooling

@@ -300,7 +300,21 @@ Type SemanticAnalyzer::resolveSliceTypeSyntax(const ast::SliceTypeSyntax& type, 
 
 SemanticAnalyzer::Scope SemanticAnalyzer::buildPreludeScope(SemanticModel& model) const {
     Scope prelude;
-    for (const std::string_view name : {"print", "panic", "assert"}) {
+    // KAI LANGUAGE M10B: `slice`/`len` join the prelude as ordinary
+    // SymbolKind::Builtin entries, exactly like `print`/`panic`/`assert`
+    // - no new symbol kind, no fabricated FunctionSignature/declaration
+    // site (see this loop's own comment below), and no distinct
+    // resolution mechanism. Unlike `print`/`panic`/`assert` (which
+    // TypeChecker's checkBuiltinCall() leaves fully deferred -
+    // Type::unresolved(), no argument-count/type checking at all), a
+    // CALL to `slice`/`len` specifically gets PRECISE checking
+    // (checkCallExpr() branches on `symbol.name` once it already knows
+    // `symbol.kind == SymbolKind::Builtin` - see checkSliceBuiltinCall()/
+    // checkLenBuiltinCall()), mirroring how LLVMExpressionLowering.cpp's
+    // lowerBuiltinCallExpr() already branches on `builtinSymbol.name` for
+    // codegen. This is a deliberate, narrow generalization of the
+    // existing builtin mechanism - not a new one.
+    for (const std::string_view name : {"print", "panic", "assert", "slice", "len"}) {
         // No signature (nullopt, not a fabricated "() -> ()"), no
         // declaredAt (nullopt - there is no source declaration), no
         // declarationSymbol() mapping (there is no ast::Identifier to

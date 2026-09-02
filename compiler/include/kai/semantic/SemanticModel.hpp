@@ -86,6 +86,48 @@ enum class SemanticErrorKind : std::uint8_t {
     /// design): it is checked at runtime and traps via `llvm.trap`, a
     /// backend/runtime mechanism, never a compile-time diagnostic.
     ArrayIndexOutOfBounds,
+
+    /// KAI LANGUAGE M10B: `s[index]` where `s` is a slice and `index` is
+    /// a compile-time-constant NEGATIVE integer (a directly-negated
+    /// literal, e.g. `s[-1]`) - provably invalid regardless of `s`'s
+    /// runtime length, so this is rejected exactly like a negative
+    /// constant array index. Deliberately a DIFFERENT kind from
+    /// ArrayIndexOutOfBounds (not reused): a slice's length is RUNTIME
+    /// data (TYPE_SYSTEM.md's own "Slices" section), so a POSITIVE
+    /// constant index can never be proven out of bounds here the way an
+    /// array's compile-time length lets one be - only the
+    /// always-invalid-regardless-of-length negative case is caught at
+    /// this layer; reusing "array" wording for a slice diagnostic would
+    /// be actively misleading. See TypeChecker.cpp's checkIndexExpr().
+    SliceIndexOutOfBounds,
+
+    /// KAI LANGUAGE M10B: `s[index] = value` where `s`'s own Type is a
+    /// slice - ALWAYS rejected, regardless of whether the slice BINDING
+    /// itself is mutable (`mut s = slice(a)` may still be validly
+    /// reassigned as a WHOLE view; that is unrelated to element
+    /// mutability). Deliberately a DIFFERENT kind from
+    /// AssignmentToImmutableBinding: that kind describes an immutable
+    /// BINDING, and reusing it here would misreport this case as if `s`
+    /// itself were `let` rather than `mut` when it may well be `mut`.
+    /// See TypeChecker.cpp's checkIndexAssignmentTarget().
+    AssignmentThroughImmutableSlice,
+
+    /// KAI LANGUAGE M10B: `slice(x)` where `x` is not an eligible source
+    /// - anything other than a direct (through transparent ParenExpr
+    /// only) IdentifierExpr resolving to a SymbolKind::Local or
+    /// SymbolKind::Parameter fixed-size-array binding (a non-array type,
+    /// an array literal, a call result, an index/member expression, an
+    /// existing slice, ...). `actualType` records `x`'s own concrete
+    /// Type when one exists (nullopt for a structurally ineligible shape
+    /// like an array literal, where `x`'s own Type may still be a real
+    /// Array - the rejection here is about the SHAPE, not the Type, in
+    /// that case). See TypeChecker.cpp's checkSliceBuiltinCall().
+    InvalidSliceSource,
+
+    /// KAI LANGUAGE M10B: `len(x)` where `x`'s own Type is not one of
+    /// the three accepted domains (a fixed-size array, a slice, or
+    /// `str`). `actualType` records what `x` actually is.
+    InvalidLenOperand,
 };
 
 /// A minimal, message-free description of a semantic failure - the

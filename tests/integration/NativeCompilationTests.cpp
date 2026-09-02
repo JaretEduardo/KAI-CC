@@ -750,14 +750,20 @@ void testUnsupportedForIterableDiagnosticIsActionable() {
     std::filesystem::remove(sourcePath, ignored);
 }
 
-// RELEASE HARDENING M2.1: an unsupported (array/slice) parameter type
-// must ALSO get its own specific message (M2's second
-// recordUnsupportedConstruct() call site, in declareFunction()'s
-// parameter-type loop) - not the generic fallback.
+// RELEASE HARDENING M2.1: an unsupported parameter type must ALSO get its
+// own specific message (M2's second recordUnsupportedConstruct() call
+// site, in declareFunction()'s parameter-type loop) - not the generic
+// fallback. RETARGETED (KAI LANGUAGE M10B): a BARE slice parameter
+// (`values: [i32]`) is now genuinely executable (spec §1/§20) - see
+// SliceCodegenTests.cpp/the M10B native suite below for that positive
+// coverage - so this test now uses an ARRAY that recursively contains a
+// Slice (`[[i32]; 2]`), which remains explicitly unsupported (spec §6:
+// `typeContainsSlice()` in LLVMCodeGenerator.cpp) and still produces the
+// SAME diagnostic message this test has always locked in.
 void testUnsupportedParameterTypeDiagnosticIsActionable() {
     const std::filesystem::path sourcePath = writeTempSource(
         "kai_e2e_unsupported_param.kai",
-        "fn sum(values: [i32]) -> i32 {\n    return 0\n}\nfn main() {\n    print(0)\n}");
+        "fn sum(values: [[i32]; 2]) -> i32 {\n    return 0\n}\nfn main() {\n    print(0)\n}");
     std::error_code ignored;
 
     SourceManager sm;
@@ -1657,6 +1663,350 @@ void testStrUtf8ThroughFunctionBoundaryEndToEnd() {
     KAI_CHECK_STDOUT_BYTES(result.stdoutText, "KAI ✓\n");
 }
 
+// --- KAI LANGUAGE M10B: immutable slice VALUES + checked indexing,
+// native E2E ---
+//
+// M10A gave `[T]` a real semantic Type but no runtime representation or
+// codegen at all. M10B implements the approved scope: `slice(array)` as
+// an explicit, non-owning view construction; local Slice bindings/copy;
+// checked Slice indexed reads; `len(...)` over a fixed array/Slice/str;
+// and Slice function parameters (by value, copy-the-view). Slice
+// RETURNS and any executable aggregate recursively containing a Slice
+// remain deliberately rejected - see tests O/P below.
+
+// A. Basic local Slice: construction, len(), checked reads.
+void testSliceBasicLocalEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_basic.kai",
+                                                       "fn main() {\n"
+                                                       "    let a = [10, 20, 30]\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    print(len(s))\n"
+                                                       "    print(s[0])\n"
+                                                       "    print(s[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n10\n30\n");
+}
+
+// B. Slice copy: `let t = s` copies the VIEW only - both `s` and `t`
+// observe the exact same length/elements (spec §12/§22).
+void testSliceCopyEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_copy.kai",
+                                                       "fn main() {\n"
+                                                       "    let a = [10, 20, 30]\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    let t = s\n"
+                                                       "    print(len(s))\n"
+                                                       "    print(len(t))\n"
+                                                       "    print(s[1])\n"
+                                                       "    print(t[1])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n3\n20\n20\n");
+}
+
+// C. Slice view REBINDING: `mut s` may be reassigned to an entirely
+// different view under KAI's ordinary binding-mutability rules (spec
+// §13) - this rebinds the VIEW, never mutates any array's elements.
+void testSliceRebindingEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_rebind.kai",
+                                                       "fn main() {\n"
+                                                       "    let a = [1, 2, 3]\n"
+                                                       "    let b = [4, 5, 6, 7]\n"
+                                                       "    mut s = slice(a)\n"
+                                                       "    print(len(s))\n"
+                                                       "    s = slice(b)\n"
+                                                       "    print(len(s))\n"
+                                                       "    print(s[3])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n4\n7\n");
+}
+
+// D. Slice function PARAMETER: `sum(slice(values))`, iterating via
+// `for i in 0..len(xs)` (spec §20 - the exact example the spec gives).
+void testSliceParameterSumEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_param_sum.kai",
+                                                       "fn sum(xs: [i32]) -> i32 {\n"
+                                                       "    mut result: i32 = 0\n"
+                                                       "    for i in 0..len(xs) {\n"
+                                                       "        result = result + xs[i]\n"
+                                                       "    }\n"
+                                                       "    return result\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let values = [10, 20, 30]\n"
+                                                       "    print(sum(slice(values)))\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "60\n");
+}
+
+// E. Explicit conversion is REQUIRED: passing a fixed array directly
+// where a Slice parameter is expected remains a genuine, FRONTEND
+// TypeMismatch (spec §2) - never an implicit array-to-slice conversion,
+// and never an LLVM/backend error.
+void testImplicitArrayToSliceConversionFailsInFrontend() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_slice_implicit_conversion.kai",
+                         "fn sum(xs: [i32]) -> i32 {\n    return 0\n}\n"
+                         "fn main() {\n    let a = [1, 2, 3]\n    print(sum(a))\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_slice_implicit.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("type mismatch") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// F. Dynamic signed index, in bounds.
+void testSliceDynamicSignedInBoundsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_dyn_signed_ok.kai",
+                                                       "fn main() {\n"
+                                                       "    let a = [10, 20, 30]\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    mut i: i32 = 1\n"
+                                                       "    print(s[i])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "20\n");
+}
+
+// G. Dynamic signed NEGATIVE index traps - a directly-known negative
+// constant is caught at compile time (see the semantic test suite
+// instead); this is the genuinely dynamic case.
+void testSliceDynamicSignedNegativeTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_dyn_signed_negative.kai",
+                                                       "fn main() {\n"
+                                                       "    let a = [10, 20, 30]\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    mut i: i32 = 0 - 1\n"
+                                                       "    print(s[i])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// H. Dynamic upper-bound OOB traps - against the Slice's own RUNTIME
+// length, not any originating array's compile-time length.
+void testSliceDynamicUpperBoundTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_dyn_upper_oob.kai",
+                                                       "fn main() {\n"
+                                                       "    let a = [10, 20, 30]\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    mut i: i32 = 3\n"
+                                                       "    print(s[i])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// I. Dynamic UNSIGNED index: in bounds succeeds, out of bounds traps.
+void testSliceDynamicUnsignedInBoundsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_dyn_unsigned_ok.kai",
+                                                       "fn main() {\n"
+                                                       "    let a = [10, 20, 30]\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    mut i: u32 = 2\n"
+                                                       "    print(s[i])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "30\n");
+}
+
+void testSliceDynamicUnsignedOutOfBoundsTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_dyn_unsigned_oob.kai",
+                                                       "fn main() {\n"
+                                                       "    let a = [10, 20, 30]\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    mut i: u32 = 3\n"
+                                                       "    print(s[i])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// J. Index evaluated EXACTLY ONCE - a side-effecting index expression
+// must print exactly once, and the final read reflects that ONE call's
+// result.
+void testSliceIndexEvaluationOrderEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_eval_order.kai",
+                                                       "fn idx() -> i32 {\n"
+                                                       "    print(100)\n"
+                                                       "    return 1\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let a = [10, 20, 30]\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    print(s[idx()])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "100\n20\n");
+}
+
+// K. Zero-length Slice: len() is 0, and any element access (constant or
+// dynamic) traps - there is no valid index into an empty view.
+void testSliceZeroLengthLenEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_zero_len.kai",
+                                                       "fn main() {\n"
+                                                       "    let a: [i32; 0] = []\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    print(len(s))\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "0\n");
+}
+
+void testSliceZeroLengthDynamicAccessTrapsEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_zero_len_access.kai",
+                                                       "fn main() {\n"
+                                                       "    let a: [i32; 0] = []\n"
+                                                       "    let s = slice(a)\n"
+                                                       "    mut i = 0\n"
+                                                       "    print(s[i])\n"
+                                                       "    print(888)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode != 0);
+    KAI_CHECK(result.stdoutText.find("888") == std::string::npos);
+}
+
+// L. len(fixed array), including a NESTED array - the outermost
+// dimension's length only, no multidimensional special case (spec §23).
+void testLenOfFixedArrayEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_len_array.kai",
+                                                       "fn main() {\n"
+                                                       "    let a = [1, 2, 3]\n"
+                                                       "    let m = [[1, 2], [3, 4]]\n"
+                                                       "    print(len(a))\n"
+                                                       "    print(len(m))\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n2\n");
+}
+
+// M. len(str) - the existing str byte-length contract, bytes only, no
+// UTF-8 codepoint/grapheme counting (spec §24) - "KAI" is 3 ASCII bytes,
+// "✓" is a 3-byte UTF-8 sequence, so "KAI✓" is 6 bytes total.
+void testLenOfStrEndToEnd() {
+    const CompileAndRunResult result =
+        compileAndRun("kai_e2e_len_str.kai", "fn main() {\n    print(len(\"abc\"))\n    print(len(\"KAI✓\"))\n}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n6\n");
+}
+
+// N. Slice indexed mutation is rejected in the FRONTEND (exit 5) via the
+// dedicated AssignmentThroughImmutableSlice diagnostic - never
+// AssignmentToImmutableBinding (the slice binding itself is `mut` here),
+// and never a backend/LLVM crash.
+void testSliceIndexedMutationFailsInFrontend() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_slice_mutation.kai",
+                         "fn main() {\n    let a = [1, 2, 3]\n    mut s = slice(a)\n    s[0] = 5\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_slice_mutation.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("assignment through immutable slice") != std::string::npos);
+    KAI_CHECK(err.str().find("assignment to immutable binding") == std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// O. A Slice RETURN is rejected cleanly at the BACKEND (exit 6) - it is
+// semantically well-typed (TypeChecker accepts it fine), so this fails
+// at code generation specifically, never a frontend semantic error and
+// never a crash (spec §5/§23).
+void testSliceReturnFailsCleanlyAtBackend() {
+    const std::filesystem::path sourcePath = writeTempSource(
+        "kai_e2e_slice_return.kai", "fn bad(xs: [i32]) -> [i32] {\n    return xs\n}\nfn main() {\n    print(0)\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_slice_return.out", err);
+
+    KAI_CHECK(exitCode == 6);
+    KAI_CHECK(err.str().find("code generation is not yet supported for this function's return type") !=
+              std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// P. An executable aggregate that recursively contains a Slice (an array
+// RETURN type of `[[i32]; 2]`) is rejected cleanly at the BACKEND too -
+// preventing indirect escape of a borrowed view through M8's own array
+// return machinery (spec §6/§28).
+void testArrayContainingSliceEscapeFailsCleanlyAtBackend() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_slice_escape.kai",
+                         "fn make(xs: [i32]) -> [[i32]; 2] {\n    return [xs, xs]\n}\nfn main() {\n    print(0)\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_slice_escape.out", err);
+
+    KAI_CHECK(exitCode == 6);
+    KAI_CHECK(err.str().find("code generation is not yet supported for this function's return type") !=
+              std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
 } // namespace
 
 int main() {
@@ -1743,6 +2093,25 @@ int main() {
     testStrForwardingThroughTwoFunctionsEndToEnd();
     testStrEmbeddedNulThroughFunctionBoundaryEndToEnd();
     testStrUtf8ThroughFunctionBoundaryEndToEnd();
+
+    testSliceBasicLocalEndToEnd();
+    testSliceCopyEndToEnd();
+    testSliceRebindingEndToEnd();
+    testSliceParameterSumEndToEnd();
+    testImplicitArrayToSliceConversionFailsInFrontend();
+    testSliceDynamicSignedInBoundsEndToEnd();
+    testSliceDynamicSignedNegativeTrapsEndToEnd();
+    testSliceDynamicUpperBoundTrapsEndToEnd();
+    testSliceDynamicUnsignedInBoundsEndToEnd();
+    testSliceDynamicUnsignedOutOfBoundsTrapsEndToEnd();
+    testSliceIndexEvaluationOrderEndToEnd();
+    testSliceZeroLengthLenEndToEnd();
+    testSliceZeroLengthDynamicAccessTrapsEndToEnd();
+    testLenOfFixedArrayEndToEnd();
+    testLenOfStrEndToEnd();
+    testSliceIndexedMutationFailsInFrontend();
+    testSliceReturnFailsCleanlyAtBackend();
+    testArrayContainingSliceEscapeFailsCleanlyAtBackend();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }

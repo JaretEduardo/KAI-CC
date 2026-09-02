@@ -87,16 +87,22 @@ compile-time-constant out-of-bounds index is a compile error; a dynamic one trap
 unchecked access, independently checked at EACH level of a nested index), whole-array initialization/
 assignment/self-assignment and array function parameters/returns lowered as a direct LLVM aggregate `[N x T]`
 argument/result (KAI LANGUAGE M8B, post-alpha.2 - no `sret`/`byval`/hidden pointer, no promised stable
-external C ABI), Unit functions, a minimal `print` builtin for those primitive types (lowered to the tiny
+external C ABI), Unit functions, an immutable slice `[T]` (KAI LANGUAGE M10B, post-alpha.2) - explicit
+`slice(array)` construction (never implicit), local storage/copy/rebinding, checked indexed reads with the
+SAME `llvm.trap`-guarded runtime bounds model arrays use, the `len(array | slice | str) -> u64` builtin, and a
+Slice function parameter using the same direct-aggregate ABI strategy `[T; N]` uses (see this section's own
+M10A/M10B note below for what remains deliberately unsupported: Slice returns, and any array recursively
+containing a Slice), a minimal `print` builtin for primitive types (lowered to the tiny
 static C runtime described in §12, `runtime/kai_runtime.c`), native object emission (`LLVMObjectEmitter`),
 and static runtime linking into a real executable (`NativeLinker`, invoking the host C compiler driver) via
 `kaicc <file.kai> -o <output>`.
 
 Still unimplemented (backend/native execution only): general iterable/foreach semantics and array/slice
 iteration (`for x in someArray` - `for` only supports a literal `start..end` integer range, KAI LANGUAGE M6),
-a first-class `Range` value, slices (`[T]` is now a real semantic `TypeKind::Slice` as of KAI LANGUAGE M10A,
-post-alpha.2 - see this section's own M10A note below - but has NO LLVM lowering, no array-to-slice
-conversion, and no slice indexing yet), `Char` as a backend-lowerable value, references, ownership/borrowing,
+a first-class `Range` value, a Slice RETURN type and any array recursively containing a Slice (both a
+deliberate lifetime-safety restriction, not a lowering gap - see this section's own M10A/M10B note below),
+array-to-slice conversion other than the explicit `slice(...)` builtin, sub-slicing, slice-of-slice,
+`Char` as a backend-lowerable value, references, ownership/borrowing,
 structs/enums/generics, `panic`/`assert` lowering, optimization passes, HIR, an LSP, and the higher-level
 `kai` CLI wrapper described in §14 (only `kaicc` itself exists today).
 
@@ -308,6 +314,47 @@ validity concerns (a slice must not outlive the storage it views) are a SEMANTIC
 deliberately limited lifetime checker must answer - they are not solved, or even touched, by choosing an LLVM
 pointer representation, and KAI still has no general borrow checker of any kind. See TYPE_SYSTEM.md's own
 "Slices" section and DESIGN_QUESTIONS.md's own M10A resolution/open-questions.
+
+**Immutable slice VALUES (KAI LANGUAGE M10B, post-alpha.2):** `lowerType()`'s Slice case now returns the real
+`{ptr, i64}` struct TYPE_SYSTEM.md's own "Slices" section predicted - a pointer to the first element plus a
+runtime element COUNT (never a byte length, unlike Str's otherwise-identical-looking `{ptr, i64}` shape, and
+never a heap allocation or refcount). Two new builtins join the existing `print`/`panic`/`assert` prelude
+(`SemanticAnalyzer::buildPreludeScope()`) with the SAME `SymbolKind::Builtin` mechanism, no new symbol kind:
+`slice(array)` and `len(x)`. Unlike `print`/`panic`/`assert` (which `TypeChecker::checkBuiltinCall()` leaves
+fully deferred - `Type::unresolved()`, no argument-count/type checking at all), `checkCallExpr()` now branches
+on the resolved Builtin `Symbol::name` (mirroring how `LLVMExpressionLowering.cpp`'s own
+`lowerBuiltinCallExpr()` already branched on `builtinSymbol.name` for `print` alone) to reach
+`checkSliceBuiltinCall()`/`checkLenBuiltinCall()`, each with PRECISE checking - a deliberate, narrow
+generalization of the builtin mechanism, not a new one, and neither builtin ever appears as a fake declared
+symbol in semantic tooling output (no AST declaration node exists for either, exactly like the three existing
+builtins).
+
+`slice(x)`'s source restriction is what makes the M10B lifetime model enforceable with NO dedicated lifetime
+checker at all: `x` must be a direct (through transparent `ParenExpr` only) identifier resolving to a
+`SymbolKind::Local` or `SymbolKind::Parameter` array binding - never an array literal, a call result, an
+index/member expression, or an existing slice (`InvalidSliceSource` otherwise) - so a Slice's `ptr` field is
+always, structurally, an address inside storage that already belongs to the CURRENT function invocation
+(`findLocalSlot()`'s existing alloca, the same M8B-bound storage array parameters already use - never a copy
+into a temporary). Combined with rejecting a Slice RETURN type unconditionally, and rejecting any executable
+array that recursively contains a Slice (`LLVMCodeGenerator::typeContainsSlice()`, a narrow recursive
+predicate checked at declareFunction()'s own parameter/return gates and generateVarDeclStmt()'s own local
+gate - never inside `lowerType()` itself, which stays fully permissive so a bare Slice parameter/local is
+never accidentally caught by the SAME guard that blocks an array wrapping one), a Slice can never be observed
+to outlive the invocation whose storage it views - a real, ENFORCED restriction, not merely a documented
+invariant as it was under M10A, but still deliberately narrow: no general lifetime/provenance analysis exists,
+and none of KAI's future borrow-checking direction is implied to have arrived.
+
+Checked Slice indexing reuses array indexing's own bounds-check CFG construction directly:
+`lowerArrayElementAddress()`'s previously inline bounds-check logic (normalize-index/non-negativity-check/
+upper-bound-compare/trap-block construction) was factored out into a shared `lowerCheckedIndexBounds()` helper
+- a pure, behavior-preserving refactor (identical generated IR for the existing array path) - so
+`lowerSliceIndexExpr()` reuses it with the Slice's own RUNTIME length field (`CreateExtractValue` index 1)
+in place of an array's compile-time length constant, and a single-index GEP into the Slice's own data pointer
+(`CreateExtractValue` index 0) in place of an array's two-index `{0, i}` GEP into its whole-aggregate storage.
+`len(x)` for an ARRAY argument deliberately never lowers/inspects the array's own VALUE at all beyond
+evaluating it once for side effects - the length comes from the semantic Type's own `arrayLength()` alone
+(compile-time structural data, unchanged since M7A), which also means `len()` never needs to materialize an
+executable array-of-Slice aggregate merely to answer a question the TYPE already answered.
 
 Example errors:
 

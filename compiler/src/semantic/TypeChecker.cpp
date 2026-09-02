@@ -258,6 +258,22 @@ const ast::Expr& unwrapParenExpr(const ast::Expr& expr) {
 // never a separate rule. Returns nullptr for any other root shape (a
 // call/member/... base) - M9 does not broaden supported roots beyond a
 // plain identifier chain.
+// KAI LANGUAGE M10B spec §3: `slice(x)`'s eligible-source shape - a
+// direct (through transparent ParenExpr only) IdentifierExpr, mirroring
+// unwrapAssignmentTargetIdentifier's own exact structural-only unwrap
+// discipline. A SEPARATE, independent copy (not a reuse) because it
+// identifies a source-expression shape for a completely different
+// construct - an argument to a builtin call, never an assignment target.
+const ast::IdentifierExpr* unwrapSliceSourceIdentifier(const ast::Expr& expr) {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return unwrapSliceSourceIdentifier(static_cast<const ast::ParenExpr&>(expr).inner());
+    }
+    if (expr.kind() == ast::ExprKind::Identifier) {
+        return &static_cast<const ast::IdentifierExpr&>(expr);
+    }
+    return nullptr;
+}
+
 const ast::IdentifierExpr* unwrapIndexAssignmentRootIdentifier(const ast::Expr& expr) {
     if (expr.kind() == ast::ExprKind::Paren) {
         return unwrapIndexAssignmentRootIdentifier(static_cast<const ast::ParenExpr&>(expr).inner());
@@ -1008,6 +1024,16 @@ Type TypeChecker::checkCallExpr(const ast::CallExpr& call, SemanticModel& model)
             }
             if (symbol.kind == SymbolKind::Builtin) {
                 inferExpr(call.callee(), model);
+                // KAI LANGUAGE M10B: `slice`/`len` get PRECISE, dedicated
+                // checking - every other Builtin (`print`/`panic`/
+                // `assert`) keeps checkBuiltinCall()'s existing, fully
+                // deferred behavior unchanged.
+                if (symbol.name == "slice") {
+                    return checkSliceBuiltinCall(call, model);
+                }
+                if (symbol.name == "len") {
+                    return checkLenBuiltinCall(call, model);
+                }
                 return checkBuiltinCall(call, model);
             }
             // Parameter/Local: not a function/builtin - fall through to
@@ -1062,6 +1088,123 @@ Type TypeChecker::checkBuiltinCall(const ast::CallExpr& call, SemanticModel& mod
         inferExpr(*argument, model);
     }
     const Type result = Type::unresolved();
+    model.setExpressionType(call, result);
+    return result;
+}
+
+Type TypeChecker::checkSliceBuiltinCall(const ast::CallExpr& call, SemanticModel& model) const {
+    if (call.arguments().size() != 1) {
+        // Every syntactically-present argument is still checked (spec
+        // #15's own "independent diagnostics are never suppressed by a
+        // wrong count" discipline, mirrored from checkUserFunctionCall()).
+        for (const auto& argument : call.arguments()) {
+            inferExpr(*argument, model);
+        }
+        model.addError(SemanticError{
+            SemanticErrorKind::InvalidArgumentCount,
+            call.span(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+        });
+        const Type result = Type::error();
+        model.setExpressionType(call, result);
+        return result;
+    }
+
+    const ast::Expr& argument = *call.arguments()[0];
+    const Type argumentType = inferExpr(argument, model);
+
+    Type result = Type::error();
+    if (argumentType.isError()) {
+        // Already reported upstream (e.g. an unresolved identifier) - no
+        // redundant InvalidSliceSource on top of it.
+        result = Type::error();
+    } else if (argumentType.isUnresolved()) {
+        // A still-deferred shape (e.g. a bare Function/Builtin name) -
+        // deferred here too, no new diagnostic guessed on top of it.
+        result = Type::unresolved();
+    } else {
+        // KAI LANGUAGE M10B spec §3: the ONLY eligible source is a direct
+        // identifier resolving to a Local or Parameter binding whose OWN
+        // Type is a fixed-size array - an array LITERAL, a call result,
+        // an index/member expression, an existing slice, or any other
+        // concrete non-array Type are all InvalidSliceSource. This is
+        // deliberately narrow (spec #3: "do not recursively invent
+        // general borrow-source analysis") - a call/index/member
+        // expression is rejected purely by SHAPE (not a re-derivable
+        // "maybe it's fine sometimes" judgment call), so `argumentType`
+        // itself may well be a perfectly real Array Type in those cases;
+        // the rejection is about provenance, not about `argumentType`.
+        const ast::IdentifierExpr* rootIdentifier = unwrapSliceSourceIdentifier(argument);
+        const std::optional<SymbolId> rootId = rootIdentifier ? model.resolution(*rootIdentifier) : std::nullopt;
+        const bool isEligibleSource =
+            rootId.has_value() &&
+            (model.symbol(*rootId).kind == SymbolKind::Local || model.symbol(*rootId).kind == SymbolKind::Parameter) &&
+            argumentType.isArray();
+
+        if (isEligibleSource) {
+            result = model.internSlice(model.arrayElementType(argumentType));
+        } else {
+            model.addError(SemanticError{
+                SemanticErrorKind::InvalidSliceSource,
+                argument.span(),
+                std::nullopt,
+                std::nullopt,
+                argumentType,
+            });
+            result = Type::error();
+        }
+    }
+
+    model.setExpressionType(call, result);
+    return result;
+}
+
+Type TypeChecker::checkLenBuiltinCall(const ast::CallExpr& call, SemanticModel& model) const {
+    if (call.arguments().size() != 1) {
+        for (const auto& argument : call.arguments()) {
+            inferExpr(*argument, model);
+        }
+        model.addError(SemanticError{
+            SemanticErrorKind::InvalidArgumentCount,
+            call.span(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+        });
+        const Type result = Type::error();
+        model.setExpressionType(call, result);
+        return result;
+    }
+
+    const ast::Expr& argument = *call.arguments()[0];
+    const Type argumentType = inferExpr(argument, model);
+
+    Type result = Type::error();
+    if (argumentType.isError()) {
+        result = Type::error();
+    } else if (argumentType.isUnresolved()) {
+        result = Type::unresolved();
+    } else if (argumentType.isArray() || argumentType.isSlice() || argumentType.isStr()) {
+        // KAI LANGUAGE M10B spec §8/§11: exactly these three domains -
+        // never a generic reflection/`sizeof` mechanism, and `str` is
+        // never reinterpreted as `[u8]` to reach this path (its own
+        // isStr() check is independent of isArray()/isSlice()). The
+        // result is always Type::u64() regardless of which domain
+        // matched - never a signed/pointer-sized/platform-dependent type.
+        result = Type::u64();
+    } else {
+        model.addError(SemanticError{
+            SemanticErrorKind::InvalidLenOperand,
+            argument.span(),
+            std::nullopt,
+            std::nullopt,
+            argumentType,
+        });
+        result = Type::error();
+    }
+
     model.setExpressionType(call, result);
     return result;
 }
@@ -1302,9 +1445,46 @@ Type TypeChecker::checkIndexAssignmentTarget(const ast::AssignmentExpr& assignme
     const ast::Expr& value = assignment.value();
 
     // Reuses the EXACT same read-path validation a plain `xs[index]`
-    // gets - object-is-array, index-domain, compile-time bounds - never
-    // a second copy of those rules for the assignment-target shape.
+    // gets - object-is-array-or-slice, index-domain, compile-time bounds
+    // - never a second copy of those rules for the assignment-target
+    // shape.
     const Type elementType = checkIndexExpr(indexTarget, model);
+
+    // KAI LANGUAGE M10B spec §14: `s[index] = value` for a SLICE-typed
+    // object is ALWAYS rejected - slice elements are immutable
+    // regardless of the slice BINDING's own mutability (`mut s =
+    // slice(a)` may later be reassigned as a WHOLE view; that is
+    // ordinary value reassignment, unrelated to element mutability - see
+    // checkVariableAssignmentTarget()). Deliberately a DIFFERENT
+    // diagnostic from AssignmentToImmutableBinding (which describes an
+    // immutable BINDING) - misreporting this as if the BINDING itself
+    // were immutable would be actively wrong when `s` is `mut`.
+    // `indexTarget.object()`'s Type was already computed exactly once,
+    // inside checkIndexExpr() above (via its own inferExpr() call) -
+    // model.typeOf() here is a side-effect-free lookup of that
+    // already-recorded fact, never a second type-check pass (same
+    // discipline lowerPrintCall()/lowerLenCall() already use in
+    // LLVMExpressionLowering.cpp to read an argument's own recorded
+    // Type). The new diagnostic is skipped (though the assignment still
+    // becomes Error) when checkIndexExpr() already reported a more
+    // specific problem with the INDEX itself (elementType Error) - never
+    // a redundant second diagnostic for one wrong statement.
+    const Type objectType = model.typeOf(indexTarget.object()).value_or(Type::unresolved());
+    if (objectType.isSlice()) {
+        inferExpr(value, model);
+        if (!elementType.isError()) {
+            model.addError(SemanticError{
+                SemanticErrorKind::AssignmentThroughImmutableSlice,
+                indexTarget.object().span(),
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+            });
+        }
+        const Type result = Type::error();
+        model.setExpressionType(assignment, result);
+        return result;
+    }
 
     // M7B spec §12, generalized by KAI LANGUAGE M9 spec §9: `xs[index] =
     // value` where `xs` is a direct (through transparent ParenExpr only)
@@ -1545,11 +1725,12 @@ Type TypeChecker::checkIndexExpr(const ast::IndexExpr& index, SemanticModel& mod
         result = Type::error();
     } else if (objectType.isUnresolved() || indexType.isUnresolved()) {
         result = Type::unresolved();
-    } else if (!objectType.isArray()) {
-        // Array indexing and `str` indexing are separate, unrelated
-        // features (M7B spec §3) - a `str`-typed (or any other non-
-        // array) `object` is rejected here, never silently routed into
-        // some string-indexing behavior that does not exist.
+    } else if (!objectType.isArray() && !objectType.isSlice()) {
+        // Array/slice indexing and `str` indexing are separate, unrelated
+        // features (M7B spec §3, extended to Slice by M10B spec §15) - a
+        // `str`-typed (or any other non-array, non-slice) `object` is
+        // rejected here, never silently routed into some string-indexing
+        // behavior that does not exist.
         model.addError(SemanticError{
             SemanticErrorKind::InvalidIndexTarget,
             index.object().span(),
@@ -1567,7 +1748,7 @@ Type TypeChecker::checkIndexExpr(const ast::IndexExpr& index, SemanticModel& mod
             indexType,
         });
         result = Type::error();
-    } else {
+    } else if (objectType.isArray()) {
         const Type elementType = model.arrayElementType(objectType);
         const std::uint64_t length = model.arrayLength(objectType);
 
@@ -1589,6 +1770,35 @@ Type TypeChecker::checkIndexExpr(const ast::IndexExpr& index, SemanticModel& mod
         if (outOfBounds) {
             model.addError(SemanticError{
                 SemanticErrorKind::ArrayIndexOutOfBounds,
+                index.index().span(),
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+            });
+            result = Type::error();
+        } else {
+            result = elementType;
+        }
+    } else {
+        // KAI LANGUAGE M10B: `s[index]` for a Slice `s` (spec §15/§17).
+        // Unlike an array, a slice's length is RUNTIME data (TYPE_SYSTEM.md's
+        // own "Slices" section) - only a compile-time-KNOWN NEGATIVE
+        // index can be proven invalid here, regardless of `s`'s actual
+        // runtime length; a non-negative constant (however large) is
+        // left to the SAME runtime check a dynamic index already needs
+        // (LLVMCodeGenerator's own checked lowering), never a compile-time
+        // SemanticError - there is no general constant-folding/provenance
+        // analysis to recover an originating array's length here.
+        const Type elementType = model.sliceElementType(objectType);
+
+        bool provablyNegative = false;
+        if (const std::optional<ConstantIndexValue> constant = tryDecodeConstantIndex(index.index())) {
+            provablyNegative = constant->isNegative && constant->magnitude != 0;
+        }
+
+        if (provablyNegative) {
+            model.addError(SemanticError{
+                SemanticErrorKind::SliceIndexOutOfBounds,
                 index.index().span(),
                 std::nullopt,
                 std::nullopt,

@@ -262,6 +262,19 @@ private:
     /// Fails explicitly for any parameter or return semantic Type
     /// lowerType() does not model - never a re-resolution of the
     /// parameter/return TypeSyntax.
+    ///
+    /// KAI LANGUAGE M10B: a bare Slice PARAMETER is fully supported
+    /// (lowerType()'s own Slice case), but the RETURN type rejects Slice
+    /// outright (spec §5 - "Slice returns remain unsupported," a
+    /// deliberate lifetime-safety restriction, not a lowering gap:
+    /// lowerType() itself could lower it fine), and BOTH the parameter
+    /// and return checks reject an Array that recursively contains a
+    /// Slice anywhere in its nested element chain (spec §6 -
+    /// `typeContainsSlice()`) - a bare Slice parameter is NOT rejected by
+    /// that second check; only an Array wrapping one is. Both checks run
+    /// BEFORE calling lowerType() at all, and use the SAME actionable
+    /// unsupportedConstruct() messages this method already used before
+    /// M10B - no new diagnostic wording, no crash, no malformed IR.
     bool declareFunction(const ast::FunctionDecl& fn, const semantic::SemanticModel& model);
 
     /// PASS 2: looks up `fn`'s already-declared llvm::Function (created
@@ -420,6 +433,23 @@ private:
     /// allocating anything - for a Unit-typed local (LLVM void is not a
     /// storable value; see this class's own header comment) or any other
     /// semantic Type lowerType() does not model.
+    ///
+    /// KAI LANGUAGE M10B: a bare Slice LOCAL (`let s = slice(a)`) is
+    /// fully supported - lowerType() gives it a real `{ptr,i64}` type,
+    /// and the ordinary generic lowerExpr()-then-store path below handles
+    /// it exactly like any other non-array Type, with zero special-casing
+    /// needed. An ARRAY local that recursively contains a Slice anywhere
+    /// in its nested element chain (`typeContainsSlice()`, spec §6/§29 -
+    /// e.g. `let m = [s, s]`, an ordinary ArrayLiteralExpr whose elements
+    /// happen to be Slice-typed) is rejected BEFORE calling lowerType()
+    /// at all - the same restriction declareFunction() enforces for
+    /// parameters/returns, extended here to locals so an M8-style array
+    /// aggregate can never silently carry a borrowed view through LOCAL
+    /// storage either. This fails the same silent way an unsupported
+    /// scalar local Type already did before M10B (no
+    /// recordUnsupportedConstruct() call - that mechanism is reserved for
+    /// parameter/return/for-iterable failures only, an existing,
+    /// unchanged convention).
     bool generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llvm::Function& function, llvm::IRBuilder<>& builder,
                               const semantic::SemanticModel& model);
 
@@ -574,6 +604,30 @@ private:
     std::optional<llvm::Value*> lowerAssignmentExpr(const ast::AssignmentExpr& assignment,
                                                      const semantic::SemanticModel& model, llvm::IRBuilder<>& builder);
 
+    /// KAI LANGUAGE M7B, factored out for reuse by Slice indexing in
+    /// M10B: the shared bounds-check CFG shape both array and slice
+    /// checked indexing need - normalize `indexValue` to an unsigned i64
+    /// (CreateSExtOrTrunc/CreateZExtOrTrunc, safe regardless of the
+    /// index's own concrete width, including i64/u64 itself), a signed
+    /// index ADDITIONALLY required to be non-negative at its OWN width
+    /// first (M7B spec §6), compare against `runtimeLength` (already an
+    /// i64 value - a compile-time ConstantInt for an array's own known
+    /// length, or a Slice's runtime-extracted length field for M10B),
+    /// `llvm.trap` + `unreachable` on failure (M7B spec §5 - NEVER KAI
+    /// `panic`, no unwinding, no recovery). Leaves `builder` positioned
+    /// in the in-bounds successor block on return, and returns the
+    /// normalized-to-i64 index value for the caller's own subsequent GEP
+    /// - the ONE remaining difference between array indexing (a two-index
+    /// `{0, i}` GEP into the array's own storage) and slice indexing (a
+    /// one-index `{i}` GEP into the Slice's own extracted data pointer),
+    /// which this shared helper deliberately does not decide. Extracting
+    /// this changes NO generated IR for the existing array path (same
+    /// block names, same instruction sequence) - a pure, behavior-
+    /// preserving refactor to avoid a second, drifting copy of this exact
+    /// logic once Slice indexing needed it too.
+    llvm::Value* lowerCheckedIndexBounds(llvm::Value* indexValue, semantic::Type indexSemanticType,
+                                          llvm::Value* runtimeLength, llvm::IRBuilder<>& builder);
+
     /// KAI LANGUAGE M7B, generalized to arbitrary nesting depth by M9:
     /// the checked element ADDRESS `xs[index]` names - shared by both a
     /// plain read (lowerIndexExpr()) and an indexed write
@@ -645,9 +699,36 @@ private:
                                                                   llvm::IRBuilder<>& builder);
 
     /// `xs[index]` as a value-producing expression: the checked element
-    /// address (lowerArrayElementAddress()) followed by one load.
+    /// address (lowerArrayElementAddress()) followed by one load, for an
+    /// Array object - or, for a Slice object (KAI LANGUAGE M10B),
+    /// delegates to lowerSliceIndexExpr() instead. Dispatches on
+    /// `model.typeOf(index.object())` (already recorded by TypeChecker's
+    /// earlier pass - a side-effect-free lookup, not a second type-check).
+    /// Slice indexed WRITES never reach either path: TypeChecker's own
+    /// checkIndexAssignmentTarget() makes `s[i] = v` unconditionally
+    /// Type::error() (AssignmentThroughImmutableSlice), so lowerExpr()'s
+    /// own top-level Error-gate rejects it before any codegen dispatch -
+    /// lowerIndexAssignmentExpr() below is therefore reached ONLY for an
+    /// Array object, exactly as before M10B.
     std::optional<llvm::Value*> lowerIndexExpr(const ast::IndexExpr& index, const semantic::SemanticModel& model,
                                                 llvm::IRBuilder<>& builder);
+
+    /// KAI LANGUAGE M10B: `s[index]` for a Slice `s` - mirrors
+    /// lowerArrayElementAddress()'s exact checked-indexing discipline
+    /// (index evaluated exactly once, bounds check strictly before any
+    /// element address is computed, `llvm.trap` on failure via the SAME
+    /// lowerCheckedIndexBounds() helper array indexing now also uses),
+    /// but the base is a Slice VALUE (lowered via the ordinary lowerExpr()
+    /// path, not an alloca) rather than array storage: its own `ptr`
+    /// field (CreateExtractValue index 0) is the element-address base,
+    /// and its own `len` field (CreateExtractValue index 1) is the
+    /// RUNTIME length the bounds check compares against - never a
+    /// compile-time constant, unlike an array's own known length. The
+    /// final element address is a single-index GEP (`ptr + i`), not the
+    /// two-index `{0, i}` GEP array indexing uses, since `ptr` already
+    /// addresses the first element directly.
+    std::optional<llvm::Value*> lowerSliceIndexExpr(const ast::IndexExpr& index, const semantic::SemanticModel& model,
+                                                     llvm::IRBuilder<>& builder);
 
     /// `xs[index] = value` for a mutable local array binding
     /// (dispatched to from lowerAssignmentExpr() when the target is an
@@ -697,25 +778,35 @@ private:
     ///   std::optional<llvm::Value*>{nullptr} - Unit success, never a
     ///   fabricated LLVM value - for a call to a Unit-returning function.
     ///
-    ///   SymbolKind::Builtin (M6): delegates to lowerBuiltinCallExpr() -
-    ///   `type` (the CALL's own semantic Type) is not used for this path,
-    ///   since TypeChecker's checkBuiltinCall() always records
-    ///   Type::unresolved() for a builtin CallExpr itself, regardless of
-    ///   its arguments' own concrete types (see TypeChecker.cpp) - see
-    ///   lowerExpr()'s own comment on the narrow Unresolved-gate exception
-    ///   this requires.
+    ///   SymbolKind::Builtin (M6, extended by M10B): delegates to
+    ///   lowerBuiltinCallExpr(), now WITH `type` forwarded - `print`/
+    ///   `panic`/`assert` still ignore it (TypeChecker's checkBuiltinCall()
+    ///   still always records Type::unresolved() for those, unchanged),
+    ///   but `slice`/`len` (KAI LANGUAGE M10B) have a real, concrete
+    ///   CallExpr Type (checkSliceBuiltinCall()/checkLenBuiltinCall() in
+    ///   TypeChecker.cpp) that lowerSliceCall() needs directly, exactly
+    ///   the way lowerArrayLiteralExpr()/every other Type-consuming
+    ///   lowerX() method already receives it - see lowerExpr()'s own
+    ///   comment on the narrow Unresolved-gate exception `print` alone
+    ///   still requires (slice/len never need it, since their CallExpr
+    ///   Type is concrete).
     std::optional<llvm::Value*> lowerCallExpr(const ast::CallExpr& call, semantic::Type type,
                                                const semantic::SemanticModel& model, llvm::IRBuilder<>& builder);
 
     /// Dispatches a CallExpr already confirmed (by lowerCallExpr(), via
     /// `model.resolution()`/SymbolKind - never identifier text) to resolve
-    /// to `builtinSymbol` (SymbolKind::Builtin). M6 recognizes exactly one
-    /// builtin by its resolved Symbol::name: `print` (see
-    /// lowerPrintCall()). Every other recognized builtin (`panic`,
-    /// `assert`, ...) fails generation explicitly - M6 spec §17: never a
-    /// silently-skipped/no-op builtin call.
+    /// to `builtinSymbol` (SymbolKind::Builtin), branching on
+    /// `builtinSymbol.name`: `print` (lowerPrintCall()); `slice`
+    /// (lowerSliceCall(), KAI LANGUAGE M10B); `len` (lowerLenCall(), KAI
+    /// LANGUAGE M10B). Every other recognized builtin (`panic`, `assert`,
+    /// ...) fails generation explicitly - M6 spec §17: never a
+    /// silently-skipped/no-op builtin call. `type` is the CALL's own
+    /// semantic Type (see lowerCallExpr()'s own updated comment above) -
+    /// unused by lowerPrintCall() (print stays Type::unresolved()),
+    /// required by lowerSliceCall() (a slice(...) call's own concrete
+    /// Slice Type - see its own doc comment).
     std::optional<llvm::Value*> lowerBuiltinCallExpr(const ast::CallExpr& call, const semantic::Symbol& builtinSymbol,
-                                                      const semantic::SemanticModel& model,
+                                                      semantic::Type type, const semantic::SemanticModel& model,
                                                       llvm::IRBuilder<>& builder);
 
     /// Lowers `print(x)` to a call into this project's own tiny native
@@ -751,6 +842,50 @@ private:
     std::optional<llvm::Value*> lowerPrintCall(const ast::CallExpr& call, const semantic::SemanticModel& model,
                                                 llvm::IRBuilder<>& builder);
 
+    /// KAI LANGUAGE M10B: `slice(x)` - TypeChecker's checkSliceBuiltinCall()
+    /// already guarantees exactly one argument that is a direct (through
+    /// transparent ParenExpr only) identifier resolving to a
+    /// SymbolKind::Local or SymbolKind::Parameter fixed-size-array
+    /// binding, so this method trusts that shape structurally (the same
+    /// "frontend already validated it" discipline lowerArrayElementAddress()
+    /// uses for its own root-identifier checks) rather than re-deriving
+    /// it. Obtains the address of the array's OWN backing storage
+    /// directly - `findLocalSlot()`'s existing alloca (a local's own
+    /// entry-block alloca, or a parameter's own M8B-bound storage) -
+    /// never a copy into a temporary, never a heap allocation (spec §25):
+    /// the resulting Slice's `ptr` field always points into storage that
+    /// is genuinely part of the current function invocation. `len` is
+    /// the array's own COMPILE-TIME length (`arrayType->getNumElements()`
+    /// - never inspected at runtime, mirroring how the array's length is
+    /// already compile-time structural data throughout this codebase).
+    /// Builds the `{ptr, i64}` aggregate via CreateInsertValue (a
+    /// PoisonValue base, immediately fully overwritten) since `ptr` is a
+    /// runtime SSA address, never a compile-time constant the way a
+    /// string literal's own {ptr,i64} can be (lowerLiteralExpr()'s own
+    /// ConstantStruct::get() approach does not apply here).
+    std::optional<llvm::Value*> lowerSliceCall(const ast::CallExpr& call, semantic::Type type,
+                                                const semantic::SemanticModel& model, llvm::IRBuilder<>& builder);
+
+    /// KAI LANGUAGE M10B: `len(x)` - TypeChecker's checkLenBuiltinCall()
+    /// already guarantees exactly one argument whose Type is a fixed-size
+    /// array, a Slice, or `str`. For an ARRAY argument, the length is
+    /// COMPILE-TIME structural data (part of the Type itself since M7A) -
+    /// `x` is still lowered once, via lowerExpr(), so any side effect in
+    /// evaluating it still happens exactly once (this codebase's
+    /// established "never silently skip an expression's evaluation"
+    /// discipline), but the resulting VALUE is deliberately discarded;
+    /// the length itself comes from `model.arrayLength()` alone, and the
+    /// array's own VALUE/aggregate structure (which may recursively
+    /// contain a Slice - `typeContainsSlice()` guards this specific case
+    /// defensively, returning std::nullopt rather than ever materializing
+    /// such an aggregate) is never otherwise inspected. For a Slice or
+    /// `str` argument (both an ordinary `{ptr, i64}` aggregate already),
+    /// the runtime length is the SAME field-1 CreateExtractValue()
+    /// lowerPrintCall() already established for Str. Result is always a
+    /// plain i64 value (Type::u64()'s own LLVM lowering).
+    std::optional<llvm::Value*> lowerLenCall(const ast::CallExpr& call, const semantic::SemanticModel& model,
+                                              llvm::IRBuilder<>& builder);
+
     /// Maps a semantic::Type to its LLVM counterpart, covering every
     /// primitive scalar kind this milestone's Type models (Unit and the
     /// integer/float/bool kinds) - a small, already-trivial table.
@@ -774,7 +909,40 @@ private:
     /// special-casing needed either way. `model` is required for this
     /// one case only - every primitive kind ignores it entirely, so any
     /// call site's own model is always a valid argument.
+    ///
+    /// KAI LANGUAGE M10B: Slice now lowers to a real `{ ptr, i64 }`
+    /// aggregate (an opaque data pointer to the first element, plus a
+    /// runtime element COUNT - never a byte length, unlike Str's own
+    /// otherwise-identical-looking `{ptr, i64}` shape) - internal only,
+    /// never a promised stable external C ABI, and never source-visible
+    /// struct syntax (TYPE_SYSTEM.md's own "Slices" section). This makes
+    /// lowerType() itself fully permissive for Slice, INCLUDING when
+    /// nested inside an Array (e.g. `[[i32]; 2]` now mechanically lowers
+    /// too, via Array's own existing recursive call into this function) -
+    /// deliberately so: keeping lowerType() itself simple and exhaustive
+    /// over TypeKind is more robust than threading an "am I nested"
+    /// context parameter through it. The language-level restriction that
+    /// an EXECUTABLE array/parameter/return/local may never recursively
+    /// contain a Slice is enforced separately and explicitly, at the
+    /// specific call sites that matter (declareFunction()'s parameter/
+    /// return checks, generateVarDeclStmt()'s own local check) via
+    /// typeContainsSlice() below - never inside lowerType() itself.
     llvm::Type* lowerType(semantic::Type type, const semantic::SemanticModel& model);
+
+    /// KAI LANGUAGE M10B spec §6/§29: true if `type` IS a Slice, or is an
+    /// Array whose element type recursively (through arbitrary nesting)
+    /// is or contains a Slice - e.g. `[i32]` itself, `[[i32]; 2]`,
+    /// `[[[i32]]; 4]`. Used ONLY to reject specific EXECUTABLE positions
+    /// this milestone does not support (an array-typed function
+    /// parameter/return/local that recursively contains a Slice - a bare
+    /// Slice parameter/return/local is a SEPARATE, explicitly SUPPORTED
+    /// case each call site checks for on its own, never through this
+    /// predicate alone), never used to gate lowerType() itself (see its
+    /// own doc comment above for why). This prevents an M8-style
+    /// recursive array aggregate from silently letting a borrowed Slice
+    /// view escape through nested/returned array storage before any
+    /// lifetime/provenance analysis exists to make that sound.
+    bool typeContainsSlice(semantic::Type type, const semantic::SemanticModel& model) const;
 
     /// Allocates `type`-typed storage at the START of `function`'s entry
     /// block, regardless of `builder`'s own current insertion point -

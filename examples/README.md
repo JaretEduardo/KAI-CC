@@ -22,6 +22,7 @@ after a release build).
 | `loops.kai` | `while`, then a `for` loop over an integer literal range (KAI LANGUAGE M6, post-alpha.2) | `0`,`1`,`2`,`3`,`4` (from `while`), then `0`,`1`,`2`,`3`,`4` again (from `for n in 0..5`) |
 | `fibonacci.kai` | Recursion + a `for` loop over an integer literal range (KAI LANGUAGE M6, post-alpha.2), printing the first 10 Fibonacci numbers | `0`,`1`,`1`,`2`,`3`,`5`,`8`,`13`,`21`,`34` |
 | `arrays.kai` | Fixed-size arrays: a literal `[i32; 4]`, checked indexed reads, a checked indexed write inside a `for`-range loop (KAI LANGUAGE M7B, post-alpha.2), an EXISTING array value passed by value into/out of a `sum(xs: [i32; 4]) -> i32` function (KAI LANGUAGE M8B, post-alpha.2), and a nested `[[i32; 2]; 2]` with a two-level checked read and a two-level checked write (KAI LANGUAGE M9, post-alpha.2) | `10`, `40`, `100`, `10`,`20`,`30`,`40`, `1`,`1`,`1`, `2`, `99` |
+| `slices.kai` | Immutable slice VALUES (KAI LANGUAGE M10B, post-alpha.2): explicit `slice(values)` construction over a fixed array (no implicit array-to-slice conversion), `len(s)`, and a `sum(xs: [i32]) -> i32` Slice function parameter iterating via `for i in 0..len(xs)` | `4`, `100` |
 
 ## Diagnostic example (intentionally invalid)
 
@@ -37,18 +38,19 @@ not deleted, but they do **not** compile with the current `kaicc` and are
 **not** included in release artifacts. Each currently fails for one of
 these reasons:
 
-- **Slices remain unsupported for NATIVE EXECUTION; fixed-size arrays -
-  including nested ones - are now fully executable, including across
-  function boundaries.** KAI LANGUAGE M7B (post-alpha.2) made a LOCAL
-  fixed-size array `[T; N]` fully executable - literal creation, checked
-  indexed reads/writes, integration with an M6 `for`-range loop - see
-  `arrays.kai` above. KAI LANGUAGE M8A (post-alpha.2) then resolved the
-  remaining LANGUAGE semantics: fixed arrays are value types (`let b = a`
-  / whole-array `a = b` are ordinary value copies, no aliasing), and a
-  function parameter/return of array type is likewise semantically by
-  value with exact structural type matching. KAI LANGUAGE M8B
-  (post-alpha.2) then implemented all of that as real native code:
-  whole-array initialization/assignment/self-assignment, array function
+- **Fixed-size arrays and immutable slices are now both fully executable,
+  including across function boundaries; only slice RETURNS and Slice-
+  containing aggregates remain deliberately unsupported.** KAI LANGUAGE
+  M7B (post-alpha.2) made a LOCAL fixed-size array `[T; N]` fully
+  executable - literal creation, checked indexed reads/writes,
+  integration with an M6 `for`-range loop - see `arrays.kai` above. KAI
+  LANGUAGE M8A (post-alpha.2) then resolved the remaining LANGUAGE
+  semantics: fixed arrays are value types (`let b = a` / whole-array
+  `a = b` are ordinary value copies, no aliasing), and a function
+  parameter/return of array type is likewise semantically by value with
+  exact structural type matching. KAI LANGUAGE M8B (post-alpha.2) then
+  implemented all of that as real native code: whole-array
+  initialization/assignment/self-assignment, array function
   parameters/returns (lowered as a direct LLVM aggregate `[N x T]`
   argument/result - never `sret`/`byval`/a hidden pointer, and never a
   promised stable external C ABI), and array-literal values used directly
@@ -62,14 +64,20 @@ these reasons:
   array-valued intermediate index result (`let row = matrix[1]`) is an
   ordinary independent copy, not an alias - see `arrays.kai`'s `matrix`
   demonstration above. KAI LANGUAGE M10A (post-alpha.2) then gave slices
-  `[T]` a real semantic `TypeKind::Slice` type - but TYPE FOUNDATION ONLY:
-  a slice parameter/return TYPE now resolves and renders canonically
-  (`kai inspect` shows `[i32]`), but no LLVM lowering, array-to-slice
-  conversion, or slice indexing exist yet, so a semantically valid
-  slice-typed program still fails cleanly at code generation (exit 6).
-  What remains explicitly out of scope: slices as EXECUTABLE code,
-  general references/lvalue chains beyond nested array indexing, and
-  `for x in someArray` iteration.
+  `[T]` a real semantic `TypeKind::Slice` type (structurally distinct from
+  Array - no length in the type). KAI LANGUAGE M10B (post-alpha.2) then
+  made slices genuinely executable: explicit `slice(array)` construction
+  (never an implicit array-to-slice conversion - `sum(a)` where `sum`
+  expects `[i32]` remains a real TypeMismatch), `len(array | slice | str)`,
+  checked Slice reads with the same `llvm.trap`-guarded runtime bounds
+  model arrays already use, and a Slice function PARAMETER (copy of the
+  view, by value) - see `slices.kai` above. What remains explicitly out
+  of scope, by deliberate lifetime-safety design rather than a lowering
+  gap: a Slice RETURN type (even though the direct-aggregate ABI could
+  mechanically lower one), any executable array that recursively contains
+  a Slice (preventing indirect escape through M8's own array-return
+  machinery), slice-of-slice, sub-slicing, mutable slice elements/syntax,
+  and `for x in someArray` iteration.
 - **`for` iteration over anything other than a literal integer range is
   not yet supported.** KAI LANGUAGE M6 (post-alpha.2) makes
   `for i in start..end` over integers a real, executable, native loop -
