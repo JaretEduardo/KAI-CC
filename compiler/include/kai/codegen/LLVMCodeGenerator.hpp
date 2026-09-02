@@ -574,20 +574,23 @@ private:
     std::optional<llvm::Value*> lowerAssignmentExpr(const ast::AssignmentExpr& assignment,
                                                      const semantic::SemanticModel& model, llvm::IRBuilder<>& builder);
 
-    /// KAI LANGUAGE M7B: the checked element ADDRESS `xs[index]` names -
-    /// shared by both a plain read (lowerIndexExpr()) and an indexed
-    /// write (lowerIndexAssignmentExpr()), so the bounds-check control
-    /// flow is built exactly once, never duplicated between the two.
-    /// Supports EXACTLY `xs[index]` where `xs` is a direct (through
-    /// transparent ParenExpr only) identifier resolving to a
-    /// SymbolKind::Local array binding - any other base (nested
-    /// indexing, a call/member/parameter base) returns std::nullopt
-    /// (M7B spec §1/§12: "generalized nested lvalue mutation," and
-    /// multidimensional reads through it, remain deferred - the
-    /// frontend's own checkIndexExpr() does not restrict this shape for
-    /// a plain READ the way checkIndexAssignmentTarget() restricts a
-    /// WRITE, so this is a real, if narrow, codegen-only limitation, not
-    /// a frontend one).
+    /// KAI LANGUAGE M7B, generalized to arbitrary nesting depth by M9:
+    /// the checked element ADDRESS `xs[index]` names - shared by both a
+    /// plain read (lowerIndexExpr()) and an indexed write
+    /// (lowerIndexAssignmentExpr()), so the bounds-check control flow is
+    /// built exactly once, never duplicated between the two. The base
+    /// (`indexExpr.object()`) is resolved via lowerArrayBase() below,
+    /// which recurses through nested IndexExpr layers - so `matrix[i][j]`
+    /// (and deeper nesting) works by this method calling itself once per
+    /// level, each level building its OWN independent bounds check/GEP
+    /// strictly after the previous level's has already succeeded (M9
+    /// spec §6/§14: no level's element address is ever computed before
+    /// that level's own check passes, and no GEP is ever precomputed
+    /// ahead of its check). A WRITE through this method remains
+    /// restricted to a root that TypeChecker's own
+    /// checkIndexAssignmentTarget() already approved (a SymbolKind::Local
+    /// root, however deeply nested the indexing above it) - this method
+    /// itself does not distinguish read from write, exactly as before M9.
     ///
     /// `index.index()` is evaluated EXACTLY ONCE (M7B spec §10/§11) and
     /// reused for both the bounds comparison and the GEP - never
@@ -611,6 +614,32 @@ private:
         llvm::Value* pointer;
         llvm::Type* elementType;
     };
+
+    /// KAI LANGUAGE M9: resolves the array-typed base an IndexExpr indexes
+    /// into - `indexExpr.object()` - to an address + its LLVM array type,
+    /// reusing the SAME ArrayElementAddress shape as a genuine element
+    /// address (here `elementType` names the whole array's own LLVM type,
+    /// not one element's - the field is reused rather than duplicated
+    /// since both are exactly "a pointer plus the LLVM type it points
+    /// to"). Two base shapes are supported, through transparent ParenExpr
+    /// at every layer:
+    ///   - a bare IdentifierExpr resolving to a SymbolKind::Local or
+    ///     SymbolKind::Parameter array binding (M7B/M8B's own case,
+    ///     unchanged) - the slot's OWN allocated type drives everything,
+    ///     never independently re-derived from the semantic model;
+    ///   - an IndexExpr itself (`matrix[i]` as the base of
+    ///     `matrix[i][j]`) - recurses into lowerArrayElementAddress(),
+    ///     which fully resolves ITS OWN bounds check/GEP first and
+    ///     returns the resulting (already-checked) element address; that
+    ///     address is reused directly as this level's own array storage,
+    ///     with no source-level reference/alias ever introduced (it is
+    ///     always, structurally, an address inside the root identifier's
+    ///     own allocation).
+    /// Any other base shape (a call/member/... base) returns
+    /// std::nullopt - M9 does not introduce general lvalue references.
+    std::optional<ArrayElementAddress> lowerArrayBase(const ast::Expr& object, const semantic::SemanticModel& model,
+                                                        llvm::IRBuilder<>& builder);
+
     std::optional<ArrayElementAddress> lowerArrayElementAddress(const ast::IndexExpr& indexExpr,
                                                                   const semantic::SemanticModel& model,
                                                                   llvm::IRBuilder<>& builder);

@@ -269,10 +269,7 @@ out-of-bounds index traps the program immediately at runtime (not the
 language `panic` mechanism - no unwinding, no recovery, no stable exit-
 code guarantee) rather than ever reading or writing out of bounds.
 Slice syntax (`[T]`, §16 below) remains fully deferred at the type level
-too, not a semantic type at all yet. Indexing more than one level into a
-nested array (`m[0][1]`) also remains unimplemented - a codegen-only
-limitation distinct from nested-array VALUE transport (assigning/
-passing/returning a whole nested array), which M8B below makes real.
+too, not a semantic type at all yet.
 
 **KAI LANGUAGE M8A (post-alpha.2): value semantics resolved for the
 LANGUAGE; KAI LANGUAGE M8B (post-alpha.2): native execution
@@ -307,6 +304,30 @@ stable external C ABI (the physical ABI remains an unstable backend
 implementation detail, never a language-visible guarantee). See
 TYPE_SYSTEM.md §18/§19 for the full rule and DESIGN_QUESTIONS.md for the
 resolution.
+
+**KAI LANGUAGE M9 (post-alpha.2): nested fixed-array indexing
+implemented.** General checked indexing through nested fixed arrays -
+`matrix[i][j]`, and deeper (`a[i][j][k]`), at any nesting depth the type
+system supports - is now real, native, executable code:
+
+    let matrix = [[1, 2], [3, 4]]
+    print(matrix[1][0])   // 3
+
+    mut m = [[1, 2], [3, 4]]
+    m[1][0] = 99           // mutation through a mutable local root
+
+Each level is independently checked (compile-time when its own index is
+a compile-time constant, otherwise at runtime, exactly like a single-
+level index) strictly before that level's own element address is ever
+computed - no level ever becomes unchecked. Mutation through a nested
+chain is allowed exactly when the ROOT binding (`matrix`/`m` above) is a
+mutable local; an intermediate array element never introduces its own
+mutability, and writing through an immutable root or a parameter root
+remains rejected exactly as a single-level write already was. An array-
+valued intermediate index result (`let row = matrix[1]`) is an ordinary
+independent value copy - mutating `row` never touches `matrix`. No
+source-level reference/lvalue system was introduced to support this. See
+TYPE_SYSTEM.md §18/§20 for the full rule.
 
 ---
 

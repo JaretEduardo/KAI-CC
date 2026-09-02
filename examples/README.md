@@ -21,7 +21,7 @@ after a release build).
 | `variables.kai` | `let`, `mut`, reassignment, `f32`/`i32` locals | `KAI`, `0.1`, `2026`, `1` |
 | `loops.kai` | `while`, then a `for` loop over an integer literal range (KAI LANGUAGE M6, post-alpha.2) | `0`,`1`,`2`,`3`,`4` (from `while`), then `0`,`1`,`2`,`3`,`4` again (from `for n in 0..5`) |
 | `fibonacci.kai` | Recursion + a `for` loop over an integer literal range (KAI LANGUAGE M6, post-alpha.2), printing the first 10 Fibonacci numbers | `0`,`1`,`1`,`2`,`3`,`5`,`8`,`13`,`21`,`34` |
-| `arrays.kai` | Fixed-size arrays: a literal `[i32; 4]`, checked indexed reads, a checked indexed write inside a `for`-range loop (KAI LANGUAGE M7B, post-alpha.2), and an EXISTING array value passed by value into/out of a `sum(xs: [i32; 4]) -> i32` function (KAI LANGUAGE M8B, post-alpha.2) | `10`, `40`, `100`, `10`,`20`,`30`,`40`, `1`,`1`,`1` |
+| `arrays.kai` | Fixed-size arrays: a literal `[i32; 4]`, checked indexed reads, a checked indexed write inside a `for`-range loop (KAI LANGUAGE M7B, post-alpha.2), an EXISTING array value passed by value into/out of a `sum(xs: [i32; 4]) -> i32` function (KAI LANGUAGE M8B, post-alpha.2), and a nested `[[i32; 2]; 2]` with a two-level checked read and a two-level checked write (KAI LANGUAGE M9, post-alpha.2) | `10`, `40`, `100`, `10`,`20`,`30`,`40`, `1`,`1`,`1`, `2`, `99` |
 
 ## Diagnostic example (intentionally invalid)
 
@@ -37,27 +37,34 @@ not deleted, but they do **not** compile with the current `kaicc` and are
 **not** included in release artifacts. Each currently fails for one of
 these reasons:
 
-- **Slices remain unsupported for NATIVE EXECUTION; fixed-size arrays are
-  now fully executable, including across function boundaries.** KAI
-  LANGUAGE M7B (post-alpha.2) made a LOCAL fixed-size array `[T; N]`
-  fully executable - literal creation, checked indexed reads/writes,
-  integration with an M6 `for`-range loop - see `arrays.kai` above. KAI
-  LANGUAGE M8A (post-alpha.2) then resolved the remaining LANGUAGE
-  semantics: fixed arrays are value types (`let b = a` / whole-array
-  `a = b` are ordinary value copies, no aliasing), and a function
-  parameter/return of array type is likewise semantically by value with
-  exact structural type matching. KAI LANGUAGE M8B (post-alpha.2) then
-  implemented all of that as real native code: whole-array
-  initialization/assignment/self-assignment, array function
+- **Slices remain unsupported for NATIVE EXECUTION; fixed-size arrays -
+  including nested ones - are now fully executable, including across
+  function boundaries.** KAI LANGUAGE M7B (post-alpha.2) made a LOCAL
+  fixed-size array `[T; N]` fully executable - literal creation, checked
+  indexed reads/writes, integration with an M6 `for`-range loop - see
+  `arrays.kai` above. KAI LANGUAGE M8A (post-alpha.2) then resolved the
+  remaining LANGUAGE semantics: fixed arrays are value types (`let b = a`
+  / whole-array `a = b` are ordinary value copies, no aliasing), and a
+  function parameter/return of array type is likewise semantically by
+  value with exact structural type matching. KAI LANGUAGE M8B
+  (post-alpha.2) then implemented all of that as real native code:
+  whole-array initialization/assignment/self-assignment, array function
   parameters/returns (lowered as a direct LLVM aggregate `[N x T]`
   argument/result - never `sret`/`byval`/a hidden pointer, and never a
   promised stable external C ABI), and array-literal values used directly
   as call arguments/return expressions - see `arrays.kai`'s `sum()`
-  function above. What remains explicitly out of scope: slice syntax
+  function above. KAI LANGUAGE M9 (post-alpha.2) then completed general
+  nested indexing (`matrix[i][j]`, and deeper - `a[i][j][k]` - at any
+  fixed-array nesting depth): each level is independently checked before
+  its own element address is ever computed, mutation through a nested
+  chain is allowed exactly when the ROOT binding is a mutable local (an
+  intermediate array element never introduces its own mutability), and an
+  array-valued intermediate index result (`let row = matrix[1]`) is an
+  ordinary independent copy, not an alias - see `arrays.kai`'s `matrix`
+  demonstration above. What remains explicitly out of scope: slice syntax
   (`[T]`, still fully deferred at the type level, `Type::unresolved()`),
-  and nested-array INDEXING through more than one level (e.g. `m[0][1]`,
-  a separate codegen-only limitation from nested-array VALUE transport,
-  which already works - see `TYPE_SYSTEM.md`).
+  general references/lvalue chains beyond nested array indexing, and
+  `for x in someArray` iteration.
 - **`for` iteration over anything other than a literal integer range is
   not yet supported.** KAI LANGUAGE M6 (post-alpha.2) makes
   `for i in start..end` over integers a real, executable, native loop -

@@ -3301,6 +3301,458 @@ void testZeroLengthArrayParameterAndReturnVerify() {
     }
 }
 
+// --- KAI LANGUAGE M9: nested fixed-array indexing ---
+//
+// Before M9, lowerArrayElementAddress() only accepted a direct (through
+// transparent ParenExpr only) IdentifierExpr as an IndexExpr's object -
+// `matrix[0][1]` failed because `matrix[0]` (itself an IndexExpr) is not
+// an IdentifierExpr, so codegen for the OUTER index rejected it outright
+// (frontend type-checking already supported the nested TYPE rule via
+// checkIndexExpr()'s own existing recursion - this was purely a codegen
+// gap). M9 generalizes the object resolution via the new lowerArrayBase()
+// helper, which recurses through nested IndexExpr layers, resolving each
+// one's own address (bounds-checked GEP) before treating it as the next
+// level's array storage - see lowerArrayBase()'s own doc comment in the
+// header for the full design.
+
+// 2-level nested read (spec §20.A/§21.A).
+void testNestedArrayTwoLevelReadVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let matrix = [[1, 2], [3, 4]]\n"
+                                      "    print(matrix[0][0])\n"
+                                      "    print(matrix[0][1])\n"
+                                      "    print(matrix[1][0])\n"
+                                      "    print(matrix[1][1])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// 2-level nested write through a mutable local root (spec §20.B/§21.B).
+void testNestedArrayTwoLevelWriteVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    mut matrix = [[1, 2], [3, 4]]\n"
+                                      "    matrix[1][0] = 99\n"
+                                      "    print(matrix[1][0])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// A `let` root remains rejected via the EXISTING AssignmentToImmutableBinding
+// diagnostic, not a new nested-specific one (spec §8/§20.C/§21.C) -
+// mutability is decided by the ROOT binding alone.
+void testNestedArrayWriteThroughImmutableRootFailsCleanly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn main() {\n    let matrix = [[1, 2], [3, 4]]\n    matrix[1][0] = 99\n}");
+
+    KAI_CHECK(result.parsed.has_value());
+    if (!result.parsed) {
+        return;
+    }
+    KAI_CHECK(result.model.errors().size() == 1);
+    if (result.model.errors().size() == 1) {
+        KAI_CHECK(result.model.errors()[0].kind == kai::semantic::SemanticErrorKind::AssignmentToImmutableBinding);
+    }
+    KAI_CHECK(!result.generationSucceeded);
+}
+
+// 3-level nested read - the recursion is not hardcoded to depth 2 (spec
+// §16/§20.K/§21.K).
+void testNestedArrayThreeLevelReadVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let cube = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]\n"
+                                      "    print(cube[1][0][1])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// GEP/check ordering proof (spec §14/§20): asymmetric dimensions
+// (`[[i32; 3]; 2]`) make the outer length (2) and inner length (3)
+// distinguishable in the emitted ICmpULT constants, in the exact order
+// they are lowered - the outer check (`i` against the matrix's own
+// length) completes strictly before the inner check (`j` against the
+// row's length) even begins, and NEITHER level's trap block ever
+// contains a GEP/load/store (the element address is only ever computed
+// in an in-bounds successor, at either level).
+void testNestedIndexOuterCheckedBeforeInnerCheckAndNeitherGEPsEarly() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let m: [[i32; 3]; 2] = [[1, 2, 3], [4, 5, 6]]\n"
+                                      "    mut i: i32 = 1\n"
+                                      "    mut j: i32 = 2\n"
+                                      "    print(m[i][j])\n"
+                                      "}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    std::vector<std::int64_t> ultBounds;
+    std::vector<const llvm::BasicBlock*> trapBlocks;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                if (cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT) {
+                    if (const auto* c = llvm::dyn_cast<llvm::ConstantInt>(cmp->getOperand(1))) {
+                        ultBounds.push_back(c->getSExtValue());
+                    }
+                }
+            }
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "llvm.trap") {
+                    trapBlocks.push_back(&block);
+                }
+            }
+        }
+    }
+
+    // Outer length (2) checked strictly before inner length (3) - a
+    // structural proof that the recursive base resolution (outer) always
+    // fully completes, GEP included, before this level's own (inner)
+    // check even begins.
+    KAI_CHECK(ultBounds.size() == 2);
+    if (ultBounds.size() == 2) {
+        KAI_CHECK(ultBounds[0] == 2);
+        KAI_CHECK(ultBounds[1] == 3);
+    }
+
+    KAI_CHECK(trapBlocks.size() == 2);
+    for (const llvm::BasicBlock* trapBlock : trapBlocks) {
+        KAI_CHECK(llvm::isa<llvm::UnreachableInst>(trapBlock->getTerminator()));
+        for (const llvm::Instruction& inst : *trapBlock) {
+            KAI_CHECK(!llvm::isa<llvm::GetElementPtrInst>(inst));
+            KAI_CHECK(!llvm::isa<llvm::LoadInst>(inst));
+            KAI_CHECK(!llvm::isa<llvm::StoreInst>(inst));
+        }
+    }
+}
+
+// Outer dynamic signed bounds contribute exactly one SGE + one ULT
+// comparison; the inner index here is a compile-time constant (`0`),
+// which IRBuilder constant-folds away entirely - no separate ICmp
+// instruction for it (spec §20.F-ish "outer dynamic signed bounds").
+void testNestedArrayOuterDynamicSignedBoundsCFG() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let m = [[1, 2], [3, 4]]\n"
+                                      "    mut i: i32 = 1\n"
+                                      "    print(m[i][0])\n"
+                                      "}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    int sgeCount = 0;
+    int ultCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                sgeCount += cmp->getPredicate() == llvm::ICmpInst::ICMP_SGE;
+                ultCount += cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT;
+            }
+        }
+    }
+    KAI_CHECK(sgeCount == 1);
+    KAI_CHECK(ultCount == 1);
+}
+
+// Inner dynamic signed bounds - the mirror image: a compile-time-constant
+// outer index (`0`) folds away, and the dynamic inner index (`j`)
+// contributes exactly one SGE + one ULT (spec §20 "inner dynamic signed
+// bounds").
+void testNestedArrayInnerDynamicSignedBoundsCFG() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let m = [[1, 2], [3, 4]]\n"
+                                      "    mut j: i32 = 1\n"
+                                      "    print(m[0][j])\n"
+                                      "}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    int sgeCount = 0;
+    int ultCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                sgeCount += cmp->getPredicate() == llvm::ICmpInst::ICMP_SGE;
+                ultCount += cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT;
+            }
+        }
+    }
+    KAI_CHECK(sgeCount == 1);
+    KAI_CHECK(ultCount == 1);
+}
+
+// Unsigned nested bounds: BOTH indices unsigned skips the SGE
+// non-negativity check entirely at both levels - only the two ULT upper-
+// bound comparisons remain (M7B spec §6, generalized to nesting depth by
+// M9 spec §13/§20).
+void testNestedArrayUnsignedBoundsCFG() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let m = [[1, 2], [3, 4]]\n"
+                                      "    mut i: u32 = 1\n"
+                                      "    mut j: u32 = 0\n"
+                                      "    print(m[i][j])\n"
+                                      "}");
+
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+
+    int sgeCount = 0;
+    int ultCount = 0;
+    for (const llvm::BasicBlock& block : *fn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                sgeCount += cmp->getPredicate() == llvm::ICmpInst::ICMP_SGE;
+                ultCount += cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT;
+            }
+        }
+    }
+    KAI_CHECK(sgeCount == 0);
+    KAI_CHECK(ultCount == 2);
+}
+
+// Nested IndexExpr lowering exactly once, both indices side-effecting:
+// `f()` (outer) and `g()` (inner) must each appear exactly once, in
+// source order, never duplicated by address recomputation (spec §5/§15/
+// §20/§21.J).
+void testNestedIndexReadEvaluatedExactlyOnceInOrder() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn outer() -> i32 {\n    print(100)\n    return 1\n}\n"
+                                      "fn inner() -> i32 {\n    print(200)\n    return 0\n}\n"
+                                      "fn main() {\n"
+                                      "    let matrix = [[1, 2], [3, 4]]\n"
+                                      "    print(matrix[outer()][inner()])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    const llvm::Function* outerFn = module.getFunction("outer");
+    const llvm::Function* innerFn = module.getFunction("inner");
+    const llvm::Function* mainFn = module.getFunction("main");
+    KAI_CHECK(outerFn != nullptr && innerFn != nullptr && mainFn != nullptr);
+    if (outerFn == nullptr || innerFn == nullptr || mainFn == nullptr) {
+        return;
+    }
+
+    std::vector<const llvm::Function*> callOrder;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() == outerFn || call->getCalledFunction() == innerFn) {
+                    callOrder.push_back(call->getCalledFunction());
+                }
+            }
+        }
+    }
+    KAI_CHECK(callOrder.size() == 2);
+    if (callOrder.size() == 2) {
+        KAI_CHECK(callOrder[0] == outerFn);
+        KAI_CHECK(callOrder[1] == innerFn);
+    }
+}
+
+// Assignment evaluation order (spec §15/§20/§21.J): for
+// `matrix[f()][g()] = h()`, f()/g()/h() each lower exactly once, in
+// source order, and `h()` (the RHS) only after BOTH checks succeeded.
+void testNestedIndexAssignmentEvaluatedExactlyOnceInOrder() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn f() -> i32 {\n    print(100)\n    return 1\n}\n"
+                                      "fn g() -> i32 {\n    print(200)\n    return 0\n}\n"
+                                      "fn h() -> i32 {\n    print(300)\n    return 42\n}\n"
+                                      "fn main() {\n"
+                                      "    mut matrix = [[1, 2], [3, 4]]\n"
+                                      "    matrix[f()][g()] = h()\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+
+    const llvm::Module& module = codegen.module();
+    const llvm::Function* fFn = module.getFunction("f");
+    const llvm::Function* gFn = module.getFunction("g");
+    const llvm::Function* hFn = module.getFunction("h");
+    const llvm::Function* mainFn = module.getFunction("main");
+    KAI_CHECK(fFn != nullptr && gFn != nullptr && hFn != nullptr && mainFn != nullptr);
+    if (fFn == nullptr || gFn == nullptr || hFn == nullptr || mainFn == nullptr) {
+        return;
+    }
+
+    std::vector<const llvm::Function*> callOrder;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() == fFn || call->getCalledFunction() == gFn ||
+                    call->getCalledFunction() == hFn) {
+                    callOrder.push_back(call->getCalledFunction());
+                }
+            }
+        }
+    }
+    KAI_CHECK(callOrder.size() == 3);
+    if (callOrder.size() == 3) {
+        KAI_CHECK(callOrder[0] == fFn);
+        KAI_CHECK(callOrder[1] == gFn);
+        KAI_CHECK(callOrder[2] == hFn);
+    }
+}
+
+// Array-valued intermediate IndexExpr (spec §10/§20): `let row =
+// matrix[1]` produces an INDEPENDENT array value, not an alias - a
+// distinct alloca backs `row`, and mutating it must never touch
+// `matrix`'s own storage. Structurally verified by asserting two
+// distinct ArrayType allocas exist, plus a load from the GEP'd
+// `matrix[1]` address feeding a store into `row`'s own alloca (the
+// generic lowerExpr()-then-store fallback path
+// generateArrayVarDeclStmt() already has, exercised here through an
+// IndexExpr initializer specifically).
+void testArrayValuedIntermediateIndexExprCopiesIndependently() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn main() {\n"
+                                      "    let matrix = [[1, 2], [3, 4]]\n"
+                                      "    mut row = matrix[1]\n"
+                                      "    row[0] = 99\n"
+                                      "    print(row[0])\n"
+                                      "    print(matrix[1][0])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* fn = codegen.module().getFunction("main");
+    KAI_CHECK(fn != nullptr);
+    if (fn == nullptr) {
+        return;
+    }
+    int arrayAllocaCount = 0;
+    for (const llvm::Instruction& inst : fn->getEntryBlock()) {
+        if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&inst)) {
+            arrayAllocaCount += llvm::isa<llvm::ArrayType>(alloca->getAllocatedType());
+        }
+    }
+    // `matrix` and `row` are each their own independent [i32; 2] alloca -
+    // never the same storage.
+    KAI_CHECK(arrayAllocaCount == 2);
+}
+
+// Nested-array parameter indexing (spec §11/§19/§20.L/§21.L): reading
+// through a parameter works exactly like reading through a local, with
+// no ABI change (M8B's direct aggregate strategy untouched).
+void testNestedArrayParameterIndexingVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn get(m: [[i32; 2]; 2]) -> i32 {\n    return m[1][0]\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// Returned nested-array indexing (spec §11/§20.M/§21.M): indexing into a
+// local initialized from a nested-array-returning call.
+void testNestedArrayReturnIndexingVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn make() -> [[i32; 2]; 2] {\n"
+                                      "    return [[1, 2], [3, 4]]\n"
+                                      "}\n"
+                                      "fn main() {\n"
+                                      "    let m = make()\n"
+                                      "    print(m[1][1])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -3433,6 +3885,20 @@ int main() {
     testArrayParameterAndReturnUseDirectAggregateFunctionType();
     testArrayCallWithExistingValueAndInlineLiteralVerifies();
     testZeroLengthArrayParameterAndReturnVerify();
+
+    testNestedArrayTwoLevelReadVerifies();
+    testNestedArrayTwoLevelWriteVerifies();
+    testNestedArrayWriteThroughImmutableRootFailsCleanly();
+    testNestedArrayThreeLevelReadVerifies();
+    testNestedIndexOuterCheckedBeforeInnerCheckAndNeitherGEPsEarly();
+    testNestedArrayOuterDynamicSignedBoundsCFG();
+    testNestedArrayInnerDynamicSignedBoundsCFG();
+    testNestedArrayUnsignedBoundsCFG();
+    testNestedIndexReadEvaluatedExactlyOnceInOrder();
+    testNestedIndexAssignmentEvaluatedExactlyOnceInOrder();
+    testArrayValuedIntermediateIndexExprCopiesIndependently();
+    testNestedArrayParameterIndexingVerifies();
+    testNestedArrayReturnIndexingVerifies();
 
     testPrintLiteralI32SignExtendsToI64();
     testPrintVariableI64();

@@ -77,7 +77,7 @@ compiles and runs the same way, printing `Hello` then `KAI`.
 logical `&&`/`||` (short-circuit), assignment, function calls, recursion, `if`/`else if`/`else`, `while`,
 `for i in start..end` over a half-open integer range (KAI LANGUAGE M6, post-alpha.2), explicit `return`.
 
-**Fixed-size arrays (KAI LANGUAGE M7B/M8B, post-alpha.2):** a fixed-size array `[T; N]` - `let xs = [1, 2,
+**Fixed-size arrays (KAI LANGUAGE M7B/M8B/M9, post-alpha.2):** a fixed-size array `[T; N]` - `let xs = [1, 2,
 3]` or an explicitly-annotated `let xs: [i32; 3] = [1, 2, 3]` - is real, native, executable code: checked
 indexed reads (`xs[i]`) and, for a `mut` binding, checked indexed writes (`xs[i] = value`), including inside
 an M6 `for`-range loop. Indexing is CHECKED: a compile-time-constant out-of-bounds index (`xs[3]`/`xs[-1]` for
@@ -86,8 +86,12 @@ unsigned) traps the program immediately at runtime rather than reading/writing o
 are KAI value types (KAI LANGUAGE M8A, post-alpha.2), and this is now real executable code too (KAI LANGUAGE
 M8B, post-alpha.2): whole-array initialization/assignment/self-assignment are ordinary value copies with no
 aliasing, and array function parameters/returns are lowered as a direct LLVM aggregate `[N x T]`
-argument/result (no `sret`/`byval`/hidden pointer, and no promised stable external C ABI) - see "Current
-limitations" below for what remains out of scope (slices, nested-array indexing beyond one level).
+argument/result (no `sret`/`byval`/hidden pointer, and no promised stable external C ABI). Nested fixed
+arrays support general checked indexing at any depth (KAI LANGUAGE M9, post-alpha.2): `matrix[i][j]` (and
+deeper, `a[i][j][k]`) independently bounds-checks each level before computing that level's own element
+address, mutation through a nested chain is allowed exactly when the ROOT binding is a mutable local, and an
+array-valued intermediate index result (`let row = matrix[1]`) is an ordinary independent copy, never an
+alias - see "Current limitations" below for what remains out of scope (slices, general references).
 
 **Text:** string literals, explicit `str` local annotations, `str` function parameters and return types, and
 `print(str)`. `str` values (including those containing an embedded `\0` byte, which is valid UTF-8) are
@@ -329,13 +333,17 @@ literal argument/return still uses ordinary contextual literal typing) - see "Do
 link for the complete rule. KAI LANGUAGE M8B (post-alpha.2) then implemented all of that as real native code:
 whole-array initialization/assignment/self-assignment, and arrays as a function PARAMETER or return type,
 lowered as a direct LLVM aggregate `[N x T]` argument/result (no `sret`/`byval`/hidden pointer, and no
-promised stable external C ABI - KAI performs no array decay to `[T]`/a pointer/a reference either way). What
-remains explicitly out of scope: slice syntax (`[T]`, still fully deferred at the type level,
-`Type::unresolved()`), and indexing more than one level into a nested array (`m[0][1]` - a codegen-only
-limitation distinct from nested-array VALUE transport, which already works). Also parses and/or type-checks in
-some form, but explicitly **not** backend-lowerable yet:
+promised stable external C ABI - KAI performs no array decay to `[T]`/a pointer/a reference either way). KAI
+LANGUAGE M9 (post-alpha.2) then completed general nested indexing: `matrix[i][j]` (and deeper, `a[i][j][k]`,
+at any fixed-array nesting depth) is real, native, executable code - each level is independently bounds-
+checked before its own element address is ever computed, mutation through a nested chain is allowed exactly
+when the ROOT binding is a mutable local (an intermediate array element never introduces its own mutability),
+and an array-valued intermediate index result (`let row = matrix[1]`) is an ordinary independent copy, not an
+alias. What remains explicitly out of scope: slice syntax (`[T]`, still fully deferred at the type level,
+`Type::unresolved()`), and general references/lvalue chains beyond nested array indexing. Also parses and/or
+type-checks in some form, but explicitly **not** backend-lowerable yet:
 
-- slices (`[T]`) as a semantic type at all, and multi-level nested-array indexing - see above
+- slices (`[T]`) as a semantic type at all
 - structs, enums, generics, traits
 - `Result`, general references (`&T`), and advanced ownership/borrowing
 - an owned, dynamic `String` type (`str` today is a `Copy`, immutable, non-owning view only)

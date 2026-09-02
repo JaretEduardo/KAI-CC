@@ -390,24 +390,32 @@ private:
     /// implemented constructs use.
     Type checkDeferredAssignmentTarget(const ast::AssignmentExpr& assignment, SemanticModel& model) const;
 
-    /// KAI LANGUAGE M7B: an IndexExpr target (`xs[index] = value`).
-    /// Checks the index expression itself through the SAME
+    /// KAI LANGUAGE M7B, generalized to arbitrary nesting depth by M9,
+    /// with M9's own final-cleanup Parameter-root fix: an IndexExpr
+    /// target (`xs[index] = value`, or `matrix[i][j] = value`, or
+    /// deeper). Checks the index expression itself through the SAME
     /// checkIndexExpr() a plain read uses (never a second copy of the
-    /// object-is-array/index-domain/compile-time-bounds rules), then
-    /// supports EXACTLY the straightforward shape M7B's spec approves:
-    /// `xs` is a direct (through transparent ParenExpr only, via
-    /// unwrapAssignmentTargetIdentifier()) identifier resolving to a
-    /// SymbolKind::Local. For that shape, once the index itself
-    /// type-checked to a real (non-Error/Unresolved) element Type:
-    /// mutability is checked first (an immutable `xs` short-circuits to
-    /// the EXISTING AssignmentToImmutableBinding diagnostic - no new,
-    /// index-specific immutability error), then the RHS is checked
+    /// object-is-array/index-domain/compile-time-bounds rules - this
+    /// already recurses through nested IndexExpr objects on its own, so
+    /// nested constant-bounds diagnostics need no dedicated code here),
+    /// then supports EXACTLY the shape M7B's (M9-generalized) spec
+    /// approves: walking through zero or more nested IndexExpr layers
+    /// (unwrapIndexAssignmentRootIdentifier() in TypeChecker.cpp, through
+    /// transparent ParenExpr at each layer) to a root `xs` that is a bare
+    /// identifier resolving to a SymbolKind::Local OR SymbolKind::
+    /// Parameter binding - mutability is always decided by that ROOT
+    /// binding alone, never by an intermediate array element. For that
+    /// shape, once the index itself type-checked to a real (non-Error/
+    /// Unresolved) element Type: mutability is checked first (an
+    /// immutable `let` root OR a Parameter root - always immutable per
+    /// GRAMMAR.md §10 - both short-circuit to the EXISTING
+    /// AssignmentToImmutableBinding diagnostic - no new, index-specific or
+    /// parameter-specific immutability error), then the RHS is checked
     /// contextually against the element Type exactly like
     /// checkVariableAssignmentTarget() already does for a plain
     /// identifier target, comparing via the existing TypeMismatch shape.
-    /// Any OTHER shape (a non-identifier/non-Local base, i.e. nested
-    /// indexing, a call/member/parameter base - all "generalized nested
-    /// lvalue mutation," explicitly deferred per M7B's own spec) falls
+    /// Any OTHER root shape (a call/member/function/builtin base - all
+    /// "generalized nested lvalue mutation," explicitly deferred) falls
     /// back to the SAME Type::unresolved()/no-diagnostic behavior
     /// checkDeferredAssignmentTarget() already used for every IndexExpr
     /// target before M7B.

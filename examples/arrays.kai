@@ -29,4 +29,14 @@ fn main() {
     for i in 0..3 {
         print(counters[i])
     }
+
+    // KAI LANGUAGE M9: nested fixed-array indexing - `matrix` is a
+    // `[[i32; 2]; 2]` (an array of arrays), and `matrix[row][col]`
+    // recursively checks bounds at EACH level before reading or writing.
+    mut matrix = [[1, 2], [3, 4]]
+
+    print(matrix[0][1])
+
+    matrix[1][0] = 99
+    print(matrix[1][0])
 }
