@@ -1252,30 +1252,70 @@ above) remains compiler-private - no C-compatible ABI is promised.
 
 ## Function returns
 
-A Slice RETURN type is UNCONDITIONALLY unsupported, even though the
-direct-aggregate ABI could mechanically lower one with no technical
-difficulty - this is a deliberate lifetime-safety restriction, not a
-lowering gap:
+Through KAI LANGUAGE M10B, a Slice RETURN type was UNCONDITIONALLY
+unsupported at code generation, even though the direct-aggregate ABI
+could mechanically lower one with no technical difficulty - a deliberate
+lifetime-safety restriction, not a lowering gap. KAI LANGUAGE M11A then
+added a restricted, non-general SEMANTIC-layer provenance analysis, and
+KAI LANGUAGE M11B completed the picture: **a restricted class of safe
+Slice returns now executes natively.**
 
-- the slice return TYPE (syntax and semantic Type) may exist and
-  type-check fine (`fn identity(xs: [i32]) -> [i32] { return xs }` is
-  semantically well-typed - a parameter's own slice value can flow
-  straight to `return xs`)
-- code generation rejects it explicitly and cleanly regardless (the
-  SAME actionable diagnostic every other unsupported function return
-  already uses - never a crash)
-- this remains true even for a value that would, if allowed, have been
-  perfectly SOUND under the Lifetime model above (e.g. relaying a
-  parameter's own slice straight back out) - M10B does not yet
-  distinguish "sound to return" from "unsound to return," so ALL Slice
-  returns are rejected uniformly until a real lifetime/provenance
-  analysis can draw that distinction safely
+- SemanticAnalyzer/TypeChecker (M11A) classifies every Slice-typed
+  expression as `External` (backed by storage that outlives the current
+  invocation - a Slice PARAMETER, or a plain copy/rebinding of one),
+  `Local` (backed by storage owned by the current invocation -
+  `slice(...)` of a local array OR of a fixed-array parameter, since
+  M8's fixed-array parameters are themselves passed by value into
+  callee-owned storage), or `Unknown` (anything this narrow analysis
+  cannot classify precisely, including the result of any other function
+  call - no interprocedural inference is performed). Only `External` may
+  be returned from a function declared to return Slice; `Local` and
+  `Unknown` are rejected with a dedicated `EscapingLocalSlice`
+  diagnostic, never a generic `TypeMismatch`
+- code generation (KAI LANGUAGE M11B) now ACCEPTS a bare Slice return
+  type - narrowed from M10B's own unconditional rejection - but only
+  ever reaches a Slice return that M11A has ALREADY proven `External`;
+  a `Local`/`Unknown` return never reaches codegen at all, having
+  already failed at TypeChecker. This means
+  `fn identity(xs: [i32]) -> [i32] { return xs }` and even
+  `fn f(xs: [i32]) -> [i32] { let s = xs; return s }` now compile AND
+  RUN, transporting only the `{ptr, i64}` view itself (never a copy of
+  the viewed elements) back to a caller whose own backing storage the
+  view was pointing at all along - so no dangling pointer is ever
+  created. `fn bad() -> [i32] { let a = [1, 2, 3]; return slice(a) }`
+  remains rejected, but at the SEMANTIC layer, before code generation
+  ever runs - M11B does not change what is safe, only whether a
+  proven-safe return is executable
+- an executable ARRAY that recursively contains a Slice (`[[i32]; 2]`,
+  ...) remains unconditionally rejected as a return type regardless of
+  provenance - M11B intentionally does NOT generalize provenance
+  tracking to aggregates (see "Slice-containing aggregates" below);
+  `isUnsupportedSliceCarryingType()` is the exact backend policy: a bare
+  Slice return type is allowed, anything wrapping one is not
+- re-forwarding an `Unknown`-provenance Slice-returning call result
+  remains rejected too, even when the callee's own implementation is
+  trivially safe (`fn wrapper(xs: [i32]) -> [i32] { return id(xs) }` is
+  rejected exactly like before M11B) - M11B is a backend ABI/codegen
+  change only, never interprocedural provenance inference. `Unknown`
+  provenance still permits ordinary LOCAL use (reading an element,
+  copying into another local) with no restriction at all; `Unknown`
+  means "cannot prove safe to escape," never "invalid value"
+- provenance is a property of VALUES/expressions/symbols at a given
+  point in a function body, deliberately never encoded into the Slice
+  `Type` itself - two Slice-typed expressions with the identical `[T]`
+  Type may have different provenance, and the same binding's provenance
+  can change across straight-line reassignment. It is compiler-internal
+  safety metadata with no public query surface (`kai inspect`/
+  `kai refs`/... never expose it, and schemaVersion is unaffected)
 
-Do not conflate TYPE correctness with safe EXECUTABLE behavior - they
-are answered by different layers of this compiler (SemanticAnalyzer/
-TypeChecker vs. LLVMCodeGenerator), exactly as COMPILER_ARCHITECTURE.md's
-own "Semantic value passing vs. physical ABI lowering" note already
-establishes for `[T; N]`.
+Do not conflate TYPE correctness, PROVENANCE-SAFE return eligibility,
+and safe EXECUTABLE behavior - they were three different questions
+through M11A, answered by different layers of this compiler
+(SemanticAnalyzer for the first two, LLVMCodeGenerator for the third);
+M11B makes the third question's answer "yes, for a proven-safe direct
+Slice return" without touching how the first two are answered at all,
+exactly as COMPILER_ARCHITECTURE.md's own "Semantic value passing vs.
+physical ABI lowering" note already establishes for `[T; N]`.
 
 ## Slice-containing aggregates
 
@@ -1287,10 +1327,13 @@ own array/slice composition rules are unaffected), and even though
 `LLVMCodeGenerator::lowerType()` could mechanically lower the resulting
 LLVM aggregate. This exists specifically to prevent an M8-style array
 aggregate from indirectly smuggling a borrowed Slice view out through a
-RETURNED array value - the same lifetime hazard "Function returns"
-above blocks for a bare Slice return, generalized to any array wrapping
-one. A bare Slice parameter/local remains fully supported; only an ARRAY
-that wraps one is rejected.
+RETURNED array value - even now that KAI LANGUAGE M11B lets a BARE,
+proven-`External` Slice return execute, the array-wrapping case remains
+unconditionally rejected regardless of the wrapped Slice's own
+provenance: M11B intentionally does not generalize provenance tracking
+to aggregates. A bare Slice parameter/local/return remains fully
+supported (return only when M11A has proven it `External`); only an
+ARRAY that wraps one is rejected.
 
 ## Indexing
 

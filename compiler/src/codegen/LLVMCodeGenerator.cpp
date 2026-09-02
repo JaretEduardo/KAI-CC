@@ -157,11 +157,11 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
         // lowerType() is even called - allowing it would let an M8-style
         // aggregate array parameter carry a borrowed view this
         // milestone's restricted lifetime rule was never designed to
-        // track through nested storage (spec §6/§29). `typeContainsSlice()`
-        // is true for a bare Slice too, so the `isArray()` guard is what
-        // keeps a bare Slice parameter from being caught by this specific
-        // check - it is meant to reach lowerType() normally instead.
-        if (signature.parameterTypes[i].isArray() && typeContainsSlice(signature.parameterTypes[i], model)) {
+        // track through nested storage (spec §6/§29). See
+        // `isUnsupportedSliceCarryingType()`'s own doc comment for why a
+        // bare Slice parameter is not caught by this check - it is meant
+        // to reach lowerType() normally instead.
+        if (isUnsupportedSliceCarryingType(signature.parameterTypes[i], model)) {
             recordUnsupportedConstruct("code generation is not yet supported for this parameter's type",
                                         fn.params()[i].type->span());
             return false;
@@ -184,15 +184,27 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
     // KAI LANGUAGE M8B: array RETURN values likewise now use lowerType()
     // directly - a direct LLVM aggregate return, no sret.
     //
-    // KAI LANGUAGE M10B spec §5/§6: unlike a PARAMETER, a bare Slice
-    // RETURN type is explicitly unsupported too (not just an array
-    // recursively containing one) - Slice returns remain deliberately
-    // disallowed regardless of the direct-aggregate ABI's own technical
-    // viability, since KAI has no lifetime/provenance analysis yet to
-    // make returning a borrowed view sound. `typeContainsSlice()` alone
-    // (with no `isArray()` guard, unlike the parameter check above)
-    // covers both cases with one check.
-    if (typeContainsSlice(signature.returnType, model)) {
+    // KAI LANGUAGE M10B spec §5/§6: a bare Slice RETURN type was
+    // unconditionally unsupported here too (not just an array recursively
+    // containing one), since KAI had no lifetime/provenance analysis yet
+    // to make returning a borrowed view sound.
+    //
+    // KAI LANGUAGE M11B: now that KAI LANGUAGE M11A's own restricted,
+    // flow-sensitive provenance analysis semantically rejects every
+    // Slice-returning `return` expression EXCEPT one already proven
+    // `External` (backed by storage that genuinely outlives this
+    // function's own invocation), a bare Slice return that reaches this
+    // point in codegen has ALREADY passed that check - TypeChecker never
+    // let an unsafe one through. This uses the SAME
+    // `isUnsupportedSliceCarryingType()` policy the parameter loop above
+    // and generateVarDeclStmt()'s own local check use, so only an ARRAY
+    // that recursively contains a Slice remains rejected here - never a
+    // bare Slice return itself. This is a codegen ABI-support decision
+    // only; it does not re-derive or duplicate M11A's own provenance
+    // analysis in any way (a Local/Unknown Slice return never reaches
+    // codegen at all - it already failed at TypeChecker with
+    // EscapingLocalSlice).
+    if (isUnsupportedSliceCarryingType(signature.returnType, model)) {
         const SourceSpan span = fn.returnType() != nullptr ? fn.returnType()->span() : fn.name().span;
         recordUnsupportedConstruct("code generation is not yet supported for this function's return type", span);
         return false;
@@ -651,7 +663,7 @@ bool LLVMCodeGenerator::generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llv
     // through a function boundary or through plain local storage). This
     // is checked BEFORE lowerType() is even called, mirroring
     // declareFunction()'s own ordering.
-    if (symbol.type.isArray() && typeContainsSlice(symbol.type, model)) {
+    if (isUnsupportedSliceCarryingType(symbol.type, model)) {
         return false;
     }
 
@@ -951,6 +963,17 @@ bool LLVMCodeGenerator::typeContainsSlice(Type type, const SemanticModel& model)
         return typeContainsSlice(model.arrayElementType(type), model);
     }
     return false;
+}
+
+bool LLVMCodeGenerator::isUnsupportedSliceCarryingType(Type type, const SemanticModel& model) const {
+    // KAI LANGUAGE M11B: a bare Slice is never itself unsupported by this
+    // policy - only an Array wrapping one is. `typeContainsSlice(type)`
+    // is still `true` for a bare Slice, so the `isArray()` conjunct is
+    // what excludes it here, exactly like the parameter check already
+    // did before M11B (this now just gives that same shape a name and
+    // reuses it for the return-type check too, which previously called
+    // typeContainsSlice() directly with no such conjunct).
+    return type.isArray() && typeContainsSlice(type, model);
 }
 
 llvm::AllocaInst* LLVMCodeGenerator::createEntryBlockAlloca(llvm::Function& function, llvm::Type* type,

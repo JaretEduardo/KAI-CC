@@ -102,8 +102,17 @@ checked indexed reads (the same `llvm.trap`-guarded runtime bounds arrays alread
 parameter (by value, copy of the view) - see `examples/slices.kai`. Slice indexed WRITES remain unconditionally
 rejected (a dedicated diagnostic, distinct from assigning to an immutable binding), and - by deliberate
 lifetime-safety design, not a lowering gap - a slice RETURN type and any array recursively containing a slice
-remain unconditionally rejected at code generation. See "Current limitations" below and TYPE_SYSTEM.md's own
-"Slices" section for the full semantic model.
+remain unconditionally rejected at code generation for anything OTHER than a bare Slice return proven safe (see
+next). KAI LANGUAGE M11A (post-alpha.2) added a restricted provenance analysis (`External`/`Local`/`Unknown`,
+tracked per binding, never part of the Slice type itself) that lets a narrow, provably-sound class of Slice
+returns (e.g. relaying a parameter's own slice straight back out) pass TypeChecker cleanly instead of being
+rejected outright, and KAI LANGUAGE M11B (post-alpha.2) then made exactly that narrow class genuinely
+EXECUTABLE: `fn identity(xs: [i32]) -> [i32] { return xs }` now compiles and runs, transporting only the view
+(pointer + length, never a copy of the viewed elements) back to a caller whose own backing storage the view
+was pointing at all along - no dangling pointer is ever created. An array wrapping a Slice still remains
+unconditionally rejected as a return type regardless of provenance, and re-forwarding an `Unknown`-provenance
+Slice-returning call result remains rejected too (M11B performs no interprocedural inference). See "Current
+limitations" below and TYPE_SYSTEM.md's own "Slices" section for the full semantic model.
 
 **Text:** string literals, explicit `str` local annotations, `str` function parameters and return types, and
 `print(str)`. `str` values (including those containing an embedded `\0` byte, which is valid UTF-8) are
@@ -360,11 +369,20 @@ array-to-slice conversion - passing a fixed array directly where a slice paramet
 indexed writes remain unconditionally rejected (see TYPE_SYSTEM.md's own "Slices" section for the complete
 model), and - a deliberate lifetime-safety restriction, not a lowering gap, since KAI still has no general
 borrow checker - a slice RETURN type and any array recursively containing a slice remain unconditionally
-rejected at code generation. What remains explicitly out of scope: sub-slicing, slice-of-slice, mutable
-slices, and general references/lvalue chains beyond nested array indexing. Also parses and/or type-checks in
-some form, but explicitly **not** backend-lowerable yet:
+rejected at code generation. KAI LANGUAGE M11A (post-alpha.2) then added a restricted, non-general provenance
+analysis (`External`/`Local`/`Unknown`) at the SEMANTIC layer: TypeChecker now accepts a narrow class of Slice
+returns (e.g. relaying a parameter's own slice straight back out) as provably sound, rejecting anything else
+with a dedicated `EscapingLocalSlice` diagnostic. KAI LANGUAGE M11B (post-alpha.2) then made exactly that
+narrow class genuinely EXECUTABLE: `fn identity(xs: [i32]) -> [i32] { return xs }` now compiles and runs,
+transporting only the view (pointer + length, never a copy of the viewed elements) back to a caller whose own
+backing storage the view was pointing at all along - no dangling pointer is created, since the returned
+pointer was never rebased away from storage the caller owns. What remains explicitly out of scope: an
+executable array wrapping a Slice (regardless of the wrapped Slice's own provenance), interprocedural
+provenance inference (re-forwarding an `Unknown`-provenance Slice-returning call result is still rejected),
+sub-slicing, slice-of-slice, mutable slices, and general references/lvalue chains beyond nested array
+indexing. Also parses and/or type-checks in some form, but explicitly **not** backend-lowerable yet:
 
-- a slice RETURN type, sub-slicing, slice-of-slice, and any array that recursively contains a slice
+- an array that recursively contains a slice as a function parameter/return/local, and sub-slicing/slice-of-slice
 - structs, enums, generics, traits
 - `Result`, general references (`&T`), and advanced ownership/borrowing
 - an owned, dynamic `String` type (`str` today is a `Copy`, immutable, non-owning view only)

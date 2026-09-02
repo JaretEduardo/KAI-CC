@@ -272,21 +272,31 @@ void testUnsupportedConstructDoesNotLeakAcrossGenerateCalls() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
 
-    // (1) an unsupported (slice) RETURN type sets unsupportedConstruct()
-    // on this call. KAI LANGUAGE M6: `for` statements are no longer
-    // usable for this - a supported integer-range `for` now lowers
-    // successfully (see the M6 test group below), and an unsupported
-    // iterable shape is rejected by TypeChecker
-    // (SemanticErrorKind::UnsupportedForIterable) before codegen ever
-    // runs, so it can no longer exercise THIS unsupported-construct path
-    // either. KAI LANGUAGE M10A: `[i32]` is now a real semantic Slice
-    // Type, so `return 0` against it would be a genuine TypeMismatch
-    // (never reaching codegen at all, per compileToLLVM()'s own
-    // model.errors().empty() gate above) - `return f()` recurses instead,
-    // giving the return expression the EXACT SAME (self-referential)
-    // Slice type the declared signature already has, so this still
-    // type-checks with zero errors while remaining backend-unsupported.
-    Generated first = compileToLLVM(sm, codegen, "fn f() -> [i32] {\n    return f()\n}");
+    // (1) an unsupported (array-containing-Slice) RETURN type sets
+    // unsupportedConstruct() on this call. KAI LANGUAGE M6: `for`
+    // statements are no longer usable for this - a supported
+    // integer-range `for` now lowers successfully (see the M6 test group
+    // below), and an unsupported iterable shape is rejected by
+    // TypeChecker (SemanticErrorKind::UnsupportedForIterable) before
+    // codegen ever runs, so it can no longer exercise THIS
+    // unsupported-construct path either. KAI LANGUAGE M10A: `[i32]` is
+    // now a real semantic Slice Type, so `return 0` against it would be a
+    // genuine TypeMismatch (never reaching codegen at all, per
+    // compileToLLVM()'s own model.errors().empty() gate above) - a
+    // self-recursive `return f()` no longer works either, now that KAI
+    // LANGUAGE M11A's restricted provenance analysis exists: an arbitrary
+    // function call's Slice result is always Unknown provenance (never
+    // External), so returning it would now be rejected as
+    // EscapingLocalSlice before codegen ever runs. KAI LANGUAGE M11B: a
+    // BARE Slice return (`return xs`) is now genuinely executable too
+    // (spec §4/§19 - see this file's own M11B section further below), so
+    // this uses `[[i32]; 2]` (an array that recursively contains a Slice)
+    // instead, which remains explicitly unsupported
+    // (`isUnsupportedSliceCarryingType()`) even though the element
+    // (`xs`) itself is a perfectly safe, `External`-provenance Slice -
+    // M11B intentionally does not generalize provenance tracking to
+    // aggregates.
+    Generated first = compileToLLVM(sm, codegen, "fn f(xs: [i32]) -> [[i32]; 2] {\n    return [xs, xs]\n}");
     KAI_CHECK(first.model.errors().empty());
     KAI_CHECK(!first.generationSucceeded);
     KAI_CHECK(codegen.unsupportedConstruct().has_value());
@@ -3796,30 +3806,56 @@ void testArrayContainingSliceParameterFailsCleanlyAtBackend() {
     }
 }
 
-// A Slice RETURN type fails cleanly, unconditionally (spec §5) - unlike a
-// PARAMETER, a bare Slice return remains unsupported even though it
-// mechanically COULD lower (the ABI itself is not the problem; lifetime
-// safety is). `return xs` (relaying the slice parameter back out) keeps
-// this semantically well-typed (zero TypeChecker errors) so
-// compileToLLVM() actually reaches codegen.generate() at all - see
-// compileToLLVM()'s own model.errors().empty() gate.
-void testSliceReturnTypeFailsCleanlyAtBackend() {
+// KAI LANGUAGE M11B: a bare Slice RETURN type is now genuinely
+// executable - but ONLY for a `return` expression KAI LANGUAGE M11A's
+// own restricted provenance analysis has already proven `External`
+// (relaying the slice parameter straight back out, exactly like this
+// one). This locks in the raw ABI shape the M8B array tests above
+// already establish the pattern for: a direct `{ptr, i64}` aggregate
+// return AND argument, no `sret`, no hidden pointer, no `byval`. Full
+// execution/call-result/no-element-copy coverage lives in this file's
+// own M11B section further below; this one test stays narrowly about
+// the FunctionType/attribute shape, mirroring
+// testArrayParameterAndReturnUseDirectAggregateFunctionType() above.
+void testSliceReturnTypeExecutesWithDirectAggregateAbi() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
     Generated result = compileToLLVM(sm, codegen, "fn identity(xs: [i32]) -> [i32] {\n    return xs\n}");
 
     KAI_CHECK(result.model.errors().empty());
-    KAI_CHECK(!result.generationSucceeded);
-    KAI_CHECK(codegen.unsupportedConstruct().has_value());
-    if (codegen.unsupportedConstruct().has_value()) {
-        // KAI LANGUAGE M10B: `xs`'s own PARAMETER type now succeeds (a
-        // bare Slice parameter is executable) - declareFunction()'s
-        // parameter loop no longer fails first, so this is now the
-        // RETURN-type-specific message, not the parameter one.
-        KAI_CHECK(codegen.unsupportedConstruct()->description ==
-                  "code generation is not yet supported for this function's return type");
+    // KAI LANGUAGE M10B: this used to fail here (a bare Slice return was
+    // unconditionally unsupported at codegen, even though `xs` itself
+    // was semantically well-typed). KAI LANGUAGE M11B narrows the
+    // backend's own guard so a `return` M11A has already proven
+    // `External` now generates successfully.
+    KAI_CHECK(result.generationSucceeded);
+    KAI_CHECK(!codegen.unsupportedConstruct().has_value());
+    if (!result.generationSucceeded) {
+        return;
     }
+    llvm::Function* identity = codegen.module().getFunction("identity");
+    KAI_CHECK(identity != nullptr);
+    if (identity == nullptr) {
+        return;
+    }
+    llvm::FunctionType* fnType = identity->getFunctionType();
+    KAI_CHECK(fnType->getNumParams() == 1);
+    KAI_CHECK(fnType->getParamType(0)->isStructTy());
+    KAI_CHECK(fnType->getReturnType()->isStructTy());
+    KAI_CHECK(identity->arg_size() == 1);
+    KAI_CHECK(!identity->hasStructRetAttr());
+    KAI_CHECK(!identity->getAttributes().hasParamAttr(0, llvm::Attribute::ByVal));
+    KAI_CHECK(!identity->getAttributes().hasParamAttr(0, llvm::Attribute::StructRet));
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
 }
+
+// Note: "an Array that recursively contains a Slice remains rejected as
+// a RETURN type" (spec §19's own explicit regression requirement) is
+// already covered by the pre-existing testArrayContainingSliceReturnTypeFailsCleanly()
+// further below (in this file's own M10B section) - its fixture
+// (`fn make(xs: [i32]) -> [[i32]; 2] { return [xs, xs] }`) is untouched
+// by isUnsupportedSliceCarryingType()'s M11B narrowing (an Array is
+// still an Array), so it was not duplicated here.
 
 // --- KAI LANGUAGE M10B: immutable slice VALUES + checked indexing ---
 //
@@ -4320,6 +4356,305 @@ void testArrayContainingSliceLocalFailsCleanly() {
     KAI_CHECK(!result.generationSucceeded);
 }
 
+// --- KAI LANGUAGE M11B: executable safe Slice returns ---
+//
+// M10B made Slice VALUES executable (locals, copies, parameters, checked
+// indexing) but left every Slice RETURN unconditionally unsupported at
+// codegen. M11A then added a restricted, flow-sensitive provenance
+// analysis (External/Local/Unknown) that lets TypeChecker accept a
+// narrow class of Slice returns as semantically SOUND, without changing
+// codegen at all. M11B is the backend half: `declareFunction()`'s own
+// return-type guard (`isUnsupportedSliceCarryingType()`) now allows a
+// bare Slice return type through - reachable ONLY via a `return`
+// expression M11A has already proven `External`, since anything else
+// still fails at TypeChecker with EscapingLocalSlice before codegen ever
+// runs. This section deliberately does NOT re-test M11A's own provenance
+// rules (see SliceProvenanceTests.cpp for that) - only that a
+// semantically-accepted Slice return now generates correct, working
+// {ptr, i64} aggregate-transport code.
+
+// A copied External parameter (`let s = xs; return s`) transports
+// exactly like direct forwarding.
+void testCopiedSliceParameterReturnGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn identity(xs: [i32]) -> [i32] {\n    let s = xs\n    return s\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// A double-copied External parameter (`let a = xs; let b = a; return b`)
+// also transports correctly - provenance chains of arbitrary length are
+// all just plain aggregate copies at this layer.
+void testDoubleCopiedSliceParameterReturnGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn identity(xs: [i32]) -> [i32] {\n    let a = xs\n    let b = a\n    return b\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// A Slice binding reassigned sequentially but still External at `return`
+// (`mut s = xs; s = ys; return s`) executes correctly - M11B does not
+// introduce any alias restriction for immutable Slice views, and
+// transport at this layer never depends on WHICH External source a
+// binding's current value came from.
+void testReassignedExternalSliceReturnGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(
+        sm, codegen, "fn choose(xs: [i32], ys: [i32]) -> [i32] {\n    mut s = xs\n    s = ys\n    return s\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// Both branches of an if/else produce External provenance
+// (`if cond { s = xs } else { s = ys }; return s`) - M11A accepts this as
+// External, and M11B must transport whichever branch actually ran with
+// no dependence on the branch's own identity.
+void testBranchSelectedExternalSliceReturnGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn choose(xs: [i32], ys: [i32], cond: bool) -> [i32] {\n"
+                                      "    mut s = xs\n"
+                                      "    if cond {\n"
+                                      "        s = xs\n"
+                                      "    } else {\n"
+                                      "        s = ys\n"
+                                      "    }\n"
+                                      "    return s\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// A call to a Slice-returning function produces a normal `{ptr, i64}`
+// aggregate CallInst result - lowerCallExpr() needed no Slice-specific
+// change at all, since it already forwards whatever `function->
+// getReturnType()` the callee's own FunctionType declares.
+void testCallToSliceReturningFunctionProducesAggregateResult() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn identity(xs: [i32]) -> [i32] {\n"
+                                      "    return xs\n"
+                                      "}\n"
+                                      "fn main() {\n"
+                                      "    let values = [10, 20, 30]\n"
+                                      "    let s = slice(values)\n"
+                                      "    let t = identity(s)\n"
+                                      "    print(len(t))\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+
+    const llvm::Function* mainFn = codegen.module().getFunction("main");
+    KAI_CHECK(mainFn != nullptr);
+    if (mainFn == nullptr) {
+        return;
+    }
+    const llvm::CallInst* identityCall = nullptr;
+    for (const llvm::BasicBlock& block : *mainFn) {
+        for (const llvm::Instruction& inst : block) {
+            if (const auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                if (call->getCalledFunction() != nullptr && call->getCalledFunction()->getName() == "identity") {
+                    identityCall = call;
+                }
+            }
+        }
+    }
+    KAI_CHECK(identityCall != nullptr);
+    if (identityCall != nullptr) {
+        KAI_CHECK(identityCall->getType()->isStructTy());
+    }
+}
+
+// A returned Slice can be indexed directly after the call
+// (`identity(s)[i]`-shaped usage via an intermediate local) - checked
+// indexing (`lowerCheckedIndexBounds()`) needed no change either, since
+// it already operates on whatever `{ptr, i64}` value it is given,
+// regardless of whether that value came from a local, a parameter, or a
+// call result.
+void testReturnedSliceCanBeIndexed() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn identity(xs: [i32]) -> [i32] {\n"
+                                      "    return xs\n"
+                                      "}\n"
+                                      "fn main() {\n"
+                                      "    let values = [10, 20, 30]\n"
+                                      "    let t = identity(slice(values))\n"
+                                      "    print(t[0])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// A zero-length Slice return - `len()` on the result must yield 0 with no
+// dereference of the (empty) backing storage. Structural-only here (see
+// NativeCompilationTests.cpp for the executed, exact-stdout version); this
+// just confirms it generates and verifies successfully.
+void testZeroLengthSliceReturnGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn identity(xs: [i32]) -> [i32] {\n"
+                                      "    return xs\n"
+                                      "}\n"
+                                      "fn main() {\n"
+                                      "    let a: [i32; 0] = []\n"
+                                      "    let s = identity(slice(a))\n"
+                                      "    print(len(s))\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// A `bool`-element Slice transports correctly through a Slice return -
+// spec §15's element-type coverage, generalized beyond `i32`.
+void testBoolSliceReturnGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn identity(xs: [bool]) -> [bool] {\n"
+                                      "    return xs\n"
+                                      "}\n"
+                                      "fn main() {\n"
+                                      "    let values = [true, false]\n"
+                                      "    let s = identity(slice(values))\n"
+                                      "    print(s[0])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// An `f64`-element Slice transports correctly through a Slice return.
+void testF64SliceReturnGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn identity(xs: [f64]) -> [f64] {\n"
+                                      "    return xs\n"
+                                      "}\n"
+                                      "fn main() {\n"
+                                      "    let values = [1.5, 2.5]\n"
+                                      "    let s = identity(slice(values))\n"
+                                      "    print(s[0])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// A `str`-element Slice transports correctly through a Slice return -
+// `str` and Slice share the identical `{ptr, i64}` shape, but this is a
+// SEPARATE Slice-of-str value (an array of `str` sliced), never `str`
+// itself reinterpreted as a Slice.
+void testStrSliceReturnGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn identity(xs: [str]) -> [str] {\n"
+                                      "    return xs\n"
+                                      "}\n"
+                                      "fn f(values: [str; 2]) {\n"
+                                      "    let s = identity(slice(values))\n"
+                                      "    print(len(s))\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// The callee returns the SAME pointer it received - no backing-array
+// element copy, no memcpy, no reconstructed temporary storage. Only the
+// {ptr, i64} aggregate itself (a load + a return) ever appears in
+// `identity`'s own body.
+void testSliceReturnTransportsPointerWithNoElementCopy() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn identity(xs: [i32]) -> [i32] {\n    return xs\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    const llvm::Function* identity = codegen.module().getFunction("identity");
+    KAI_CHECK(identity != nullptr);
+    if (identity == nullptr) {
+        return;
+    }
+    // No GEP, no per-element load/store, no memcpy/intrinsic call - only
+    // the parameter's own alloca, a store of the incoming argument, a
+    // load of the whole aggregate, and the terminating `ret`.
+    std::size_t loadCount = 0;
+    std::size_t storeCount = 0;
+    for (const llvm::BasicBlock& block : *identity) {
+        for (const llvm::Instruction& inst : block) {
+            KAI_CHECK(!llvm::isa<llvm::GetElementPtrInst>(inst));
+            KAI_CHECK(!llvm::isa<llvm::CallInst>(inst));
+            if (llvm::isa<llvm::LoadInst>(inst)) {
+                ++loadCount;
+            }
+            if (llvm::isa<llvm::StoreInst>(inst)) {
+                ++storeCount;
+            }
+        }
+    }
+    KAI_CHECK(loadCount == 1);
+    KAI_CHECK(storeCount == 1);
+}
+
+// Note: "an Array that recursively contains a Slice remains rejected as
+// a LOCAL too" (proving isUnsupportedSliceCarryingType()'s shared policy
+// did not accidentally loosen the local case while narrowing the return
+// case) is already covered by the pre-existing
+// testArrayContainingSliceLocalFailsCleanly() above, whose fixture is
+// identically untouched by M11B - not duplicated here.
 
 } // namespace
 
@@ -4469,7 +4804,7 @@ int main() {
     testNestedArrayReturnIndexingVerifies();
 
     testArrayContainingSliceParameterFailsCleanlyAtBackend();
-    testSliceReturnTypeFailsCleanlyAtBackend();
+    testSliceReturnTypeExecutesWithDirectAggregateAbi();
 
     testSliceLLVMTypeAndLocalStorage();
     testSliceOfLocalArrayReferencesOriginalStorage();
@@ -4487,6 +4822,18 @@ int main() {
     testArrayContainingSliceReturnTypeFailsCleanly();
     testSliceLocalGeneratesSuccessfully();
     testArrayContainingSliceLocalFailsCleanly();
+
+    testCopiedSliceParameterReturnGeneratesSuccessfully();
+    testDoubleCopiedSliceParameterReturnGeneratesSuccessfully();
+    testReassignedExternalSliceReturnGeneratesSuccessfully();
+    testBranchSelectedExternalSliceReturnGeneratesSuccessfully();
+    testCallToSliceReturningFunctionProducesAggregateResult();
+    testReturnedSliceCanBeIndexed();
+    testZeroLengthSliceReturnGeneratesSuccessfully();
+    testBoolSliceReturnGeneratesSuccessfully();
+    testF64SliceReturnGeneratesSuccessfully();
+    testStrSliceReturnGeneratesSuccessfully();
+    testSliceReturnTransportsPointerWithNoElementCopy();
 
     testPrintLiteralI32SignExtendsToI64();
     testPrintVariableI64();

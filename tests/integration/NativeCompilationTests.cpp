@@ -1964,26 +1964,11 @@ void testSliceIndexedMutationFailsInFrontend() {
     std::filesystem::remove(sourcePath, ignored);
 }
 
-// O. A Slice RETURN is rejected cleanly at the BACKEND (exit 6) - it is
-// semantically well-typed (TypeChecker accepts it fine), so this fails
-// at code generation specifically, never a frontend semantic error and
-// never a crash (spec §5/§23).
-void testSliceReturnFailsCleanlyAtBackend() {
-    const std::filesystem::path sourcePath = writeTempSource(
-        "kai_e2e_slice_return.kai", "fn bad(xs: [i32]) -> [i32] {\n    return xs\n}\nfn main() {\n    print(0)\n}");
-    std::error_code ignored;
-
-    SourceManager sm;
-    std::ostringstream err;
-    const int exitCode = kai::cli::runCompileCommand(
-        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_slice_return.out", err);
-
-    KAI_CHECK(exitCode == 6);
-    KAI_CHECK(err.str().find("code generation is not yet supported for this function's return type") !=
-              std::string::npos);
-
-    std::filesystem::remove(sourcePath, ignored);
-}
+// O. KAI LANGUAGE M11B: a Slice RETURN that KAI LANGUAGE M11A's own
+// restricted provenance analysis has proven `External` now EXECUTES
+// natively, instead of failing cleanly at the backend as it did through
+// M10B/M11A - see this file's own M11B section further below (tests A-N)
+// for the full execution/call-result/rejection-regression coverage.
 
 // P. An executable aggregate that recursively contains a Slice (an array
 // RETURN type of `[[i32]; 2]`) is rejected cleanly at the BACKEND too -
@@ -2005,6 +1990,352 @@ void testArrayContainingSliceEscapeFailsCleanlyAtBackend() {
               std::string::npos);
 
     std::filesystem::remove(sourcePath, ignored);
+}
+
+// --- KAI LANGUAGE M11B: executable safe Slice returns ---
+//
+// M11A's own restricted provenance analysis (External/Local/Unknown)
+// already rejects every unsafe Slice return at the SEMANTIC layer (exit
+// 5, EscapingLocalSlice - see SliceProvenanceTests.cpp for the dedicated
+// unit coverage of that rule itself). M11B is the backend half: a Slice
+// return M11A has already proven `External` now generates and executes
+// correctly, transporting only the {ptr, i64} view (never a copy of the
+// viewed elements) back to a caller whose own backing storage is what
+// the view was pointing at all along - so no dangling pointer is ever
+// created. This section re-verifies the REJECTION cases too (I/J/K/L
+// below) purely as END-TO-END regressions - the actual provenance rule
+// enforcing them belongs entirely to M11A/TypeChecker, never duplicated
+// here.
+
+// A. REQUIRED: direct forwarding (`return xs`) - the central M11B
+// scenario (spec §1/§10): a caller-owned local array, sliced, passed
+// into `identity`, returned back out, and used while the original array
+// is still alive.
+void testSliceIdentityReturnEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_identity.kai",
+                                                       "fn identity(xs: [i32]) -> [i32] {\n"
+                                                       "    return xs\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let values = [10, 20, 30]\n"
+                                                       "    let s = slice(values)\n"
+                                                       "    let t = identity(s)\n"
+                                                       "    print(len(t))\n"
+                                                       "    print(t[0])\n"
+                                                       "    print(t[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n10\n30\n");
+}
+
+// B. REQUIRED: a copied External parameter (`let s = xs; return s`)
+// executes identically to direct forwarding (spec §11.B).
+void testSliceCopiedParameterReturnEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_copy_return.kai",
+                                                       "fn identity(xs: [i32]) -> [i32] {\n"
+                                                       "    let s = xs\n"
+                                                       "    return s\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let values = [10, 20, 30]\n"
+                                                       "    let t = identity(slice(values))\n"
+                                                       "    print(len(t))\n"
+                                                       "    print(t[0])\n"
+                                                       "    print(t[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n10\n30\n");
+}
+
+// C. REQUIRED: a double-copied External parameter
+// (`let a = xs; let b = a; return b`) also executes identically (spec
+// §11.C).
+void testSliceDoubleCopiedParameterReturnEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_double_copy_return.kai",
+                                                       "fn identity(xs: [i32]) -> [i32] {\n"
+                                                       "    let a = xs\n"
+                                                       "    let b = a\n"
+                                                       "    return b\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let values = [10, 20, 30]\n"
+                                                       "    let t = identity(slice(values))\n"
+                                                       "    print(len(t))\n"
+                                                       "    print(t[0])\n"
+                                                       "    print(t[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n10\n30\n");
+}
+
+// D. REQUIRED: a returned Slice used DIRECTLY with `len()`, with no
+// intermediate local binding for the call result.
+void testReturnedSliceUsedDirectlyWithLenEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_return_len.kai",
+                                                       "fn identity(xs: [i32]) -> [i32] {\n"
+                                                       "    return xs\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let values = [10, 20, 30]\n"
+                                                       "    print(len(identity(slice(values))))\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n");
+}
+
+// E. REQUIRED: a returned Slice used DIRECTLY with indexing, with no
+// intermediate local binding for the call result.
+void testReturnedSliceUsedDirectlyWithIndexingEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_return_index.kai",
+                                                       "fn identity(xs: [i32]) -> [i32] {\n"
+                                                       "    return xs\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let values = [10, 20, 30]\n"
+                                                       "    print(identity(slice(values))[1])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "20\n");
+}
+
+// F. REQUIRED: a zero-length Slice return - `len()` on the result is 0,
+// with no dereference of the (empty) backing storage and no special
+// null-pointer language semantics (spec §16).
+void testZeroLengthSliceReturnEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_return_zero_length.kai",
+                                                       "fn identity(xs: [i32]) -> [i32] {\n"
+                                                       "    return xs\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let a: [i32; 0] = []\n"
+                                                       "    let s = identity(slice(a))\n"
+                                                       "    print(len(s))\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "0\n");
+}
+
+// G. REQUIRED: branch-selected External provenance, TRUE path (spec
+// §13) - `s` is reassigned to `xs` inside the taken `if` branch; both
+// branches stay External, so M11A accepts the return, and M11B must
+// transport whichever branch actually ran.
+void testBranchSelectedExternalSliceReturnTruePathEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_branch_true.kai",
+                                                       "fn choose(xs: [i32], ys: [i32], cond: bool) -> [i32] {\n"
+                                                       "    mut s = xs\n"
+                                                       "    if cond {\n"
+                                                       "        s = xs\n"
+                                                       "    } else {\n"
+                                                       "        s = ys\n"
+                                                       "    }\n"
+                                                       "    return s\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let a = [1, 2, 3]\n"
+                                                       "    let b = [4, 5, 6, 7]\n"
+                                                       "    let t = choose(slice(a), slice(b), true)\n"
+                                                       "    print(len(t))\n"
+                                                       "    print(t[0])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "3\n1\n");
+}
+
+// H. REQUIRED: branch-selected External provenance, FALSE path (spec
+// §13) - the same function as G, with `cond = false`, proving transport
+// does not depend on provenance SOURCE (`xs` vs. `ys`), only on which
+// value the runtime branch actually produced.
+void testBranchSelectedExternalSliceReturnFalsePathEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_branch_false.kai",
+                                                       "fn choose(xs: [i32], ys: [i32], cond: bool) -> [i32] {\n"
+                                                       "    mut s = xs\n"
+                                                       "    if cond {\n"
+                                                       "        s = xs\n"
+                                                       "    } else {\n"
+                                                       "        s = ys\n"
+                                                       "    }\n"
+                                                       "    return s\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let a = [1, 2, 3]\n"
+                                                       "    let b = [4, 5, 6, 7]\n"
+                                                       "    let t = choose(slice(a), slice(b), false)\n"
+                                                       "    print(len(t))\n"
+                                                       "    print(t[0])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "4\n4\n");
+}
+
+// I. REQUIRED (spec §9): LOCAL use of an `Unknown`-provenance
+// Slice-returning call result is valid and executes correctly - `Unknown`
+// means "cannot prove safe to escape", never "invalid value". No
+// RETURN of the call result occurs here, only an ordinary local read.
+void testLocalUseOfUnknownSliceCallResultEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_unknown_local_use.kai",
+                                                       "fn id(xs: [i32]) -> [i32] {\n"
+                                                       "    return xs\n"
+                                                       "}\n"
+                                                       "fn firstOf(xs: [i32]) -> i32 {\n"
+                                                       "    let s = id(xs)\n"
+                                                       "    return s[0]\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let values = [7, 8, 9]\n"
+                                                       "    print(firstOf(slice(values)))\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "7\n");
+}
+
+// J. REQUIRED (spec §8): re-forwarding an `Unknown`-provenance
+// Slice-returning call result remains SEMANTICALLY rejected (exit 5,
+// EscapingLocalSlice) - M11A performs no interprocedural inference, so
+// `id`'s own trivially-safe implementation is never special-cased.
+void testWrapperReturnOfUnknownCallResultRejectedEndToEnd() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_slice_unknown_rewrap.kai",
+                         "fn id(xs: [i32]) -> [i32] {\n"
+                         "    return xs\n"
+                         "}\n"
+                         "fn wrapper(xs: [i32]) -> [i32] {\n"
+                         "    return id(xs)\n"
+                         "}\n"
+                         "fn main() {\n    print(0)\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_slice_unknown_rewrap.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("escaping local slice") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// K. REQUIRED: a local-backed Slice return remains rejected SEMANTICALLY
+// (exit 5, EscapingLocalSlice) - `Local` provenance, never reaching
+// codegen at all, exactly as under M11A alone.
+void testLocalBackedSliceReturnRejectedEndToEnd() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_slice_local_escape.kai",
+                         "fn bad() -> [i32] {\n"
+                         "    let a = [1, 2, 3]\n"
+                         "    return slice(a)\n"
+                         "}\n"
+                         "fn main() {\n    print(0)\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_slice_local_escape.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("escaping local slice") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// L. REQUIRED: a fixed-array-PARAMETER Slice return remains rejected
+// SEMANTICALLY (exit 5, EscapingLocalSlice) - a fixed-array parameter is
+// passed BY VALUE into callee-owned storage (M8's own ABI), so slicing
+// it is exactly as `Local` as slicing a local array, never treated like
+// a Slice parameter (which is `External`).
+void testFixedArrayParameterSliceReturnRejectedEndToEnd() {
+    const std::filesystem::path sourcePath =
+        writeTempSource("kai_e2e_slice_fixed_array_param_escape.kai",
+                         "fn bad(values: [i32; 3]) -> [i32] {\n"
+                         "    return slice(values)\n"
+                         "}\n"
+                         "fn main() {\n    print(0)\n}");
+    std::error_code ignored;
+
+    SourceManager sm;
+    std::ostringstream err;
+    const int exitCode = kai::cli::runCompileCommand(
+        sm, sourcePath, std::filesystem::temp_directory_path() / "kai_e2e_slice_fixed_array_param_escape.out", err);
+
+    KAI_CHECK(exitCode == 5);
+    KAI_CHECK(err.str().find("escaping local slice") != std::string::npos);
+
+    std::filesystem::remove(sourcePath, ignored);
+}
+
+// M. An aggregate that recursively contains a Slice still fails cleanly
+// at the BACKEND (exit 6) even for an otherwise-safe `External` element -
+// see testArrayContainingSliceEscapeFailsCleanlyAtBackend() above (spec
+// §19); not duplicated here.
+
+// N. `str`-element Slice transport through a Slice return, using the
+// existing `slice(...)`/`len()` construction rules unchanged.
+void testStrSliceReturnEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_slice_str_return.kai",
+                                                       "fn identity(xs: [str]) -> [str] {\n"
+                                                       "    return xs\n"
+                                                       "}\n"
+                                                       "fn f(values: [str; 2]) {\n"
+                                                       "    let s = identity(slice(values))\n"
+                                                       "    print(len(s))\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let values = [\"ab\", \"cde\"]\n"
+                                                       "    f(values)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    if (!result.compileSucceeded) {
+        return;
+    }
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "2\n");
 }
 
 } // namespace
@@ -2110,8 +2441,21 @@ int main() {
     testLenOfFixedArrayEndToEnd();
     testLenOfStrEndToEnd();
     testSliceIndexedMutationFailsInFrontend();
-    testSliceReturnFailsCleanlyAtBackend();
     testArrayContainingSliceEscapeFailsCleanlyAtBackend();
+
+    testSliceIdentityReturnEndToEnd();
+    testSliceCopiedParameterReturnEndToEnd();
+    testSliceDoubleCopiedParameterReturnEndToEnd();
+    testReturnedSliceUsedDirectlyWithLenEndToEnd();
+    testReturnedSliceUsedDirectlyWithIndexingEndToEnd();
+    testZeroLengthSliceReturnEndToEnd();
+    testBranchSelectedExternalSliceReturnTruePathEndToEnd();
+    testBranchSelectedExternalSliceReturnFalsePathEndToEnd();
+    testLocalUseOfUnknownSliceCallResultEndToEnd();
+    testWrapperReturnOfUnknownCallResultRejectedEndToEnd();
+    testLocalBackedSliceReturnRejectedEndToEnd();
+    testFixedArrayParameterSliceReturnRejectedEndToEnd();
+    testStrSliceReturnEndToEnd();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }

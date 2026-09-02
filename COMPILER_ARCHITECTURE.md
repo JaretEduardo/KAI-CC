@@ -90,18 +90,25 @@ argument/result (KAI LANGUAGE M8B, post-alpha.2 - no `sret`/`byval`/hidden point
 external C ABI), Unit functions, an immutable slice `[T]` (KAI LANGUAGE M10B, post-alpha.2) - explicit
 `slice(array)` construction (never implicit), local storage/copy/rebinding, checked indexed reads with the
 SAME `llvm.trap`-guarded runtime bounds model arrays use, the `len(array | slice | str) -> u64` builtin, and a
-Slice function parameter using the same direct-aggregate ABI strategy `[T; N]` uses (see this section's own
-M10A/M10B note below for what remains deliberately unsupported: Slice returns, and any array recursively
-containing a Slice), a minimal `print` builtin for primitive types (lowered to the tiny
-static C runtime described in §12, `runtime/kai_runtime.c`), native object emission (`LLVMObjectEmitter`),
-and static runtime linking into a real executable (`NativeLinker`, invoking the host C compiler driver) via
-`kaicc <file.kai> -o <output>`.
+Slice function parameter using the same direct-aggregate ABI strategy `[T; N]` uses, and - KAI LANGUAGE M11B,
+post-alpha.2 - a bare Slice RETURN type for a `return` expression KAI LANGUAGE M11A's own restricted
+provenance analysis has already proven `External` (see this section's own M11A/M11B notes below for what
+remains deliberately unsupported: any array recursively containing a Slice, and re-forwarding an
+`Unknown`-provenance Slice-returning call result), a minimal `print` builtin for primitive types (lowered to
+the tiny static C runtime described in §12, `runtime/kai_runtime.c`), native object emission
+(`LLVMObjectEmitter`), and static runtime linking into a real executable (`NativeLinker`, invoking the host C
+compiler driver) via `kaicc <file.kai> -o <output>`.
 
 Still unimplemented (backend/native execution only): general iterable/foreach semantics and array/slice
 iteration (`for x in someArray` - `for` only supports a literal `start..end` integer range, KAI LANGUAGE M6),
-a first-class `Range` value, a Slice RETURN type and any array recursively containing a Slice (both a
-deliberate lifetime-safety restriction, not a lowering gap - see this section's own M10A/M10B note below),
-array-to-slice conversion other than the explicit `slice(...)` builtin, sub-slicing, slice-of-slice,
+a first-class `Range` value, any array recursively containing a Slice as a function parameter/return/local
+(a deliberate lifetime-safety restriction, not a lowering gap - see this section's own M10A/M10B/M11B notes
+below; KAI LANGUAGE M11A, post-alpha.2 added a restricted SEMANTIC-layer provenance analysis that lets
+TypeChecker accept a narrow class of BARE Slice returns as SOUND, and KAI LANGUAGE M11B, post-alpha.2 then
+made exactly that narrow class genuinely EXECUTABLE - see this section's own M11A/M11B notes below - but an
+executable aggregate wrapping a Slice remains unconditionally rejected regardless of provenance, since M11B
+intentionally does not generalize provenance tracking to aggregates), array-to-slice conversion other than
+the explicit `slice(...)` builtin, sub-slicing, slice-of-slice,
 `Char` as a backend-lowerable value, references, ownership/borrowing,
 structs/enums/generics, `panic`/`assert` lowering, optimization passes, HIR, an LSP, and the higher-level
 `kai` CLI wrapper described in §14 (only `kaicc` itself exists today).
@@ -355,6 +362,83 @@ in place of an array's compile-time length constant, and a single-index GEP into
 evaluating it once for side effects - the length comes from the semantic Type's own `arrayLength()` alone
 (compile-time structural data, unchanged since M7A), which also means `len()` never needs to materialize an
 executable array-of-Slice aggregate merely to answer a question the TYPE already answered.
+
+**Restricted slice PROVENANCE + safe-return analysis (KAI LANGUAGE M11A, post-alpha.2):** M10B rejected every
+Slice return uniformly, with no distinction between a sound and an unsound one. M11A adds a narrow,
+special-cased provenance analysis - deliberately NOT general borrow checking - that lets TypeChecker draw that
+distinction at the SEMANTIC layer, while leaving code generation's own unconditional rejection completely
+untouched (that remains a later milestone's job). `SliceProvenance` (`External`/`Local`/`Unknown`,
+`SemanticModel.hpp`) is a property of a VALUE/expression/binding at a point in a function body - deliberately
+never encoded into `TypeKind::Slice`/`CompoundTypeId` themselves, since two Slice-typed expressions with the
+identical `[T]` Type can have different provenance, and the same binding's provenance can change across a
+reassignment. Threading a new parameter through the entire `checkExpr`/`inferExpr` recursive chain to carry
+this would have touched dozens of call sites, so provenance instead lives as flow-sensitive MUTABLE state
+directly inside `SemanticModel` (already threaded everywhere as `SemanticModel&`), exposed only through new
+`TypeChecker`-friend-only private methods (`setSliceProvenance()`/`sliceProvenanceOf(SymbolId)`/
+`snapshotSliceProvenance()`/`restoreSliceProvenance()`) - compiler-internal safety metadata with no public
+query surface, mirroring the existing `setSymbolType()`/`symbol(id).type` pattern but explicitly documented as
+flow-sensitive, unlike an ordinary Symbol fact. `TypeChecker::sliceProvenanceOf(const ast::Expr&, ...)`
+classifies an expression by SHAPE alone, mirroring `unwrapSliceSourceIdentifier()`'s own narrow structural-only
+discipline: a transparent `ParenExpr` unwraps to its inner expression's provenance; a bare identifier looks up
+its symbol's own tracked provenance; a direct `slice(...)` builtin call is always `Local` (M10B's own source
+restriction already guarantees its only eligible arguments are a local array or a fixed-array PARAMETER, and a
+fixed-array parameter is a BY-VALUE copy into callee-owned storage per M8's array ABI - so both are uniformly
+Local, never treated like a Slice parameter, which is `External`); anything else (any other call, a binary/
+unary/member/index/literal/... expression) is `Unknown` - the always-safe, conservative default this
+milestone's own "conservative rejection is acceptable, unsound acceptance is not" rule requires, and in
+particular the result of ANY other function call is `Unknown` unconditionally, with no interprocedural
+inference.
+
+Provenance is seeded at function entry (every Slice parameter starts `External`), updated at `let`
+initialization and at plain reassignment (`checkVariableAssignmentTarget()`), and checked at `return`
+(`checkReturnStmt()`): only `External` may flow into a Slice-returning function's `return`, everything else is
+rejected via a dedicated `EscapingLocalSlice` diagnostic - never a generic `TypeMismatch`. Branch merging
+(`checkIfStmt()`) snapshots provenance before the branches, checks each branch from a FRESH restore of that
+snapshot (never a continuation of a sibling branch's own mutations), and folds the results pairwise via the
+spec's own merge table (`TypeChecker::mergeSliceProvenance()`: `External+External -> External`,
+`Local+Local -> Local`, anything mixed or already-`Unknown` -> `Unknown`) - critically, the pre-branch snapshot
+itself is folded in as an explicit "no branch taken" outcome ONLY when there is no `else` (since that outcome
+is only actually reachable then; an exhaustive `if`/`else` excludes it, since falling through past both
+branches is impossible). Loops (`checkWhileStmt()`/`checkForStmt()`) use a deliberately coarser, non-fixed-point
+rule instead of general dataflow: `SemanticModel::beginSliceProvenanceTouchTracking()`/
+`endSliceProvenanceTouchTracking()` record every binding assigned ANYWHERE in the loop body, and every touched
+binding is forced to `Unknown` once the loop exits, regardless of the loop's trip count - a real fixed-point
+merge was considered and rejected (a naive single-pass "before ⊔ after" merge is actually UNSOUND: a binding
+reassigned FROM another binding that itself changes provenance partway through the loop body can still, after
+two or more real iterations, reach a provenance the one-pass merge would never predict), and a sound
+fixed-point analysis would have required real CFG/dataflow infrastructure this milestone's own explicit STOP
+condition rules out - the touch-tracking rule is coarser (it may reject some loop-body reassignments a full
+fixed-point analysis would prove safe) but is provably sound, and never reports a spurious duplicate
+diagnostic the way re-running `checkBlock()` to reach a fixed point risked doing.
+
+**Executable safe Slice returns (KAI LANGUAGE M11B, post-alpha.2):** M11A proved a narrow class of Slice
+returns SOUND at the semantic layer while leaving `declareFunction()`'s own return-type guard completely
+untouched, so even a proven-safe return still failed cleanly at codegen. M11B is the backend half: the guard
+is narrowed from an unconditional `typeContainsSlice(returnType)` check to a new, explicitly-named
+`isUnsupportedSliceCarryingType(type, model)` policy (`type.isArray() && typeContainsSlice(type, model)`) -
+a bare Slice return type is no longer itself unsupported, only an ARRAY recursively containing one still is.
+This ONE renamed, reused predicate now backs all three call sites that used to each express a slightly
+different shape of the same idea ad hoc (`declareFunction()`'s parameter loop, `declareFunction()`'s own
+return-type check, `generateVarDeclStmt()`'s local check) - the parameter and local checks were already
+`isArray() && typeContainsSlice(...)` before M11B and are behaviorally unchanged; only the return check's
+own guard shape actually moved. Critically, M11B duplicates NONE of M11A's own provenance analysis: a Slice
+return only ever REACHES this relaxed codegen guard because TypeChecker has already rejected every
+`Local`/`Unknown` case with `EscapingLocalSlice` before code generation ever runs, so `declareFunction()`
+itself never needs to ask "is this SPECIFIC return safe" - only "is this TYPE shape (bare Slice vs.
+Slice-wrapping-array) one this backend can lower at all." Once past that guard, no other codegen change was
+needed: `lowerType()` already lowered Slice permissively since M10B, `generateReturnStmt()` already lowers
+any return expression via the same generic `lowerExpr()`/`CreateRet()` path every other return type uses, and
+`lowerCallExpr()` already forwards whatever aggregate type a callee's own `FunctionType` declares - a call to
+a Slice-returning function needed zero Slice-specific handling to produce a correct `{ptr, i64}` result. The
+returned value is always the SAME pointer the caller's own backing storage already had (an aggregate
+load-then-`ret`, never a GEP, an element copy, or a `memcpy`) - the returned view is sound precisely because
+its `ptr` field was never rebased away from storage the caller (not the returning function) owns, so no
+dangling pointer is ever created by allowing this. Re-forwarding an `Unknown`-provenance Slice-returning call
+result remains rejected exactly as under M11A alone (`fn wrapper(xs: [i32]) -> [i32] { return id(xs) }` is
+still `EscapingLocalSlice`, even though `id` itself only ever forwards its own parameter) - M11B is a backend
+ABI change, never interprocedural provenance inference, and `Unknown` provenance still permits unrestricted
+ORDINARY LOCAL use (an element read, a copy into another local) since "cannot prove safe to escape" is not
+"invalid value."
 
 Example errors:
 

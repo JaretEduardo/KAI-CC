@@ -196,6 +196,26 @@ case, simpler than Rust's own borrow checking by a wide margin, kept only as far
 use case requires. See TYPE_SYSTEM.md's own "Slices" section for the complete rule and DESIGN_QUESTIONS.md for
 what remains open (general slice-return safety, sub-slicing, mutable slices).
 
+**A third, still-narrow refinement (KAI LANGUAGE M11A):** "never be returned from a function" above is now
+more precise, not more permissive - a restricted PROVENANCE analysis (`External`/`Local`/`Unknown`, tracked
+per binding, never encoded into the Slice `Type` itself) lets TypeChecker recognize the specific case where a
+Slice being returned demonstrably traces back to a parameter (and hence storage that genuinely outlives the
+call) rather than to local storage, and accept only that case as SEMANTICALLY sound. This is still explicitly
+not a borrow checker: it recognizes a small, fixed set of expression shapes (a parameter, a plain copy/
+rebinding, `slice(...)` itself), and performs no interprocedural inference (any other function's return is
+always `Unknown`).
+
+**A fourth refinement, backend-facing this time (KAI LANGUAGE M11B):** the narrow class of returns M11A proved
+sound now genuinely EXECUTES - `fn identity(xs: [i32]) -> [i32] { return xs }` compiles and runs, transporting
+only the view (a pointer and a length) back to a caller whose own backing storage it was pointing at all
+along, never a copy of the viewed elements and never a dangling pointer. M11B changes nothing about WHAT is
+judged safe (M11A's own analysis is untouched) - it only relaxes the backend's own type-shape guard so a
+return already proven safe is no longer needlessly blocked. An executable array wrapping a Slice remains
+unconditionally rejected regardless of provenance, and re-forwarding an `Unknown`-provenance Slice-returning
+call result remains rejected too - M11B is a backend ABI decision, not a step toward interprocedural
+inference or general borrow checking. See TYPE_SYSTEM.md's own "Function returns" subsection and
+DESIGN_QUESTIONS.md's own M11A/M11B resolution/open-questions.
+
 ---
 
 ## 5. AI Semantic Tooling

@@ -125,6 +125,16 @@ private:
     };
 
     void checkTopLevelDeclaration(const ast::Decl& decl, SemanticModel& model) const;
+
+    /// KAI LANGUAGE M11A: in addition to building `ReturnContext`, seeds
+    /// every Slice-typed PARAMETER's SliceProvenance as External
+    /// (`model.setSliceProvenance()`) before checking the body - the
+    /// ONE, and only, provenance fact known before any statement runs
+    /// (spec §2.A). `model`'s own provenance map is FLOW-SENSITIVE
+    /// state scoped to exactly one function body at a time - see
+    /// SemanticModel::sliceProvenanceOf()'s own comment - so no explicit
+    /// reset is needed between functions (stale entries for a previous
+    /// function's locals are simply never looked up again).
     void checkFunctionBody(const ast::FunctionDecl& fn, SemanticModel& model) const;
     void checkBlock(const ast::BlockStmt& block, const ReturnContext& returnContext, SemanticModel& model) const;
 
@@ -140,17 +150,62 @@ private:
     /// (Milestone 1 spec #19/#20): fetches the Local Symbol ALREADY
     /// created by SemanticAnalyzer through declarationSymbol() - never
     /// re-resolves the TypeSyntax annotation itself.
+    ///
+    /// KAI LANGUAGE M11A: once the local's own Type is known (inferred or
+    /// annotated) and it is a Slice, ALSO records the initializer's own
+    /// SliceProvenance (sliceProvenanceOf() below) as this local's
+    /// starting provenance - `let s = slice(a)`/`let s = xs` both flow
+    /// through this ONE path (spec §12).
     void checkVarDecl(const ast::VarDeclStmt& varDecl, SemanticModel& model) const;
 
     /// Milestone 5 spec #2-#4: validates every if/else-if condition
     /// independently (never the parameterless `else`), then traverses
     /// every branch body - including a mismatched/Error/Unresolved
     /// condition's own body - unconditionally.
+    ///
+    /// KAI LANGUAGE M11A spec §4/§26: a fork/merge point for Slice
+    /// provenance. Before the FIRST branch, snapshots the incoming
+    /// provenance map (`model.snapshotSliceProvenance()`); each branch is
+    /// then checked starting from that SAME snapshot (restored via
+    /// `model.restoreSliceProvenance()` before it runs), so branches are
+    /// independent alternate paths, never a continuation of a previous
+    /// branch's own effects - exactly like every other "traverse both
+    /// paths independently" rule this method already followed pre-M11A,
+    /// generalized to provenance. Once every branch (and the implicit
+    /// "no branch taken" outcome, when there is no `else`, contributing
+    /// the ORIGINAL incoming snapshot unchanged) has its own resulting
+    /// snapshot, they are merged pairwise (mergeSliceProvenance() below)
+    /// and installed as the provenance state statements AFTER the
+    /// if/else observe. This never re-runs any branch's own type-checking
+    /// twice (each branch's AST is visited exactly once, so no diagnostic
+    /// can ever be duplicated) - only the SMALL, separate provenance map
+    /// is forked/restored around each branch.
     void checkIfStmt(const ast::IfStmt& ifStmt, const ReturnContext& returnContext, SemanticModel& model) const;
 
     /// Milestone 5 spec #5: the same Bool-condition rule as checkIfStmt(),
     /// with no additional loop-specific validation; the body is always
     /// traversed afterward.
+    ///
+    /// KAI LANGUAGE M11A spec §4/§13/§26: a loop body may execute zero or
+    /// more times, so a SINGLE static pass over it cannot precisely
+    /// bound what a SECOND (or later) iteration might observe once one
+    /// Slice binding's reassignment depends on ANOTHER'S current value
+    /// (e.g. `s = t; t = slice(local)` - after two real iterations `s`
+    /// itself becomes Local, which a naive "before ⊔ after-one-pass"
+    /// merge would miss and wrongly report as still External). Rather
+    /// than a full fixed-point re-analysis (which would require
+    /// re-checking the body's AST more than once, risking duplicate
+    /// diagnostics), this method uses model's touched-tracking
+    /// (beginSliceProvenanceTouchTracking()/endSliceProvenanceTouchTracking())
+    /// to conservatively force EVERY binding assigned ANYWHERE within the
+    /// loop body - regardless of what value(s) it was assigned - to
+    /// Unknown once the loop exits. This is strictly MORE conservative
+    /// than necessary in some cases (spec explicitly sanctions this:
+    /// "marking it Unknown is acceptable... Conservatism is preferred
+    /// over unsound acceptance"), but it is SOUND for arbitrarily many
+    /// iterations, requires the loop body's AST to be checked exactly
+    /// once (no duplicate-diagnostic risk), and needs no dataflow
+    /// fixed-point machinery.
     void checkWhileStmt(const ast::WhileStmt& whileStmt, const ReturnContext& returnContext,
                          SemanticModel& model) const;
 
@@ -165,6 +220,14 @@ private:
     /// checkVarDecl() does for an unannotated `let`. The body is always
     /// checked afterward regardless of the iterable's own outcome (same
     /// "keep traversing" policy as every other statement in this file).
+    ///
+    /// KAI LANGUAGE M11A: the SAME touched-tracking "assigned anywhere in
+    /// the loop body -> Unknown" conservative rule checkWhileStmt() uses -
+    /// see that method's own comment for the full reasoning. A `for`
+    /// loop's own induction variable is never itself Slice-typed (it
+    /// ranges over an integer domain - checkIntegerRangeFor() below), so
+    /// only assignments to OTHER, pre-existing Slice bindings inside the
+    /// body are relevant here.
     void checkForStmt(const ast::ForStmt& forStmt, const ReturnContext& returnContext, SemanticModel& model) const;
 
     /// M6: validates `range`'s two endpoints via the SAME
@@ -221,8 +284,46 @@ private:
     /// only until a real return-provenance analysis exists (see
     /// MEMORY_MODEL.md §25's Static/ExternallyOwned/LocallyOwned design,
     /// intentionally NOT implemented here).
+    ///
+    /// KAI LANGUAGE M11A spec §5/§6/§7: once the type-check above already
+    /// passed (`actualType == declaredReturnType`, no TypeMismatch) and
+    /// `declaredReturnType` is a Slice, ALSO requires the returned
+    /// expression's SliceProvenance (sliceProvenanceOf() below) to be
+    /// External - Local or Unknown both emit EscapingLocalSlice instead.
+    /// This is a SEPARATE, additional check layered on top of an
+    /// already-valid type, mirroring the EXISTING UnsupportedStrReturn
+    /// check just above exactly (same "type is fine, but this narrow
+    /// extra safety rule still applies" shape) - never a second
+    /// TypeMismatch, and never reachable when the type-check itself
+    /// already failed or deferred.
     void checkReturnStmt(const ast::ReturnStmt& returnStmt, const ReturnContext& returnContext,
                           SemanticModel& model) const;
+
+    /// KAI LANGUAGE M11A spec §10/§12: computes `expr`'s SliceProvenance
+    /// - a pure, read-only classification (never mutates `model`'s
+    /// provenance map itself; only checkVarDecl()/checkVariableAssignmentTarget()
+    /// WRITE to it, using this function's result). Handles exactly the
+    /// expression shapes a Slice-typed value can actually arise from
+    /// under M10B's own restrictions (no slice literals, no Slice-of-
+    /// Slice): a bare identifier (through transparent ParenExpr only)
+    /// reports its symbol's CURRENT tracked provenance
+    /// (`model.sliceProvenanceOf()`); a `slice(...)` builtin call is
+    /// unconditionally Local (M10B's own source restriction means BOTH
+    /// its valid sources - a local fixed array or a fixed-array
+    /// PARAMETER - are callee-owned storage, spec §2.B/§2.C); any OTHER
+    /// CallExpr (a user function call, however it resolves) is Unknown
+    /// (spec §14: no interprocedural provenance contracts exist yet -
+    /// never guessed as External just because the call happens to
+    /// return a Slice). Every other/unrecognized shape defensively
+    /// returns Unknown, never a guessed concrete value.
+    SliceProvenance sliceProvenanceOf(const ast::Expr& expr, const SemanticModel& model) const;
+
+    /// KAI LANGUAGE M11A spec §4: the two-value merge table
+    /// (`a == b -> a`; otherwise `Unknown`) - Unknown is absorbing
+    /// (`Unknown` merged with anything stays `Unknown`), and merging is
+    /// commutative/associative, so checkIfStmt() can fold an arbitrary
+    /// number of branch outcomes together via repeated pairwise calls.
+    static SliceProvenance mergeSliceProvenance(SliceProvenance a, SliceProvenance b) noexcept;
 
     // --- Expression checking ---
 
@@ -403,7 +504,16 @@ private:
     /// a concrete target Type contextualizes the RHS exactly like
     /// checkVarDecl() does, comparing via the existing TypeMismatch
     /// shape.
-    Type checkVariableAssignmentTarget(const ast::AssignmentExpr& assignment, const Symbol& symbol,
+    ///
+    /// KAI LANGUAGE M11A: `id` (the target's own SymbolId, already
+    /// resolved by the caller) is new - once the concrete-target-type
+    /// path succeeds with no TypeMismatch and `targetType` is a Slice,
+    /// records the RHS's SliceProvenance (sliceProvenanceOf()) as `id`'s
+    /// new current provenance (spec §9/§10: reassignment simply overwrites
+    /// the tracked value in straight-line code; checkIfStmt()/
+    /// checkWhileStmt()/checkForStmt() handle the branch/loop cases
+    /// around this).
+    Type checkVariableAssignmentTarget(const ast::AssignmentExpr& assignment, const Symbol& symbol, SymbolId id,
                                         SemanticModel& model) const;
 
     /// Shared by two spec cases: a target identifier resolving to
