@@ -58,6 +58,18 @@ std::string typeName(Type type, const SemanticModel& model) {
             name += "]";
             return name;
         }
+        case TypeKind::Slice: {
+            // KAI LANGUAGE M10A: "[ElementName]" - no length component,
+            // since a slice's length is runtime data, never part of the
+            // type itself (TYPE_SYSTEM.md's own "Slices" section). Built
+            // recursively exactly like Array above, so a nested slice
+            // (e.g. "[[i32]]") or a slice of arrays (e.g. "[[i32; 3]]")
+            // both render correctly with no separate case needed.
+            std::string name = "[";
+            name += typeName(model.sliceElementType(type), model);
+            name += "]";
+            return name;
+        }
     }
     // Unreachable while TypeKind's enumerators match the switch above
     // exactly - kept only so -Wreturn-type doesn't warn.

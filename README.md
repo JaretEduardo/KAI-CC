@@ -91,7 +91,17 @@ arrays support general checked indexing at any depth (KAI LANGUAGE M9, post-alph
 deeper, `a[i][j][k]`) independently bounds-checks each level before computing that level's own element
 address, mutation through a nested chain is allowed exactly when the ROOT binding is a mutable local, and an
 array-valued intermediate index result (`let row = matrix[1]`) is an ordinary independent copy, never an
-alias - see "Current limitations" below for what remains out of scope (slices, general references).
+alias - see "Current limitations" below for what remains out of scope (general references).
+
+**Slices (KAI LANGUAGE M10A, post-alpha.2 - TYPE FOUNDATION ONLY):** `[T]` is now a real semantic
+`TypeKind::Slice` type - a non-owning, immutable, runtime-length view, structurally distinct from a fixed
+array (`[i32]` vs. `[i32; 3]` are never interchangeable, and `[i32] == [i32]` regardless of runtime length,
+since length is not part of a slice's type). This milestone resolves the TYPE only: a slice function
+parameter/return type type-checks, canonicalizes (`[i32]`, `[[i32; 3]]`, `[[i32]]`), and renders correctly in
+`kai inspect`, but slice LOWERING/CONVERSION/INDEXING remain unimplemented - a semantically valid
+slice-parameter program fails cleanly at code generation (exit 6), never a crash. See "Current limitations"
+below and TYPE_SYSTEM.md's own "Slices" section for the full semantic model (immutability, copy-the-view
+semantics, lifetime restrictions, and what remains an open design question for a future milestone).
 
 **Text:** string literals, explicit `str` local annotations, `str` function parameters and return types, and
 `print(str)`. `str` values (including those containing an embedded `\0` byte, which is valid UTF-8) are
@@ -339,11 +349,16 @@ at any fixed-array nesting depth) is real, native, executable code - each level 
 checked before its own element address is ever computed, mutation through a nested chain is allowed exactly
 when the ROOT binding is a mutable local (an intermediate array element never introduces its own mutability),
 and an array-valued intermediate index result (`let row = matrix[1]`) is an ordinary independent copy, not an
-alias. What remains explicitly out of scope: slice syntax (`[T]`, still fully deferred at the type level,
-`Type::unresolved()`), and general references/lvalue chains beyond nested array indexing. Also parses and/or
-type-checks in some form, but explicitly **not** backend-lowerable yet:
+alias. KAI LANGUAGE M10A (post-alpha.2) then gave slices `[T]` a real semantic `TypeKind::Slice` type - a
+non-owning, immutable, runtime-length view, distinct from a fixed array (see TYPE_SYSTEM.md's own "Slices"
+section for the complete model: copy-the-view semantics, no mutation, lifetime/escape restrictions, and what
+remains an open decision for a future milestone). M10A is TYPE FOUNDATION ONLY: no LLVM lowering, no
+array-to-slice conversion, no slice indexing, and no slice literals exist - a semantically valid
+slice-parameter/return program still fails cleanly at code generation (exit 6). What remains explicitly out of
+scope: general references/lvalue chains beyond nested array indexing. Also parses and/or type-checks in some
+form, but explicitly **not** backend-lowerable yet:
 
-- slices (`[T]`) as a semantic type at all
+- slices (`[T]`) as EXECUTABLE code - lowering, array-to-slice conversion, and indexing all remain unimplemented
 - structs, enums, generics, traits
 - `Result`, general references (`&T`), and advanced ownership/borrowing
 - an owned, dynamic `String` type (`str` today is a `Copy`, immutable, non-owning view only)

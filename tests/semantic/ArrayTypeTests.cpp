@@ -236,17 +236,21 @@ void testZeroLengthArrayTypeIsValid() {
     }
 }
 
-// H. Slice type syntax `[T]` (no `;`) must NOT resolve to Array - it
-// stays Unresolved (M7A spec §4: arrays and slices are distinct, and
-// slices remain explicitly deferred).
-void testSliceTypeSyntaxStaysUnresolvedNotArray() {
+// H. RETARGETED (KAI LANGUAGE M10A): slice type syntax `[T]` (no `;`)
+// must NOT resolve to Array - it resolves to its OWN real, distinct
+// TypeKind::Slice (M7A spec §4's own invariant: arrays and slices are
+// distinct - M10A gives that invariant a real Type on the slice side too,
+// rather than Slice staying Unresolved forever). See SliceTypeTests.cpp
+// for the full slice-type coverage this milestone adds.
+void testSliceTypeSyntaxResolvesToSliceNotArray() {
     SourceManager sm;
     SemanticModel model;
     const Type type = declaredLocalType(sm, "[i32]", model);
 
     KAI_CHECK(model.errors().empty());
     KAI_CHECK(!type.isArray());
-    KAI_CHECK(type.isUnresolved());
+    KAI_CHECK(!type.isUnresolved());
+    KAI_CHECK(type.isSlice());
 }
 
 // I. An unknown element type propagates as Error, not a fabricated array
@@ -306,7 +310,7 @@ int main() {
     testDifferentLengthArrayTypesAreDistinctWithinOneModel();
     testDifferentElementTypeArraysAreDistinctWithinOneModel();
     testZeroLengthArrayTypeIsValid();
-    testSliceTypeSyntaxStaysUnresolvedNotArray();
+    testSliceTypeSyntaxResolvesToSliceNotArray();
     testUnknownElementTypePropagatesAsError();
     testNestedArrayTypeResolves();
 

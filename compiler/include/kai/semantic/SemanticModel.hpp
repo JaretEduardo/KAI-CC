@@ -234,6 +234,18 @@ public:
         return arrayTypes_[type.compoundId().rawId()].length;
     }
 
+    /// KAI LANGUAGE M10A: `type`'s element Type - `type` MUST be a slice
+    /// Type this SAME SemanticModel issued (via internSlice(), directly
+    /// or through a slice TypeSyntax resolution) - same "must be issued
+    /// by THIS model" lifetime contract as arrayElementType() above.
+    /// There is no sliceLength() counterpart: a slice's length is runtime
+    /// data, never part of the type itself (TYPE_SYSTEM.md's own
+    /// "Slices" section).
+    Type sliceElementType(Type type) const {
+        assert(type.isSlice());
+        return sliceTypes_[type.compoundId().rawId()].elementType;
+    }
+
 private:
     // Only a future SemanticAnalyzer populates a SemanticModel. Nothing
     // else - not even tests - should be able to construct an arbitrary
@@ -303,6 +315,31 @@ private:
         return Type(TypeKind::Array, CompoundTypeId(static_cast<std::uint32_t>(arrayTypes_.size() - 1)));
     }
 
+    /// KAI LANGUAGE M10A: the slice-type counterpart to internArray()
+    /// above - same canonicalizing-linear-scan design, same "elementType
+    /// must already be a Type this SAME model produced/resolved"
+    /// precondition, same friend-only-caller contract
+    /// (SemanticAnalyzer::resolveSliceTypeSyntax() is the only caller).
+    /// A SEPARATE table from arrayTypes_ (see this class's own §10 design
+    /// note in SemanticModel.hpp's implementation for the reasoning) -
+    /// deliberately NOT unified into one tagged compound-type table:
+    /// Array and Slice have different structural shapes (length vs. no
+    /// length), so a shared table would need a variant/tagged payload for
+    /// exactly two current cases, adding indirection with no present
+    /// benefit. Two small sibling tables, one per compound kind, is the
+    /// least-invasive extension of M7A's existing design, and generalizes
+    /// cleanly to a THIRD compound kind later (another sibling table) far
+    /// more simply than retrofitting a tagged union would.
+    Type internSlice(Type elementType) {
+        for (std::size_t i = 0; i < sliceTypes_.size(); ++i) {
+            if (sliceTypes_[i].elementType == elementType) {
+                return Type(TypeKind::Slice, CompoundTypeId(static_cast<std::uint32_t>(i)));
+            }
+        }
+        sliceTypes_.push_back(SliceTypeInfo{elementType});
+        return Type(TypeKind::Slice, CompoundTypeId(static_cast<std::uint32_t>(sliceTypes_.size() - 1)));
+    }
+
     /// KAI LANGUAGE M7A: the compound-type interning table's own storage
     /// shape - never exposed outside SemanticModel (see
     /// arrayElementType()/arrayLength() above for the public, ID-free
@@ -312,12 +349,21 @@ private:
         std::uint64_t length;
     };
 
+    /// KAI LANGUAGE M10A: Slice's own interning-table storage shape - see
+    /// ArrayTypeInfo's own comment above for the identical rationale.
+    /// Deliberately no `length` field: a slice's length is runtime data,
+    /// never part of the type's own structural identity.
+    struct SliceTypeInfo {
+        Type elementType;
+    };
+
     std::vector<Symbol> symbols_;
     std::unordered_map<const ast::IdentifierExpr*, SymbolId> identifierResolutions_;
     std::unordered_map<const ast::Identifier*, SymbolId> declarationSymbols_;
     std::vector<SemanticError> errors_;
     std::unordered_map<const ast::Expr*, Type> expressionTypes_;
     std::vector<ArrayTypeInfo> arrayTypes_;
+    std::vector<SliceTypeInfo> sliceTypes_;
 };
 
 } // namespace kai::semantic

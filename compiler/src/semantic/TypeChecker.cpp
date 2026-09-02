@@ -101,6 +101,7 @@ std::optional<IntegerRange> integerRangeFor(Type type) {
         case TypeKind::Char:
         case TypeKind::Str:
         case TypeKind::Array: // KAI LANGUAGE M7A: never an integer type itself
+        case TypeKind::Slice: // KAI LANGUAGE M10A: never an integer type itself
             return std::nullopt;
     }
     return std::nullopt;

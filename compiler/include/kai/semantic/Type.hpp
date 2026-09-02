@@ -46,13 +46,33 @@ enum class TypeKind : std::uint8_t {
     /// comment and CompoundTypeId below for how that structural payload
     /// is carried without turning Type itself into a heap object.
     Array,
+
+    /// KAI LANGUAGE M10A: a slice `[T]` - a non-owning, immutable,
+    /// runtime-length VIEW type, structurally and semantically distinct
+    /// from Array: a Slice Type's identity depends ONLY on its element
+    /// Type (see SliceTypeInfo/CompoundTypeId below) - unlike Array, it
+    /// carries NO length, because a slice's length is runtime data, not
+    /// part of the type itself (`[i32]` denotes every possible runtime
+    /// length uniformly - TYPE_SYSTEM.md's own "Slices" section). This is
+    /// a TYPE-FOUNDATION-ONLY milestone: no LLVM lowering, no array-to-
+    /// slice conversion, no slice indexing, and no mutable-slice variant
+    /// exist yet - see TYPE_SYSTEM.md and DESIGN_QUESTIONS.md for the
+    /// full semantic model and what remains open for KAI LANGUAGE M10B.
+    Slice,
 };
 
-/// KAI LANGUAGE M7A: an opaque handle into ONE SemanticModel's own
-/// compound-type interning table (see SemanticModel::internArray()) -
-/// the mechanism that lets a compound TypeKind (currently only Array)
-/// carry structural data (element type, length) while Type itself stays
-/// a small, flat, trivially-copyable value. Mirrors SymbolId's own
+/// KAI LANGUAGE M7A, joined by Slice in M10A: an opaque handle into ONE
+/// SemanticModel's own compound-type interning tables (see
+/// SemanticModel::internArray()/internSlice()) - the mechanism that lets
+/// a compound TypeKind (Array or Slice) carry structural data (Array:
+/// element type + length; Slice: element type only) while Type itself
+/// stays a small, flat, trivially-copyable value. Array and Slice each
+/// own a SEPARATE interning table (SemanticModel's own §10 design note),
+/// so a CompoundTypeId's rawId is only ever meaningful together with the
+/// Type's own `kind_` - Array's id 0 and Slice's id 0 are unrelated
+/// entries in two different tables; Type::operator==()'s own member-wise
+/// comparison already compares `kind_` first, so this is never
+/// ambiguous. Mirrors SymbolId's own
 /// existing "opaque handle, only SemanticModel may construct or dereference
 /// one" contract exactly (see Symbol.hpp) - a CompoundTypeId is never
 /// constructed, incremented, or interpreted by anything other than the
@@ -95,18 +115,19 @@ private:
 /// (Unresolved through Str) is fully self-describing from `kind_` alone,
 /// exactly as before M7A - constructing/copying/comparing one of those
 /// remains as cheap as a plain enum, with `compoundId_` simply left at
-/// its default, invalid value. Array is the one KIND whose full
-/// identity additionally depends on structural payload (an element Type
-/// + a length) that cannot fit in a flat enum tag - that payload is
-/// never stored inline in Type itself (which would force EVERY Type,
-/// including every plain `i32`, to carry unused space or an owning
-/// pointer); instead Type stores only a `CompoundTypeId` handle into the
-/// issuing SemanticModel's own interning table (see
-/// SemanticModel::internArray()/arrayElementType()/arrayLength()). Type
-/// therefore stays exactly what it always was - two small trivially-
-/// copyable fields, no raw owning pointers, no global mutable state,
-/// safe to store in a Symbol, an expression-type map, or a
-/// FunctionSignature exactly like before.
+/// its default, invalid value. Array and (as of M10A) Slice are the two
+/// KINDS whose full identity additionally depends on structural payload
+/// (Array: an element Type + a length; Slice: an element Type only) that
+/// cannot fit in a flat enum tag - that payload is never stored inline in
+/// Type itself (which would force EVERY Type, including every plain
+/// `i32`, to carry unused space or an owning pointer); instead Type
+/// stores only a `CompoundTypeId` handle into the issuing SemanticModel's
+/// own interning table (see SemanticModel::internArray()/internSlice()
+/// and their read-only arrayElementType()/arrayLength()/
+/// sliceElementType() accessors). Type therefore stays exactly what it
+/// always was - two small trivially-copyable fields, no raw owning
+/// pointers, no global mutable state, safe to store in a Symbol, an
+/// expression-type map, or a FunctionSignature exactly like before.
 ///
 /// Unresolved vs. Error - not interchangeable:
 ///
@@ -119,26 +140,30 @@ private:
 ///   semantic error (e.g. a NamedTypeSyntax naming an unknown type).
 ///   Always accompanied by a SemanticError recording why.
 ///
-/// Unit, the primitive numeric/bool/char kinds, Str, and (as of KAI
-/// LANGUAGE M7A) Array are modeled here. References, slices, generics,
-/// and functions-as-values remain unrepresented - a syntactic type in
-/// one of those shapes still resolves to Type::unresolved(), never a
-/// fabricated Type of some new kind invented to stand in for it. Slices
-/// (`[T]`) are a DISTINCT, still-future, non-owning view type - M7A
-/// deliberately does not resolve them to Array or to anything else (see
-/// SemanticAnalyzer.cpp's resolveTypeSyntax()).
+/// Unit, the primitive numeric/bool/char kinds, Str, (as of KAI LANGUAGE
+/// M7A) Array, and (as of KAI LANGUAGE M10A) Slice are modeled here.
+/// References, generics, and functions-as-values remain unrepresented -
+/// a syntactic type in one of those shapes still resolves to
+/// Type::unresolved(), never a fabricated Type of some new kind invented
+/// to stand in for it. Array and Slice (`[T]`) are DISTINCT types - a
+/// slice is a non-owning, immutable, runtime-length VIEW, never
+/// interchangeable with (and never automatically converted to/from) a
+/// fixed-size array (see TYPE_SYSTEM.md's own "Slices" section for the
+/// full semantic model M10A establishes - element access, mutation,
+/// lifetime, and LLVM lowering all remain deferred to a future
+/// milestone; M10A is TYPE-FOUNDATION ONLY).
 ///
 /// Deliberately no single `primitive(TypeKind)` factory: that shape
 /// would let a caller pass Error/Unresolved into it and read at the call
 /// site as if it were requesting an ordinary primitive. Each kind gets
 /// its own named factory instead, so constructing an Error or Unresolved
-/// Type is always textually explicit. Array deliberately has NO such
-/// factory at all - unlike every primitive kind, an array Type cannot be
-/// constructed from a bare TypeKind: it can only be produced by
-/// SemanticModel::internArray(), because canonicalization (so two
-/// equivalent `[i32; 3]` types compare equal) requires consulting that
-/// model's interning table. This is an intentional asymmetry, not an
-/// oversight.
+/// Type is always textually explicit. Array and Slice deliberately have
+/// NO such factory at all - unlike every primitive kind, an array or
+/// slice Type cannot be constructed from a bare TypeKind: each can only
+/// be produced by SemanticModel::internArray()/internSlice() respectively,
+/// because canonicalization (so two equivalent `[i32; 3]` or `[i32]`
+/// types compare equal) requires consulting that model's own interning
+/// table. This is an intentional asymmetry, not an oversight.
 class Type {
 public:
     static constexpr Type unresolved() noexcept { return Type(TypeKind::Unresolved); }
@@ -211,6 +236,13 @@ public:
     /// structure - never CompoundTypeId/rawId() directly (private to
     /// Type/SemanticModel exactly like SymbolId's own rawId()).
     constexpr bool isArray() const noexcept { return kind_ == TypeKind::Array; }
+
+    /// KAI LANGUAGE M10A: true for a slice Type. Use
+    /// SemanticModel::sliceElementType() to inspect its structure - never
+    /// CompoundTypeId/rawId() directly. A slice has NO length accessor
+    /// (unlike Array's arrayLength()): a slice's length is runtime data,
+    /// never part of the type itself.
+    constexpr bool isSlice() const noexcept { return kind_ == TypeKind::Slice; }
 
     friend constexpr bool operator==(const Type&, const Type&) noexcept = default;
 

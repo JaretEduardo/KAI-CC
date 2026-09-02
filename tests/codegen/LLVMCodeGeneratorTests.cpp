@@ -272,15 +272,21 @@ void testUnsupportedConstructDoesNotLeakAcrossGenerateCalls() {
     SourceManager sm;
     LLVMCodeGenerator codegen(sm);
 
-    // (1) an unsupported (array/slice) RETURN type sets
-    // unsupportedConstruct() on this call. KAI LANGUAGE M6: `for`
-    // statements are no longer usable for this - a supported integer-
-    // range `for` now lowers successfully (see the M6 test group below),
-    // and an unsupported iterable shape is rejected by TypeChecker
+    // (1) an unsupported (slice) RETURN type sets unsupportedConstruct()
+    // on this call. KAI LANGUAGE M6: `for` statements are no longer
+    // usable for this - a supported integer-range `for` now lowers
+    // successfully (see the M6 test group below), and an unsupported
+    // iterable shape is rejected by TypeChecker
     // (SemanticErrorKind::UnsupportedForIterable) before codegen ever
     // runs, so it can no longer exercise THIS unsupported-construct path
-    // either.
-    Generated first = compileToLLVM(sm, codegen, "fn f() -> [i32] {\n    return 0\n}");
+    // either. KAI LANGUAGE M10A: `[i32]` is now a real semantic Slice
+    // Type, so `return 0` against it would be a genuine TypeMismatch
+    // (never reaching codegen at all, per compileToLLVM()'s own
+    // model.errors().empty() gate above) - `return f()` recurses instead,
+    // giving the return expression the EXACT SAME (self-referential)
+    // Slice type the declared signature already has, so this still
+    // type-checks with zero errors while remaining backend-unsupported.
+    Generated first = compileToLLVM(sm, codegen, "fn f() -> [i32] {\n    return f()\n}");
     KAI_CHECK(first.model.errors().empty());
     KAI_CHECK(!first.generationSucceeded);
     KAI_CHECK(codegen.unsupportedConstruct().has_value());
@@ -3753,6 +3759,66 @@ void testNestedArrayReturnIndexingVerifies() {
     }
 }
 
+// --- KAI LANGUAGE M10A: slice TYPE foundation - backend clean-failure
+// coverage (spec §23) ---
+//
+// TypeKind::Slice is now a real semantic Type (SemanticAnalyzer::
+// resolveSliceTypeSyntax()/SemanticModel::internSlice() - see
+// SliceTypeTests.cpp for the full type-resolution coverage), but M10A is
+// TYPE-FOUNDATION ONLY: LLVMCodeGenerator::lowerType() returns nullptr
+// for Slice (grouped with Unresolved/Error/Char), so a semantically-valid
+// slice-typed program must still fail CLEANLY at code generation - never
+// a crash, never silently treated as Array or Str, never malformed IR.
+
+// A slice PARAMETER fails cleanly via the SAME "unsupported parameter
+// type" unsupportedConstruct() message every other unsupported parameter
+// type already produces (declareFunction()'s own existing path - no
+// slice-specific branch needed).
+void testSliceParameterFailsCleanlyAtBackend() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn sum(xs: [i32]) -> i32 {\n    return 0\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+    KAI_CHECK(codegen.unsupportedConstruct().has_value());
+    if (codegen.unsupportedConstruct().has_value()) {
+        KAI_CHECK(codegen.unsupportedConstruct()->description ==
+                  "code generation is not yet supported for this parameter's type");
+    }
+}
+
+// A slice RETURN type likewise fails cleanly. `return xs` (relaying the
+// slice parameter back out) keeps this semantically well-typed (zero
+// TypeChecker errors) so compileToLLVM() actually reaches codegen.generate()
+// at all - see compileToLLVM()'s own model.errors().empty() gate.
+void testSliceReturnTypeFailsCleanlyAtBackend() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn identity(xs: [i32]) -> [i32] {\n    return xs\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(!result.generationSucceeded);
+    KAI_CHECK(codegen.unsupportedConstruct().has_value());
+    if (codegen.unsupportedConstruct().has_value()) {
+        KAI_CHECK(codegen.unsupportedConstruct()->description ==
+                  "code generation is not yet supported for this parameter's type");
+    }
+}
+
+// NOTE on a slice-typed LOCAL specifically: generateVarDeclStmt() would
+// reject one identically, through the SAME lowerType()-returns-nullptr
+// path (no separate isSlice() guard exists or is needed there either) -
+// but M10A provides no way to construct an actual slice VALUE to
+// initialize one with (no slice literals, no array-to-slice conversion),
+// so a semantically-valid slice-typed local can only ever arise from
+// relaying an already-slice-typed parameter/return, which the two tests
+// above already cover (declareFunction() rejects the parameter before a
+// local-specific rejection could ever be observed in isolation). No
+// separate local-only test is added for that reason - it would only
+// re-exercise the identical parameter-rejection path under a different
+// name.
+
 } // namespace
 
 int main() {
@@ -3899,6 +3965,9 @@ int main() {
     testArrayValuedIntermediateIndexExprCopiesIndependently();
     testNestedArrayParameterIndexingVerifies();
     testNestedArrayReturnIndexingVerifies();
+
+    testSliceParameterFailsCleanlyAtBackend();
+    testSliceReturnTypeFailsCleanlyAtBackend();
 
     testPrintLiteralI32SignExtendsToI64();
     testPrintVariableI64();

@@ -94,10 +94,11 @@ and static runtime linking into a real executable (`NativeLinker`, invoking the 
 
 Still unimplemented (backend/native execution only): general iterable/foreach semantics and array/slice
 iteration (`for x in someArray` - `for` only supports a literal `start..end` integer range, KAI LANGUAGE M6),
-a first-class `Range` value, slices (`[T]`, still no semantic Type at all), strings/`Char` as backend-
-lowerable values, references, ownership/borrowing, structs/enums/generics, `panic`/`assert` lowering,
-optimization passes, HIR, an LSP, and the higher-level `kai` CLI wrapper described in §14 (only `kaicc`
-itself exists today).
+a first-class `Range` value, slices (`[T]` is now a real semantic `TypeKind::Slice` as of KAI LANGUAGE M10A,
+post-alpha.2 - see this section's own M10A note below - but has NO LLVM lowering, no array-to-slice
+conversion, and no slice indexing yet), `Char` as a backend-lowerable value, references, ownership/borrowing,
+structs/enums/generics, `panic`/`assert` lowering, optimization passes, HIR, an LSP, and the higher-level
+`kai` CLI wrapper described in §14 (only `kaicc` itself exists today).
 
 **WINDOWS M1 (portability baseline, in progress):** the same source tree also builds and runs its CTest suite
 natively on Windows x86_64, targeting exactly one Windows toolchain baseline - MSYS2 UCRT64 with Clang/LLVM
@@ -237,7 +238,7 @@ Implemented so far: top-level function collection, primitive/unit type resolutio
 
 Not yet implemented: unreachable-code analysis, constant-condition flow reasoning (e.g. recognizing `if true` or `while true` as always executing), divergence analysis, a general control-flow graph, for-loop iterable/element type validation beyond a literal `start..end` integer range (KAI LANGUAGE M6, post-alpha.2, implements exactly that one form - general iterable/foreach semantics, array/slice iteration, and a first-class `Range` value remain unimplemented), member assignment semantics (`obj.field = value` - structs don't exist yet; `xs[index] = value` for a mutable LOCAL array IS implemented, KAI LANGUAGE M7B, post-alpha.2 - see TYPE_SYSTEM.md §18), builtin call signature validation, reference semantic types, ownership/borrow checking, and first-class function/method call semantics. Semantic analysis as a whole is not yet complete.
 
-**Compound semantic types (KAI LANGUAGE M7A, post-alpha.2):** `semantic::Type` (`compiler/include/kai/semantic/Type.hpp`) started as a flat, closed `TypeKind` enum wrapper with no structural payload - sufficient while every modeled type was fully self-describing from its own kind tag alone. Fixed-size arrays (`[T; N]`) broke that assumption: an array's identity also depends on an element type and a compile-time length, neither of which fits in a flat enum. Rather than turning every `Type` into a heap object/shared_ptr (which would make even `i32` expensively allocated), `Type` instead carries a small, cheap, trivially-copyable `CompoundTypeId` handle alongside its `TypeKind`, meaningful only for compound kinds (currently only Array) and ignored entirely by every primitive kind. The actual structural data (`ArrayTypeInfo { elementType, length }`) lives in ONE compile-scoped interning table OWNED BY `SemanticModel` itself - not a process-global singleton, not a second parameter every pass has to thread through separately, since every pass (SemanticAnalyzer, TypeChecker, LLVMCodeGenerator, and every semantic-tooling consumer) already receives the same `SemanticModel` by reference for the whole compilation's lifetime. `SemanticModel::internArray()` canonicalizes structurally-equal array shapes to the SAME `CompoundTypeId`, so `[i32; 3] == [i32; 3]` compares true by simple value equality, with no deep structural comparison needed at the `Type` level itself. A `Type` carrying a `CompoundTypeId` is only ever valid against the SAME `SemanticModel` that produced it - the same lifetime discipline `SymbolId` already established for symbol identity. Semantic tooling (`SemanticTypeName::typeName()`) reads this same interning table (via `SemanticModel::arrayElementType()`/`arrayLength()`, never a raw `CompoundTypeId`) to render `[i32; 3]` canonically, without any internal ID ever reaching JSON output. This design generalizes to a future second compound `TypeKind` (e.g. a struct/tuple) without further redesign, but M7A itself adds exactly one: Array.
+**Compound semantic types (KAI LANGUAGE M7A, post-alpha.2):** `semantic::Type` (`compiler/include/kai/semantic/Type.hpp`) started as a flat, closed `TypeKind` enum wrapper with no structural payload - sufficient while every modeled type was fully self-describing from its own kind tag alone. Fixed-size arrays (`[T; N]`) broke that assumption: an array's identity also depends on an element type and a compile-time length, neither of which fits in a flat enum. Rather than turning every `Type` into a heap object/shared_ptr (which would make even `i32` expensively allocated), `Type` instead carries a small, cheap, trivially-copyable `CompoundTypeId` handle alongside its `TypeKind`, meaningful only for compound kinds (currently only Array) and ignored entirely by every primitive kind. The actual structural data (`ArrayTypeInfo { elementType, length }`) lives in ONE compile-scoped interning table OWNED BY `SemanticModel` itself - not a process-global singleton, not a second parameter every pass has to thread through separately, since every pass (SemanticAnalyzer, TypeChecker, LLVMCodeGenerator, and every semantic-tooling consumer) already receives the same `SemanticModel` by reference for the whole compilation's lifetime. `SemanticModel::internArray()` canonicalizes structurally-equal array shapes to the SAME `CompoundTypeId`, so `[i32; 3] == [i32; 3]` compares true by simple value equality, with no deep structural comparison needed at the `Type` level itself. A `Type` carrying a `CompoundTypeId` is only ever valid against the SAME `SemanticModel` that produced it - the same lifetime discipline `SymbolId` already established for symbol identity. Semantic tooling (`SemanticTypeName::typeName()`) reads this same interning table (via `SemanticModel::arrayElementType()`/`arrayLength()`, never a raw `CompoundTypeId`) to render `[i32; 3]` canonically, without any internal ID ever reaching JSON output. This design generalizes to a future second compound `TypeKind` (e.g. a struct/tuple) without further redesign - M7A itself adds exactly one (Array), and KAI LANGUAGE M10A (post-alpha.2) is exactly that predicted generalization arriving: a second compound kind, Slice, added via its own sibling interning table with no change to `CompoundTypeId`/`Type` themselves (see this section's own M10A note below).
 
 **Semantic value passing vs. physical ABI lowering (KAI LANGUAGE M8A, post-alpha.2):** M8A is a deliberate
 architectural split, not merely a scheduling one. The FRONTEND (SemanticAnalyzer/TypeChecker) resolves and
@@ -282,7 +283,31 @@ one FRONTEND change M9 needed was narrower still: `checkIndexAssignmentTarget()`
 `unwrapIndexAssignmentRootIdentifier()`, which walks through zero or more nested `IndexExpr` layers to the
 SAME kind of root a single-level `xs[i] = v` already required - a bare identifier resolving to a
 `SymbolKind::Local` binding - so mutability through `matrix[i][j] = v` is still decided by the ROOT binding
-alone, exactly as the language always intended (TYPE_SYSTEM.md §20), never by an intermediate array element.
+alone, exactly as the language always intended (TYPE_SYSTEM.md §18's own "Nested Fixed-Array Indexing"
+subsection), never by an intermediate array element.
+
+**Slice TYPE foundation (KAI LANGUAGE M10A, post-alpha.2):** `TypeKind::Slice` gives `[T]` a real semantic
+Type - structurally distinct from Array (`TypeKind::Array`): a Slice's identity is its element Type ALONE,
+with NO length component, since a slice's length is runtime data rather than part of the type
+(TYPE_SYSTEM.md's own "Slices" section). This reuses M7A's own compound-type-context architecture (see this
+section's own M7A note above) via a SEPARATE sibling interning table (`SemanticModel`'s `sliceTypes_`,
+alongside Array's own `arrayTypes_`) rather than a unified tagged compound-type table: Array and Slice have
+different structural shapes (length vs. no length), so a shared table would need a variant/tagged payload for
+exactly two current cases, adding indirection with no present benefit - two small sibling tables is the
+least-invasive extension of the existing design, and generalizes to a future third compound kind (a tuple, a
+reference, a function type, ...) by adding another sibling table, not by redesigning `CompoundTypeId`/`Type`
+itself. `SemanticAnalyzer::resolveSliceTypeSyntax()` mirrors `resolveArrayTypeSyntax()`'s own recursive
+Error/Unresolved-propagation discipline exactly, with no length to decode. Backend support remains entirely
+absent by design: `LLVMCodeGenerator::lowerType()` returns the same `nullptr` signal every other unsupported
+Type already returns for Slice (grouped with Unresolved/Error/Char) - a semantically well-typed slice
+parameter/return still fails CLEANLY at code generation (the existing `unsupportedConstruct()` diagnostic
+path, unchanged), never a crash, never silently treated as Array or `str`. The eventual runtime representation
+is expected to be an LLVM `{ptr, i64}`-shaped struct (distinct from Array's own direct `[N x T]` aggregate -
+see this section's own M8A/M8B note above), but M10A implements none of that lowering. Lifetime/source-
+validity concerns (a slice must not outlive the storage it views) are a SEMANTIC question a future dedicated,
+deliberately limited lifetime checker must answer - they are not solved, or even touched, by choosing an LLVM
+pointer representation, and KAI still has no general borrow checker of any kind. See TYPE_SYSTEM.md's own
+"Slices" section and DESIGN_QUESTIONS.md's own M10A resolution/open-questions.
 
 Example errors:
 

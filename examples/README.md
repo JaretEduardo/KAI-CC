@@ -61,8 +61,13 @@ these reasons:
   intermediate array element never introduces its own mutability), and an
   array-valued intermediate index result (`let row = matrix[1]`) is an
   ordinary independent copy, not an alias - see `arrays.kai`'s `matrix`
-  demonstration above. What remains explicitly out of scope: slice syntax
-  (`[T]`, still fully deferred at the type level, `Type::unresolved()`),
+  demonstration above. KAI LANGUAGE M10A (post-alpha.2) then gave slices
+  `[T]` a real semantic `TypeKind::Slice` type - but TYPE FOUNDATION ONLY:
+  a slice parameter/return TYPE now resolves and renders canonically
+  (`kai inspect` shows `[i32]`), but no LLVM lowering, array-to-slice
+  conversion, or slice indexing exist yet, so a semantically valid
+  slice-typed program still fails cleanly at code generation (exit 6).
+  What remains explicitly out of scope: slices as EXECUTABLE code,
   general references/lvalue chains beyond nested array indexing, and
   `for x in someArray` iteration.
 - **`for` iteration over anything other than a literal integer range is
@@ -76,7 +81,7 @@ these reasons:
 | File | Why it doesn't compile today |
 |---|---|
 | `calculator.kai` | Compares two `str` values with `==` (`op == "+"`) - string equality is not implemented; this is a **semantic** error (`invalid binary operands`), not a codegen limitation. |
-| `mini_program.kai` | Uses a slice-typed parameter (`average(values: [f64])`), `for` iteration over an array, and array member access (`.len`) - fails with a **semantic** `unsupported for-loop iterable` error (KAI LANGUAGE M6), before compilation ever reaches the codegen stage where the slice-typed parameter would also be rejected. |
+| `mini_program.kai` | Uses a slice-typed parameter (`average(values: [f64])`), `for` iteration over an array, and array member access (`.len`) - fails with TWO **semantic** errors: `unsupported for-loop iterable` (KAI LANGUAGE M6) and, as of KAI LANGUAGE M10A giving `[f64]` a real Slice Type, a genuine `type mismatch: expected [f64], got [f64; 4]` at its one call site (`average(scores)` where `scores: [f64; 4]` - a fixed array is never interchangeable with a slice of the same element type, TYPE_SYSTEM.md's own "Array vs. Slice" rule). Both are frontend diagnostics; codegen is never reached either way. |
 | `results.kai` | Sketches `Result<(), IOError>` and the `?` operator against an undefined `write_file()`/`IOError` - a design fragment with no `main`, not a runnable program; fails with `unknown identifier`. |
 
 See the root [`README.md`](../README.md)'s "Current limitations" section

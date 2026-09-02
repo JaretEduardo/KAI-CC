@@ -51,6 +51,7 @@ kai_add_test(semantic_type_tests semantic/TypeTests.cpp)
 kai_add_test(semantic_model_tests semantic/SemanticModelTests.cpp)
 kai_add_test(semantic_analyzer_tests semantic/SemanticAnalyzerTests.cpp)
 kai_add_test(semantic_array_type_tests semantic/ArrayTypeTests.cpp)
+kai_add_test(semantic_slice_type_tests semantic/SliceTypeTests.cpp)
 # TypeChecker tests are split by milestone/responsibility (see
 # tests/semantic/type_checker/TypeCheckerTestSupport.hpp) rather than one
 # monolithic file - each category is its own small CTest executable so it

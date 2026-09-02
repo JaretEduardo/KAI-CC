@@ -216,11 +216,12 @@ void testDeferredTypeShapesResolveToUnresolvedWithNoErrors() {
     SourceManager sm;
     // KAI LANGUAGE M7A: `[i32; 4]` (a fixed-size array) is REMOVED from
     // this list - it is no longer a deferred shape (see
-    // ArrayTypeTests.cpp for its own real-Type coverage). Reference,
-    // slice, and generic-use-site syntax remain genuinely deferred.
+    // ArrayTypeTests.cpp for its own real-Type coverage). KAI LANGUAGE
+    // M10A likewise REMOVES `[i32]` (a slice) - see the new
+    // SliceTypeTests.cpp for its own real-Type coverage. Reference and
+    // generic-use-site syntax remain genuinely deferred.
     Analyzed result = analyze(sm, "fn f(\n"
                                    "    a: &i32,\n"
-                                   "    b: [i32],\n"
                                    "    d: Result<i32, E>\n"
                                    ") {}");
 
@@ -240,7 +241,7 @@ void testDeferredTypeShapesResolveToUnresolvedWithNoErrors() {
     }
 
     const FunctionSignature& signature = *result.model.symbol(*id).signature;
-    KAI_CHECK(signature.parameterTypes.size() == 3);
+    KAI_CHECK(signature.parameterTypes.size() == 2);
     for (const Type& type : signature.parameterTypes) {
         KAI_CHECK(type.isUnresolved());
         KAI_CHECK(!type.isError());

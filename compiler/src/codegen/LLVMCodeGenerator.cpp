@@ -862,6 +862,18 @@ llvm::Type* LLVMCodeGenerator::lowerType(Type type, const SemanticModel& model) 
         case TypeKind::Error:
         case TypeKind::Char:
             return nullptr;
+        case TypeKind::Slice:
+            // KAI LANGUAGE M10A: Slice is now a real semantic Type, but
+            // this milestone is TYPE-FOUNDATION ONLY - no LLVM lowering
+            // exists yet (no `{ptr, len}` representation, no runtime
+            // slice indexing, no array-to-slice conversion). Returns the
+            // SAME clean nullptr signal every other unsupported Type
+            // already returns above - never a crash, never silently
+            // treated as Array or Str. See declareFunction()'s own
+            // caller, which already turns this into an actionable
+            // "code generation is not yet supported for this
+            // parameter's/return type" unsupportedConstruct() message.
+            return nullptr;
         case TypeKind::Array: {
             // KAI LANGUAGE M7B: a real `[N x ElementType]` LLVM array
             // type - driven entirely by whatever this SAME lowerType()
