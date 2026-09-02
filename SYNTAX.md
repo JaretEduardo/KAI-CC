@@ -395,12 +395,41 @@ storage, so it is never treated like a Slice parameter); anything else,
 including the result of any other function call, is `Unknown`. Only
 `External` may be returned; `Local`/`Unknown` are rejected with a
 dedicated `EscapingLocalSlice` diagnostic, never a generic
-`TypeMismatch`. This remains SEMANTIC ANALYSIS ONLY - code generation is
-completely unchanged, so `identity` above still fails cleanly at the
-backend today, exactly as it did before M11A; only TypeChecker's own
-verdict has changed. See TYPE_SYSTEM.md's own "Function returns"
-subsection for the complete semantic model and DESIGN_QUESTIONS.md for
-the M10A/M10B/M11A resolution.
+`TypeMismatch`.
+
+**KAI LANGUAGE M11B (post-alpha.2): restricted safe Slice returns
+execute natively.** `identity` above is no longer merely accepted by
+TypeChecker - it now compiles AND RUNS:
+
+    fn identity(xs: [i32]) -> [i32] {
+        return xs
+    }
+
+    fn main() {
+        let values = [10, 20, 30]
+        let t = identity(slice(values))
+        print(len(t))   // 3
+        print(t[0])     // 10
+    }
+
+Only the view itself (a pointer and a length) is transported back to the
+caller - never a copy of the viewed elements - and the returned pointer
+still points into the CALLER's own backing storage (`values` above),
+never anything belonging to `identity`'s own invocation, so no dangling
+pointer is ever created. `bad()` above still fails, but exactly as
+before - at the SEMANTIC layer, before code generation ever runs; M11B
+changes nothing about which returns are judged safe, only whether a
+proven-safe one is executable. An executable array wrapping a Slice
+(`[[i32]; 2]`, ...) remains rejected as a return type regardless of the
+wrapped Slice's own provenance, and re-forwarding an `Unknown`-provenance
+Slice-returning call result (`fn wrapper(xs: [i32]) -> [i32] { return id(xs) }`)
+remains rejected too - M11B performs no interprocedural provenance
+inference. `Unknown` provenance still permits unrestricted ordinary
+LOCAL use (reading an element, copying into another local); it means
+"cannot prove safe to escape," never "invalid value." See
+TYPE_SYSTEM.md's own "Function returns" subsection for the complete
+semantic model and DESIGN_QUESTIONS.md for the M10A/M10B/M11A/M11B
+resolution.
 
 ---
 

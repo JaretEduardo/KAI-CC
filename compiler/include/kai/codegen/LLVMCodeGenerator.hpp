@@ -932,17 +932,35 @@ private:
     /// KAI LANGUAGE M10B spec §6/§29: true if `type` IS a Slice, or is an
     /// Array whose element type recursively (through arbitrary nesting)
     /// is or contains a Slice - e.g. `[i32]` itself, `[[i32]; 2]`,
-    /// `[[[i32]]; 4]`. Used ONLY to reject specific EXECUTABLE positions
-    /// this milestone does not support (an array-typed function
-    /// parameter/return/local that recursively contains a Slice - a bare
-    /// Slice parameter/return/local is a SEPARATE, explicitly SUPPORTED
-    /// case each call site checks for on its own, never through this
-    /// predicate alone), never used to gate lowerType() itself (see its
-    /// own doc comment above for why). This prevents an M8-style
-    /// recursive array aggregate from silently letting a borrowed Slice
-    /// view escape through nested/returned array storage before any
-    /// lifetime/provenance analysis exists to make that sound.
+    /// `[[[i32]]; 4]`. This is a raw STRUCTURAL predicate only - it does
+    /// not by itself say whether `type` is an accepted or rejected
+    /// EXECUTABLE position; see `isUnsupportedSliceCarryingType()` below
+    /// for the actual backend POLICY built on top of it (the two used to
+    /// coincide for a return type before KAI LANGUAGE M11B, which is why
+    /// this predicate alone used to be called directly at that one call
+    /// site - it no longer is, anywhere).
     bool typeContainsSlice(semantic::Type type, const semantic::SemanticModel& model) const;
+
+    /// KAI LANGUAGE M11B: the actual backend POLICY for which Slice-
+    /// carrying positions remain unsupported, distinct from
+    /// `typeContainsSlice()`'s own raw structural predicate above - a
+    /// bare Slice is fully executable (as a parameter since M10B, as a
+    /// local since M10B, and as a function RETURN type since M11B, the
+    /// last only ever reached for a `return` expression M11A's own
+    /// restricted provenance analysis has already proven `External`);
+    /// only a COMPOUND (Array) type that recursively contains one remains
+    /// unconditionally unsupported in every one of those three positions,
+    /// since M11A's provenance analysis tracks a bare Slice-typed
+    /// binding/expression only and was never designed to track a Slice's
+    /// safety through an aggregate's own element-wise value semantics
+    /// (spec §19/§20 - M11B must not accidentally enable a composite
+    /// borrowed-value return merely by loosening this one guard). Used
+    /// identically at all three call sites - declareFunction()'s
+    /// parameter loop, declareFunction()'s own return-type check, and
+    /// generateVarDeclStmt()'s local check - specifically so this one
+    /// policy line ("Slice itself: yes: anything wrapping it: no") is
+    /// expressed exactly once, never re-derived ad hoc at each site.
+    bool isUnsupportedSliceCarryingType(semantic::Type type, const semantic::SemanticModel& model) const;
 
     /// Allocates `type`-typed storage at the START of `function`'s entry
     /// block, regardless of `builder`'s own current insertion point -

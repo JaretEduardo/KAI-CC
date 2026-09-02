@@ -22,7 +22,7 @@ after a release build).
 | `loops.kai` | `while`, then a `for` loop over an integer literal range (KAI LANGUAGE M6, post-alpha.2) | `0`,`1`,`2`,`3`,`4` (from `while`), then `0`,`1`,`2`,`3`,`4` again (from `for n in 0..5`) |
 | `fibonacci.kai` | Recursion + a `for` loop over an integer literal range (KAI LANGUAGE M6, post-alpha.2), printing the first 10 Fibonacci numbers | `0`,`1`,`1`,`2`,`3`,`5`,`8`,`13`,`21`,`34` |
 | `arrays.kai` | Fixed-size arrays: a literal `[i32; 4]`, checked indexed reads, a checked indexed write inside a `for`-range loop (KAI LANGUAGE M7B, post-alpha.2), an EXISTING array value passed by value into/out of a `sum(xs: [i32; 4]) -> i32` function (KAI LANGUAGE M8B, post-alpha.2), and a nested `[[i32; 2]; 2]` with a two-level checked read and a two-level checked write (KAI LANGUAGE M9, post-alpha.2) | `10`, `40`, `100`, `10`,`20`,`30`,`40`, `1`,`1`,`1`, `2`, `99` |
-| `slices.kai` | Immutable slice VALUES (KAI LANGUAGE M10B, post-alpha.2): explicit `slice(values)` construction over a fixed array (no implicit array-to-slice conversion), `len(s)`, and a `sum(xs: [i32]) -> i32` Slice function parameter iterating via `for i in 0..len(xs)` | `4`, `100` |
+| `slices.kai` | Immutable slice VALUES (KAI LANGUAGE M10B, post-alpha.2): explicit `slice(values)` construction over a fixed array (no implicit array-to-slice conversion), `len(s)`, a `sum(xs: [i32]) -> i32` Slice function parameter iterating via `for i in 0..len(xs)`, and (KAI LANGUAGE M11B, post-alpha.2) an `identity(xs: [i32]) -> [i32]` Slice RETURN, used while its backing array is still alive | `4`, `100`, `4`, `10` |
 
 ## Diagnostic example (intentionally invalid)
 
@@ -39,8 +39,9 @@ not deleted, but they do **not** compile with the current `kaicc` and are
 these reasons:
 
 - **Fixed-size arrays and immutable slices are now both fully executable,
-  including across function boundaries; only slice RETURNS and Slice-
-  containing aggregates remain deliberately unsupported.** KAI LANGUAGE
+  including across function boundaries and (for a provenance-proven-safe
+  case) as a Slice RETURN; only a Slice-containing aggregate remains
+  deliberately unsupported as a return/parameter/local.** KAI LANGUAGE
   M7B (post-alpha.2) made a LOCAL fixed-size array `[T; N]` fully
   executable - literal creation, checked indexed reads/writes,
   integration with an M6 `for`-range loop - see `arrays.kai` above. KAI
@@ -73,19 +74,24 @@ these reasons:
   model arrays already use, and a Slice function PARAMETER (copy of the
   view, by value) - see `slices.kai` above. KAI LANGUAGE M11A
   (post-alpha.2) then added a restricted PROVENANCE analysis at the
-  SEMANTIC layer only (`External`/`Local`/`Unknown`, never part of the
+  SEMANTIC layer (`External`/`Local`/`Unknown`, never part of the
   Slice Type itself): TypeChecker now accepts a narrow, provably-sound
   class of Slice returns (e.g. `fn identity(xs: [i32]) -> [i32] { return xs }`,
   relaying a parameter's own slice straight back out) instead of
   rejecting every Slice return outright, with anything else rejected via
-  a dedicated `EscapingLocalSlice` diagnostic - but code generation is
-  completely unchanged, so even a proven-safe return like `identity`
-  above still fails cleanly at the backend today. What remains explicitly
+  a dedicated `EscapingLocalSlice` diagnostic. KAI LANGUAGE M11B
+  (post-alpha.2) then made exactly that narrow, proven-safe class
+  genuinely EXECUTABLE: `identity` above now compiles and runs (see
+  `slices.kai`'s own `identity()` above), transporting only the view
+  itself (a pointer and a length, never a copy of the viewed elements)
+  back to a caller whose own backing storage the view was pointing at all
+  along - no dangling pointer is ever created. What remains explicitly
   out of scope, by deliberate lifetime-safety design rather than a
-  lowering gap: an EXECUTABLE Slice return of any kind (even a
-  provenance-safe one), interprocedural provenance inference, any
-  executable array that recursively contains a Slice (preventing indirect
-  escape through M8's own array-return machinery), slice-of-slice,
+  lowering gap: an executable array that recursively contains a Slice
+  (preventing indirect escape through M8's own array-return machinery,
+  regardless of the wrapped Slice's own provenance), interprocedural
+  provenance inference (re-forwarding an `Unknown`-provenance
+  Slice-returning call result remains rejected), slice-of-slice,
   sub-slicing, mutable slice elements/syntax, and `for x in someArray`
   iteration.
 - **`for` iteration over anything other than a literal integer range is

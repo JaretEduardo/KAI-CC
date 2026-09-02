@@ -139,6 +139,22 @@ void testArbitraryFunctionCallResultIsUnknown() {
                                               "}"));
 }
 
+// G. KAI LANGUAGE M11B spec §9: `Unknown` means "cannot prove safe to
+// ESCAPE", never "invalid value" - an ordinary LOCAL, non-escaping use of
+// an Unknown-provenance Slice-returning call result (reading an element,
+// never returning the value itself) must remain perfectly valid.
+void testLocalUseOfUnknownCallResultIsValid() {
+    SourceManager sm;
+    expectAcceptedReturn(analyzeAndCheck(sm,
+                                          "fn helper(xs: [i32]) -> [i32] {\n"
+                                          "    return xs\n"
+                                          "}\n"
+                                          "fn firstOf(xs: [i32]) -> i32 {\n"
+                                          "    let s = helper(xs)\n"
+                                          "    return s[0]\n"
+                                          "}"));
+}
+
 // --- Control-flow soundness scenarios (must not be overfit to the
 // examples above). ---
 
@@ -322,6 +338,7 @@ int main() {
     testExternalReassignedToLocalThenReturnedRejected();
     testUnknownAfterBranchMergeReturnRejected();
     testArbitraryFunctionCallResultIsUnknown();
+    testLocalUseOfUnknownCallResultIsValid();
 
     testIfElseMixedBranchesMergeToUnknownRejectsReturn();
     testIfElseAllExternalBranchesStayExternalAllowsReturn();

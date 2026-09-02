@@ -10,10 +10,27 @@ fn sum(xs: [i32]) -> i32 {
     return result
 }
 
+// KAI LANGUAGE M11B: a Slice RETURN is executable, but only for a
+// `return` expression KAI LANGUAGE M11A's own restricted provenance
+// analysis has already proven `External` - here, relaying the
+// parameter's own view straight back out. Only the view itself (a
+// pointer and a length) is transported; the elements it points at are
+// never copied.
+fn identity(xs: [i32]) -> [i32] {
+    return xs
+}
+
 fn main() {
     let values = [10, 20, 30, 40]
     let s = slice(values)
 
     print(len(s))
     print(sum(s))
+
+    // `t` still points into `values`'s own storage - `values` is still
+    // alive here, so this is sound: `identity` never had to own the
+    // storage it was viewing, only to relay a view of it back out.
+    let t = identity(s)
+    print(len(t))
+    print(t[0])
 }

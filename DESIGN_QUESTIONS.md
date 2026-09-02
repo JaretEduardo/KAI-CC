@@ -102,28 +102,40 @@ generic `TypeMismatch`. Provenance is a property of VALUES/expressions/
 bindings at a point in a function body, never encoded into the Slice
 `Type` itself, and it is compiler-internal safety metadata with no
 public query surface (`kai inspect`/`kai refs`/... never expose it).
-Crucially, this is SEMANTIC ANALYSIS ONLY - code generation still
-rejects every Slice return unconditionally regardless of how safely its
-provenance was proven (M10B's own backend guard is untouched): a return
-that is now provably sound (`fn identity(xs: [i32]) -> [i32] { return xs }`)
-passes TypeChecker cleanly but still fails cleanly at the backend with
-the same actionable diagnostic every other unsupported return uses.
-Whether and how a future milestone (M11B) makes an `External` Slice
-return actually EXECUTABLE remains open - see below. See TYPE_SYSTEM.md's
-own "Function returns" subsection and COMPILER_ARCHITECTURE.md's own
-M11A note.
+At M11A itself, this was SEMANTIC ANALYSIS ONLY - code generation still
+rejected every Slice return unconditionally regardless of how safely its
+provenance was proven. See TYPE_SYSTEM.md's own "Function returns"
+subsection and COMPILER_ARCHITECTURE.md's own M11A note.
 
-## Open — beyond M11A (slices)
+✓ **(KAI LANGUAGE M11B)** Whether an `External` Slice return could be made
+actually EXECUTABLE - left open by the M11A bullet above - is now
+resolved: **it executes natively.** The backend's own return-type guard
+(`isUnsupportedSliceCarryingType()`, replacing M10B's unconditional
+`typeContainsSlice(returnType)` check) now allows a bare Slice return
+type through - reachable ONLY via a `return` M11A has already proven
+`External`, since `Local`/`Unknown` still fail at TypeChecker with
+`EscapingLocalSlice` before codegen ever runs. `fn identity(xs: [i32]) ->
+[i32] { return xs }` now compiles AND RUNS, transporting only the
+`{ptr, i64}` view (never a copy of the viewed elements) back to a caller
+whose own backing storage the view was pointing at all along - no
+dangling pointer is created, since the returned `ptr` was never rebased
+away from storage the CALLER (not the returning function) owns. M11B
+duplicates none of M11A's provenance analysis - it only relaxes which
+TYPE SHAPES codegen accepts, never re-deciding which specific returns are
+safe. An executable array recursively containing a Slice remains
+unconditionally rejected regardless of provenance (M11B does not
+generalize provenance tracking to aggregates), and re-forwarding an
+`Unknown`-provenance Slice-returning call result remains rejected too
+(no interprocedural inference was added) - see TYPE_SYSTEM.md's own
+"Function returns" subsection and COMPILER_ARCHITECTURE.md's own M11B
+note.
+
+## Open — beyond M11B (slices)
 
 The following remain deliberately OPEN (see TYPE_SYSTEM.md's own "Slices"
 section):
 
-- Executable Slice returns: M11A proves a narrow class of returns SAFE at
-  the semantic layer, but code generation still rejects every Slice
-  return unconditionally - actually lowering a proven-safe (`External`)
-  return is a distinct, later milestone's job, deliberately deferred so
-  the provenance analysis itself can be reviewed first.
-- Interprocedural provenance inference: M11A treats the result of ANY
+- Interprocedural provenance inference: M11A/M11B treat the result of ANY
   function call as `Unknown`, even a callee that only ever safely
   forwards its own parameter - whether and how a future milestone infers
   a callee's own return provenance (from its signature, or from analyzing
@@ -131,16 +143,18 @@ section):
 - General, composite/aggregate provenance: M11A's provenance tracking
   covers bare Slice-typed bindings/expressions only: an executable array
   recursively containing a Slice remains unconditionally rejected at the
-  backend regardless of provenance (M10B's own `typeContainsSlice` guard,
-  unchanged), and M11A does not generalize provenance tracking to
-  Slice-containing aggregates.
-- A general, sound BORROW CHECKER or reference/lifetime system - M11A is
-  explicitly a narrow, special-cased analysis (single-level bindings, a
-  fixed small set of expression shapes, no lifetime syntax), not a step
-  toward general borrow checking; MEMORY_MODEL.md's own "no borrow
-  checker planned for KAI 0.1" stance is unaffected.
+  backend regardless of provenance (`isUnsupportedSliceCarryingType()`,
+  M11B's renamed successor to M10B's own `typeContainsSlice` guard, still
+  rejects it), and neither M11A nor M11B generalizes provenance tracking
+  to Slice-containing aggregates.
+- A general, sound BORROW CHECKER or reference/lifetime system - M11A/M11B
+  are explicitly a narrow, special-cased analysis plus its backend
+  enablement (single-level bindings, a fixed small set of expression
+  shapes, no lifetime syntax), not a step toward general borrow checking;
+  MEMORY_MODEL.md's own "no borrow checker planned for KAI 0.1" stance is
+  unaffected.
 - Future mutable-slice syntax/semantics (`[mut T]`, `&mut [T]`, or otherwise)
-  - M10B/M11A deliberately ship immutable-slice-only, with no writable
+  - M10B/M11A/M11B deliberately ship immutable-slice-only, with no writable
   slice indexing and no mutable-view design.
 - Sub-slicing (`s[1..3]` or similar) and slice-of-slice - both explicitly out
   of scope, with no syntax or semantics proposed yet.
