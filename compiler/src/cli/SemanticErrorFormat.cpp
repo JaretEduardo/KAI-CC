@@ -59,6 +59,8 @@ const char* semanticErrorKindName(semantic::SemanticErrorKind kind) {
             return "invalid slice source";
         case semantic::SemanticErrorKind::InvalidLenOperand:
             return "invalid len operand";
+        case semantic::SemanticErrorKind::EscapingLocalSlice:
+            return "escaping local slice";
     }
     return "semantic error";
 }

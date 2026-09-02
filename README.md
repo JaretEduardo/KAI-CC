@@ -102,7 +102,12 @@ checked indexed reads (the same `llvm.trap`-guarded runtime bounds arrays alread
 parameter (by value, copy of the view) - see `examples/slices.kai`. Slice indexed WRITES remain unconditionally
 rejected (a dedicated diagnostic, distinct from assigning to an immutable binding), and - by deliberate
 lifetime-safety design, not a lowering gap - a slice RETURN type and any array recursively containing a slice
-remain unconditionally rejected at code generation. See "Current limitations" below and TYPE_SYSTEM.md's own
+remain unconditionally rejected at code generation. KAI LANGUAGE M11A (post-alpha.2) adds a restricted
+provenance analysis (`External`/`Local`/`Unknown`, tracked per binding, never part of the Slice type itself)
+that lets a narrow, provably-sound class of Slice returns (e.g. relaying a parameter's own slice straight back
+out) pass TypeChecker cleanly instead of being rejected outright - but this is SEMANTIC ANALYSIS ONLY: code
+generation still rejects every Slice return unconditionally regardless of provenance, until a later milestone
+makes a proven-safe return actually executable. See "Current limitations" below and TYPE_SYSTEM.md's own
 "Slices" section for the full semantic model.
 
 **Text:** string literals, explicit `str` local annotations, `str` function parameters and return types, and
@@ -360,11 +365,17 @@ array-to-slice conversion - passing a fixed array directly where a slice paramet
 indexed writes remain unconditionally rejected (see TYPE_SYSTEM.md's own "Slices" section for the complete
 model), and - a deliberate lifetime-safety restriction, not a lowering gap, since KAI still has no general
 borrow checker - a slice RETURN type and any array recursively containing a slice remain unconditionally
-rejected at code generation. What remains explicitly out of scope: sub-slicing, slice-of-slice, mutable
-slices, and general references/lvalue chains beyond nested array indexing. Also parses and/or type-checks in
-some form, but explicitly **not** backend-lowerable yet:
+rejected at code generation. KAI LANGUAGE M11A (post-alpha.2) then added a restricted, non-general provenance
+analysis (`External`/`Local`/`Unknown`) at the SEMANTIC layer only: TypeChecker now accepts a narrow class of
+Slice returns (e.g. relaying a parameter's own slice straight back out) as provably sound, rejecting anything
+else with a dedicated `EscapingLocalSlice` diagnostic - but code generation's own unconditional rejection is
+completely unchanged, so even a proven-safe Slice return still fails cleanly at the backend today. What
+remains explicitly out of scope: executable Slice returns of any kind, interprocedural provenance inference,
+sub-slicing, slice-of-slice, mutable slices, and general references/lvalue chains beyond nested array
+indexing. Also parses and/or type-checks in some form, but explicitly **not** backend-lowerable yet:
 
-- a slice RETURN type, sub-slicing, slice-of-slice, and any array that recursively contains a slice
+- a slice RETURN type (regardless of provenance), sub-slicing, slice-of-slice, and any array that recursively
+  contains a slice
 - structs, enums, generics, traits
 - `Result`, general references (`&T`), and advanced ownership/borrowing
 - an owned, dynamic `String` type (`str` today is a `Copy`, immutable, non-owning view only)

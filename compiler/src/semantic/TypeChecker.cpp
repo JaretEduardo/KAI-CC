@@ -337,6 +337,23 @@ void TypeChecker::checkFunctionBody(const ast::FunctionDecl& fn, SemanticModel& 
         strParameterCount,
     };
 
+    // KAI LANGUAGE M11A spec §2.A: a Slice-typed PARAMETER is the ONE
+    // provenance fact known before any statement in this body runs -
+    // External, since its metadata is copied by value but the elements
+    // it refers to were never copied, and the parameter binding itself
+    // can never be THIS callee's own local storage. A fixed-array
+    // parameter is NOT seeded here - it is not itself Slice-typed, and
+    // `slice(thatParameter)` is classified Local at the CALL site
+    // instead (sliceProvenanceOf() below), never by pre-seeding the
+    // array parameter's own (non-Slice) symbol.
+    for (const ast::Param& param : fn.params()) {
+        const std::optional<SymbolId> paramId = model.declarationSymbol(param.name);
+        assert(paramId.has_value());
+        if (model.symbol(*paramId).type.isSlice()) {
+            model.setSliceProvenance(*paramId, SliceProvenance::External);
+        }
+    }
+
     checkBlock(fn.body(), returnContext, model);
 }
 
@@ -388,19 +405,77 @@ void TypeChecker::checkIfStmt(const ast::IfStmt& ifStmt, const ReturnContext& re
     // every branch body - including one whose own condition mismatched or
     // was Error/Unresolved - is still traversed unconditionally. `else`
     // has no condition of its own.
+    //
+    // KAI LANGUAGE M11A spec §4/§26: `entryProvenance` is the fork point -
+    // every branch starts from this SAME snapshot, never from whatever
+    // the PREVIOUS branch happened to leave behind (branches are
+    // independent alternate paths, not a sequential continuation of each
+    // other). `mergedProvenance` folds every branch's own resulting
+    // snapshot together via the two-value merge table
+    // (mergeSliceProvenance()). Critically, when this if/else has an
+    // EXHAUSTIVE `else`, the "no branch taken" outcome is IMPOSSIBLE, so
+    // `entryProvenance` itself must NOT be folded in as if it were one
+    // more possible outcome (spec's own worked example - `if cond { s =
+    // xs } else { s = slice(local) }` - merges ONLY the two branches,
+    // giving Unknown; folding in a THIRD, unreachable "entry" outcome
+    // here would only ever make the result needlessly MORE conservative,
+    // never wrong, but this project's spec gives that exact example with
+    // a precise two-way merge). Only when there is NO `else` does the
+    // "no branch taken" outcome - contributing `entryProvenance`
+    // unchanged - genuinely participate (spec §26.A/§26.B/§26.D, none of
+    // which have an `else`).
+    const std::unordered_map<SymbolId, SliceProvenance> entryProvenance = model.snapshotSliceProvenance();
+    std::optional<std::unordered_map<SymbolId, SliceProvenance>> mergedProvenance;
+
+    auto mergeInBranchResult = [&](const std::unordered_map<SymbolId, SliceProvenance>& branchResult) {
+        if (!mergedProvenance.has_value()) {
+            mergedProvenance = branchResult;
+            return;
+        }
+        for (const auto& [id, entryValue] : entryProvenance) {
+            const auto previousIt = mergedProvenance->find(id);
+            const SliceProvenance previousValue = previousIt != mergedProvenance->end() ? previousIt->second : entryValue;
+            const auto newIt = branchResult.find(id);
+            const SliceProvenance newValue = newIt != branchResult.end() ? newIt->second : entryValue;
+            (*mergedProvenance)[id] = mergeSliceProvenance(previousValue, newValue);
+        }
+    };
+
     for (const ast::IfBranch& branch : ifStmt.branches()) {
         checkCondition(*branch.condition, model);
+        model.restoreSliceProvenance(entryProvenance);
         checkBlock(*branch.body, returnContext, model);
+        mergeInBranchResult(model.snapshotSliceProvenance());
     }
     if (const std::optional<ast::ElseClause>& elseClause = ifStmt.elseClause(); elseClause.has_value()) {
+        model.restoreSliceProvenance(entryProvenance);
         checkBlock(*elseClause->body, returnContext, model);
+        mergeInBranchResult(model.snapshotSliceProvenance());
+    } else {
+        mergeInBranchResult(entryProvenance);
     }
+
+    model.restoreSliceProvenance(std::move(*mergedProvenance));
 }
 
 void TypeChecker::checkWhileStmt(const ast::WhileStmt& whileStmt, const ReturnContext& returnContext,
                                   SemanticModel& model) const {
     checkCondition(whileStmt.condition(), model);
+
+    // KAI LANGUAGE M11A spec §4/§13/§26: see this method's own header
+    // comment in TypeChecker.hpp for the full reasoning - a loop body
+    // may run more than once, so ANY binding assigned anywhere within it
+    // is conservatively forced to Unknown once the loop exits, computed
+    // via touched-tracking rather than a value-comparing before/after
+    // merge (which this method's own header comment shows can be
+    // UNSOUND for bindings whose reassignment depends on each other
+    // across iterations).
+    model.beginSliceProvenanceTouchTracking();
     checkBlock(whileStmt.body(), returnContext, model);
+    const std::unordered_set<SymbolId> touched = model.endSliceProvenanceTouchTracking();
+    for (SymbolId id : touched) {
+        model.setSliceProvenance(id, SliceProvenance::Unknown);
+    }
 }
 
 void TypeChecker::checkForStmt(const ast::ForStmt& forStmt, const ReturnContext& returnContext,
@@ -436,7 +511,17 @@ void TypeChecker::checkForStmt(const ast::ForStmt& forStmt, const ReturnContext&
     assert(loopVarId.has_value());
     model.setSymbolType(*loopVarId, elementType);
 
+    // KAI LANGUAGE M11A: the SAME conservative touched-tracking rule
+    // checkWhileStmt() uses - see its own comment for the full reasoning.
+    // The induction variable itself is never Slice-typed (an integer
+    // range, always), so only pre-existing Slice bindings the body
+    // reassigns are ever affected here.
+    model.beginSliceProvenanceTouchTracking();
     checkBlock(forStmt.body(), returnContext, model);
+    const std::unordered_set<SymbolId> touched = model.endSliceProvenanceTouchTracking();
+    for (SymbolId id : touched) {
+        model.setSliceProvenance(id, SliceProvenance::Unknown);
+    }
 }
 
 Type TypeChecker::checkIntegerRangeFor(const ast::BinaryExpr& range, SemanticModel& model) const {
@@ -535,6 +620,94 @@ void TypeChecker::checkReturnStmt(const ast::ReturnStmt& returnStmt, const Retur
             std::nullopt,
         });
     }
+
+    // KAI LANGUAGE M11A spec §5/§6/§7: the type-check above already
+    // passed (`actualType == declaredReturnType`, reached only when
+    // execution falls through this far - a bare `return` can never
+    // reach here for a Slice return type, since Type::unit() would never
+    // equal a Slice Type, so `returnStmt.value()` is never null in this
+    // branch). A Slice return additionally requires External provenance -
+    // Local (backed by this invocation's own local storage) and Unknown
+    // (an unproven case, e.g. an arbitrary Slice-returning call) are both
+    // rejected uniformly via EscapingLocalSlice, never a second
+    // TypeMismatch for an already-correctly-typed value.
+    if (declaredReturnType.isSlice() && !actualType.isError() && !actualType.isUnresolved() &&
+        actualType == declaredReturnType) {
+        const SliceProvenance provenance = sliceProvenanceOf(*returnStmt.value(), model);
+        if (provenance != SliceProvenance::External) {
+            model.addError(SemanticError{
+                SemanticErrorKind::EscapingLocalSlice,
+                returnStmt.value()->span(),
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+            });
+        }
+    }
+}
+
+// KAI LANGUAGE M11A spec §12-14: classifies the SliceProvenance of a
+// checked expression by SHAPE alone, mirroring unwrapSliceSourceIdentifier/
+// unwrapDirectCalleeIdentifier's own narrow, structural-only discipline -
+// never a general expression-value-flow analysis. Only three shapes are
+// classified precisely:
+//   - a transparent ParenExpr wrapper: unwrapped, exactly like every other
+//     paren-transparent helper in this file (spec #14: provenance follows
+//     the inner expression through parens);
+//   - a bare identifier resolving to a Symbol: looks up that Symbol's
+//     OWN tracked SliceProvenance (External for a Slice parameter, Local/
+//     Unknown/whatever it was last set to for a Local - spec #9/#13:
+//     copies/rebindings follow the source's provenance exactly);
+//   - a direct `slice(...)` builtin call: always Local (spec #10 - M10B's
+//     own source restriction already guarantees `slice(...)`'s only
+//     eligible arguments are a local array or a fixed-array PARAMETER,
+//     and a fixed-array parameter is a BY-VALUE copy into callee-owned
+//     storage per M8's array ABI, so both cases are uniformly Local, never
+//     External - a Slice parameter is a completely different, already-
+//     External case, handled by the identifier branch above instead).
+// Anything else (any other call, a binary/unary/member/index/literal/...
+// expression) is Unknown - spec #15: "any arbitrary Slice-returning
+// function call must be treated as Unknown", generalized here to "anything
+// this narrow analysis cannot prove a specific provenance for is Unknown",
+// which is the conservative, always-safe default this milestone's own
+// "conservative rejection is acceptable, unsound acceptance is not" rule
+// requires.
+SliceProvenance TypeChecker::sliceProvenanceOf(const ast::Expr& expr, const SemanticModel& model) const {
+    if (expr.kind() == ast::ExprKind::Paren) {
+        return sliceProvenanceOf(static_cast<const ast::ParenExpr&>(expr).inner(), model);
+    }
+    if (expr.kind() == ast::ExprKind::Identifier) {
+        const auto& identifier = static_cast<const ast::IdentifierExpr&>(expr);
+        const std::optional<SymbolId> id = model.resolution(identifier);
+        if (!id.has_value()) {
+            return SliceProvenance::Unknown;
+        }
+        return model.sliceProvenanceOf(*id);
+    }
+    if (expr.kind() == ast::ExprKind::Call) {
+        const auto& call = static_cast<const ast::CallExpr&>(expr);
+        if (const ast::IdentifierExpr* callee = unwrapDirectCalleeIdentifier(call.callee())) {
+            const std::optional<SymbolId> calleeId = model.resolution(*callee);
+            if (calleeId.has_value() && model.symbol(*calleeId).kind == SymbolKind::Builtin &&
+                model.symbol(*calleeId).name == "slice") {
+                return SliceProvenance::Local;
+            }
+        }
+        return SliceProvenance::Unknown;
+    }
+    return SliceProvenance::Unknown;
+}
+
+// KAI LANGUAGE M11A spec §16: the branch-merge table this milestone's
+// spec gives verbatim - External+External -> External, Local+Local ->
+// Local, anything else (any mixed pair, or either side already Unknown)
+// -> Unknown. Used both by checkIfStmt()'s pairwise branch fold and,
+// indirectly, by nothing else - loops use the separate, coarser
+// touched-tracking rule instead (see checkWhileStmt/checkForStmt), since a
+// sound per-iteration merge would require real fixed-point dataflow this
+// milestone's own STOP condition rules out.
+SliceProvenance TypeChecker::mergeSliceProvenance(SliceProvenance a, SliceProvenance b) noexcept {
+    return a == b ? a : SliceProvenance::Unknown;
 }
 
 void TypeChecker::checkVarDecl(const ast::VarDeclStmt& varDecl, SemanticModel& model) const {
@@ -548,6 +721,12 @@ void TypeChecker::checkVarDecl(const ast::VarDeclStmt& varDecl, SemanticModel& m
         // Type::unresolved()).
         const Type inferred = inferExpr(varDecl.initializer(), model);
         model.setSymbolType(*symbolId, inferred);
+        // KAI LANGUAGE M11A spec §12: `let s = slice(a)`/`let s = xs` -
+        // the MOST common way a Slice-typed local is declared - records
+        // the initializer's own SliceProvenance as `s`'s starting value.
+        if (inferred.isSlice()) {
+            model.setSliceProvenance(*symbolId, sliceProvenanceOf(varDecl.initializer(), model));
+        }
         return;
     }
 
@@ -573,6 +752,12 @@ void TypeChecker::checkVarDecl(const ast::VarDeclStmt& varDecl, SemanticModel& m
             declaredType,
             initializerType,
         });
+    } else if (declaredType.isSlice() && !initializerType.isError()) {
+        // KAI LANGUAGE M11A: the explicitly-annotated counterpart to the
+        // unannotated path above - `let s: [i32] = xs`. Skipped only when
+        // the initializer itself is genuinely Error (a mismatched or
+        // already-broken initializer's provenance is meaningless).
+        model.setSliceProvenance(*symbolId, sliceProvenanceOf(varDecl.initializer(), model));
     }
 
     // The Symbol's declared type is never changed by a mismatched/failed
@@ -1310,7 +1495,7 @@ Type TypeChecker::checkAssignmentExpr(const ast::AssignmentExpr& assignment, Sem
             switch (symbol.kind) {
                 case SymbolKind::Local:
                 case SymbolKind::Parameter:
-                    return checkVariableAssignmentTarget(assignment, symbol, model);
+                    return checkVariableAssignmentTarget(assignment, symbol, *id, model);
                 case SymbolKind::Function:
                 case SymbolKind::Builtin:
                     return checkInvalidAssignmentTarget(assignment, model);
@@ -1343,7 +1528,7 @@ Type TypeChecker::checkAssignmentExpr(const ast::AssignmentExpr& assignment, Sem
 }
 
 Type TypeChecker::checkVariableAssignmentTarget(const ast::AssignmentExpr& assignment, const Symbol& symbol,
-                                                 SemanticModel& model) const {
+                                                 SymbolId id, SemanticModel& model) const {
     const ast::Expr& target = assignment.target();
     const ast::Expr& value = assignment.value();
 
@@ -1411,6 +1596,17 @@ Type TypeChecker::checkVariableAssignmentTarget(const ast::AssignmentExpr& assig
             valueType,
         });
         result = Type::error();
+    }
+
+    // KAI LANGUAGE M11A spec §9/§10: a successful reassignment of a
+    // Slice-typed binding updates its CURRENT tracked provenance to the
+    // RHS's own - `mut s = xs; s = slice(local)` must make `s` Local from
+    // this point on, never keep its ORIGINAL External provenance. Only
+    // recorded on the genuinely successful path (`result` still
+    // Type::unit() here, i.e. no TypeMismatch/Error) - a failed
+    // reassignment's own bogus RHS provenance is never worth tracking.
+    if (targetType.isSlice() && !result.isError()) {
+        model.setSliceProvenance(id, sliceProvenanceOf(value, model));
     }
 
     model.setExpressionType(assignment, result);

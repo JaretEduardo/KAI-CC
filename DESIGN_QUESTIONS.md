@@ -78,20 +78,69 @@
 ✓ **(KAI LANGUAGE M10A)** A slice `[T]` is now a real semantic `TypeKind::Slice`, structurally distinct from Array: its identity is its element Type ALONE (no length - `SemanticModel::internSlice()`/`sliceElementType()`, a sibling interning table to Array's own, per the same compound-type architecture M7A established), so `[i32] == [i32]` regardless of runtime length, `[i32] != [u32]`, and `[i32] != [i32; 3]` (never interchangeable with, and never automatically converted to/from, a fixed array). A slice is a NON-OWNING, IMMUTABLE, runtime-length VIEW: `Slice<T> { ptr, len }` conceptually, not source-visible struct syntax; copying a slice (`let b = a`) copies only the view (ptr+len) - the underlying elements are never copied, and there is no refcount/allocation/copy-on-write, deliberately different from `[T; N]`'s own value-copy semantics. M10A introduced NO mutable-slice variant (`[mut T]`/`mut [T]`/`&mut [T]`) - element mutation through a slice remained unsupported pending a future explicit design; a `mut` BINDING containing a slice may still be reassignable as a binding, which is unrelated to element mutability. A slice function parameter receives a copy of the view (pointer+length by value, no ownership transfer, no aliasing guarantee since multiple read-only views may share storage - safe because no mutation exists); slice RETURN values were a DEFERRED lifetime problem as of M10A - KAI has no general borrow checker, so a slice viewing local storage must never be returned, recorded then only as a design invariant, not yet enforced. M10A itself was TYPE-FOUNDATION-ONLY: no LLVM lowering, no array-to-slice conversion, no slice indexing, and no slice literals existed yet - see the M10B bullet below for what M10A left open. See TYPE_SYSTEM.md's own "Slices" section and COMPILER_ARCHITECTURE.md's own M10A note.
 ✓ **(KAI LANGUAGE M10B)** Immutable slices are now real, native, executable code. Explicit construction only - the compiler builtin `slice(array)`, never an implicit array-to-slice conversion anywhere (including at a call site: `sum(a)` where `sum` expects `[i32]` remains a genuine `TypeMismatch`; the caller must write `sum(slice(a))`) - resolves the array-to-slice-conversion question the M10A bullet above left open: an EXPLICIT BUILTIN, not implicit coercion or dedicated syntax. `len(x) -> u64` resolves the length-operation question similarly - one dedicated builtin, accepting a fixed array (a compile-time constant, never inspecting runtime memory), a slice, or `str` (its existing byte-length contract, unchanged) - never `x.len`/`sizeof(x)`/a spellable `usize`, and `str` is never reinterpreted as `[u8]`. `slice(x)`'s own source restriction - `x` must be a direct identifier naming a local fixed array or a fixed-array parameter, never a literal/call result/index or member expression/existing slice (`InvalidSliceSource` otherwise) - is what makes the M10B lifetime model enforceable with no dedicated lifetime checker: combined with an unconditional rejection of a Slice RETURN type and of any executable array recursively containing a Slice (preventing indirect escape through M8's own array-return machinery), a Slice's backing storage is always guaranteed, by construction, to dominate every use of that Slice within the current function invocation - a real, ENFORCED restriction now, not merely a documented one, though still deliberately narrow (no general lifetime/provenance analysis, no borrow checker). Checked Slice indexed reads use the SAME `llvm.trap`-guarded runtime-bounds model arrays already use (a shared `lowerCheckedIndexBounds()` helper, factored out of the existing array-indexing code with zero behavior change to it), with a dedicated `SliceIndexOutOfBounds` diagnostic for a compile-time-known negative constant index (never reusing `ArrayIndexOutOfBounds`, whose wording would be misleading for a runtime-length type) and a dedicated `AssignmentThroughImmutableSlice` diagnostic for any indexed write (never `AssignmentToImmutableBinding`, which would misreport this when the slice BINDING itself is `mut`). Slice indexed writes remain unconditionally rejected - element mutation through a slice is still entirely unsupported. See TYPE_SYSTEM.md's own "Slices" section and COMPILER_ARCHITECTURE.md's own M10B note.
 
-## Open — beyond M10B (slices)
+✓ **(KAI LANGUAGE M11A)** "Can a Slice be returned?" now has a real, if
+deliberately narrow, answer at the SEMANTIC layer: a restricted
+provenance analysis - `External` (backed by storage outliving the
+current invocation: a Slice parameter, or any plain copy/rebinding of
+one), `Local` (backed by storage owned by the current invocation:
+`slice(...)` of a local array OR of a fixed-array parameter, since M8's
+fixed-array parameters are themselves passed by value into
+callee-owned storage - never treated like a Slice parameter), or
+`Unknown` (anything else, including the result of any other function
+call - no interprocedural inference) - is tracked per binding,
+flow-sensitively, across straight-line reassignment, if/else branch
+merging (`External+External -> External`, `Local+Local -> Local`,
+anything mixed or already-`Unknown` -> `Unknown`; an `if` with no
+`else` folds the pre-branch provenance in as the real "no branch taken"
+outcome, an exhaustive `if`/`else` does not), and `while`/`for` loops
+(any binding reassigned anywhere in the loop body becomes `Unknown`
+after the loop, unconditionally - a deliberately coarser, still-sound
+approximation, not fixed-point dataflow). Only `External` may be
+returned from a function declared to return Slice; `Local`/`Unknown`
+are rejected with a dedicated `EscapingLocalSlice` diagnostic, never a
+generic `TypeMismatch`. Provenance is a property of VALUES/expressions/
+bindings at a point in a function body, never encoded into the Slice
+`Type` itself, and it is compiler-internal safety metadata with no
+public query surface (`kai inspect`/`kai refs`/... never expose it).
+Crucially, this is SEMANTIC ANALYSIS ONLY - code generation still
+rejects every Slice return unconditionally regardless of how safely its
+provenance was proven (M10B's own backend guard is untouched): a return
+that is now provably sound (`fn identity(xs: [i32]) -> [i32] { return xs }`)
+passes TypeChecker cleanly but still fails cleanly at the backend with
+the same actionable diagnostic every other unsupported return uses.
+Whether and how a future milestone (M11B) makes an `External` Slice
+return actually EXECUTABLE remains open - see below. See TYPE_SYSTEM.md's
+own "Function returns" subsection and COMPILER_ARCHITECTURE.md's own
+M11A note.
+
+## Open — beyond M11A (slices)
 
 The following remain deliberately OPEN (see TYPE_SYSTEM.md's own "Slices"
 section):
 
-- Full, GENERAL slice-return lifetime/escape analysis: M10B enforces only
-  the narrow "constructed from a direct local/parameter binding, never
-  returned, never wrapped in a returned array" rule above - a real
-  restriction, but not a general lifetime/borrow/provenance system. Whether
-  and how a future milestone lets a slice be safely returned (or otherwise
-  outlive the current invocation) in the cases that would actually be sound
-  remains undesigned.
+- Executable Slice returns: M11A proves a narrow class of returns SAFE at
+  the semantic layer, but code generation still rejects every Slice
+  return unconditionally - actually lowering a proven-safe (`External`)
+  return is a distinct, later milestone's job, deliberately deferred so
+  the provenance analysis itself can be reviewed first.
+- Interprocedural provenance inference: M11A treats the result of ANY
+  function call as `Unknown`, even a callee that only ever safely
+  forwards its own parameter - whether and how a future milestone infers
+  a callee's own return provenance (from its signature, or from analyzing
+  its body) remains undesigned.
+- General, composite/aggregate provenance: M11A's provenance tracking
+  covers bare Slice-typed bindings/expressions only: an executable array
+  recursively containing a Slice remains unconditionally rejected at the
+  backend regardless of provenance (M10B's own `typeContainsSlice` guard,
+  unchanged), and M11A does not generalize provenance tracking to
+  Slice-containing aggregates.
+- A general, sound BORROW CHECKER or reference/lifetime system - M11A is
+  explicitly a narrow, special-cased analysis (single-level bindings, a
+  fixed small set of expression shapes, no lifetime syntax), not a step
+  toward general borrow checking; MEMORY_MODEL.md's own "no borrow
+  checker planned for KAI 0.1" stance is unaffected.
 - Future mutable-slice syntax/semantics (`[mut T]`, `&mut [T]`, or otherwise)
-  - M10B deliberately ships immutable-slice-only, with no writable slice
-  indexing and no mutable-view design.
+  - M10B/M11A deliberately ship immutable-slice-only, with no writable
+  slice indexing and no mutable-view design.
 - Sub-slicing (`s[1..3]` or similar) and slice-of-slice - both explicitly out
-  of M10B's scope, with no syntax or semantics proposed yet.
+  of scope, with no syntax or semantics proposed yet.

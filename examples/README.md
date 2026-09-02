@@ -71,13 +71,23 @@ these reasons:
   expects `[i32]` remains a real TypeMismatch), `len(array | slice | str)`,
   checked Slice reads with the same `llvm.trap`-guarded runtime bounds
   model arrays already use, and a Slice function PARAMETER (copy of the
-  view, by value) - see `slices.kai` above. What remains explicitly out
-  of scope, by deliberate lifetime-safety design rather than a lowering
-  gap: a Slice RETURN type (even though the direct-aggregate ABI could
-  mechanically lower one), any executable array that recursively contains
-  a Slice (preventing indirect escape through M8's own array-return
-  machinery), slice-of-slice, sub-slicing, mutable slice elements/syntax,
-  and `for x in someArray` iteration.
+  view, by value) - see `slices.kai` above. KAI LANGUAGE M11A
+  (post-alpha.2) then added a restricted PROVENANCE analysis at the
+  SEMANTIC layer only (`External`/`Local`/`Unknown`, never part of the
+  Slice Type itself): TypeChecker now accepts a narrow, provably-sound
+  class of Slice returns (e.g. `fn identity(xs: [i32]) -> [i32] { return xs }`,
+  relaying a parameter's own slice straight back out) instead of
+  rejecting every Slice return outright, with anything else rejected via
+  a dedicated `EscapingLocalSlice` diagnostic - but code generation is
+  completely unchanged, so even a proven-safe return like `identity`
+  above still fails cleanly at the backend today. What remains explicitly
+  out of scope, by deliberate lifetime-safety design rather than a
+  lowering gap: an EXECUTABLE Slice return of any kind (even a
+  provenance-safe one), interprocedural provenance inference, any
+  executable array that recursively contains a Slice (preventing indirect
+  escape through M8's own array-return machinery), slice-of-slice,
+  sub-slicing, mutable slice elements/syntax, and `for x in someArray`
+  iteration.
 - **`for` iteration over anything other than a literal integer range is
   not yet supported.** KAI LANGUAGE M6 (post-alpha.2) makes
   `for i in start..end` over integers a real, executable, native loop -

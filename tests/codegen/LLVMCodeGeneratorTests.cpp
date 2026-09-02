@@ -282,11 +282,18 @@ void testUnsupportedConstructDoesNotLeakAcrossGenerateCalls() {
     // either. KAI LANGUAGE M10A: `[i32]` is now a real semantic Slice
     // Type, so `return 0` against it would be a genuine TypeMismatch
     // (never reaching codegen at all, per compileToLLVM()'s own
-    // model.errors().empty() gate above) - `return f()` recurses instead,
-    // giving the return expression the EXACT SAME (self-referential)
-    // Slice type the declared signature already has, so this still
-    // type-checks with zero errors while remaining backend-unsupported.
-    Generated first = compileToLLVM(sm, codegen, "fn f() -> [i32] {\n    return f()\n}");
+    // model.errors().empty() gate above) - a self-recursive `return f()`
+    // no longer works either, now that KAI LANGUAGE M11A's restricted
+    // provenance analysis exists: an arbitrary function call's Slice
+    // result is always Unknown provenance (never External), so returning
+    // it would now be rejected as EscapingLocalSlice before codegen ever
+    // runs. `return xs` (direct parameter forwarding) is instead the
+    // simplest source that passes M11A's analysis with zero semantic
+    // errors (the parameter is External) while remaining exactly as
+    // backend-unsupported as before - M10B/M11A's own
+    // `typeContainsSlice(returnType)` guard still blocks a bare Slice
+    // return unconditionally, regardless of how safe its provenance is.
+    Generated first = compileToLLVM(sm, codegen, "fn f(xs: [i32]) -> [i32] {\n    return xs\n}");
     KAI_CHECK(first.model.errors().empty());
     KAI_CHECK(!first.generationSucceeded);
     KAI_CHECK(codegen.unsupportedConstruct().has_value());

@@ -369,9 +369,38 @@ RETURN type and any array that recursively contains a slice remain
 unconditionally rejected at code generation - a deliberate lifetime-
 safety restriction (KAI still has no general borrow checker), not a
 lowering gap. KAI 0.1 supports IMMUTABLE slices only - no `[mut T]`/
-`&mut [T]`/writable slice indexing exists or is planned yet. See
-TYPE_SYSTEM.md's own "Slices" section for the complete semantic model
-and DESIGN_QUESTIONS.md for the M10A/M10B resolution.
+`&mut [T]`/writable slice indexing exists or is planned yet.
+
+**KAI LANGUAGE M11A (post-alpha.2): restricted slice provenance + safe-
+return analysis.** TypeChecker now tracks a per-binding `SliceProvenance`
+(`External`/`Local`/`Unknown` - never part of the `[T]` Type itself) and
+uses it to accept a narrow, provably-sound class of Slice returns:
+
+    fn identity(xs: [i32]) -> [i32] {
+        return xs   // now accepted by TypeChecker - `xs` is a
+                    // parameter, so it is External
+    }
+
+    fn bad() -> [i32] {
+        let values = [1, 2, 3]
+        return slice(values)   // still rejected: EscapingLocalSlice -
+                                // `values` is local, so `slice(values)`
+                                // is Local, never External
+    }
+
+A Slice parameter (or a plain copy/rebinding of one) is `External`;
+`slice(...)` of a local array OR of a fixed-array parameter is `Local`
+(a fixed-array parameter is itself a BY-VALUE copy into callee-owned
+storage, so it is never treated like a Slice parameter); anything else,
+including the result of any other function call, is `Unknown`. Only
+`External` may be returned; `Local`/`Unknown` are rejected with a
+dedicated `EscapingLocalSlice` diagnostic, never a generic
+`TypeMismatch`. This remains SEMANTIC ANALYSIS ONLY - code generation is
+completely unchanged, so `identity` above still fails cleanly at the
+backend today, exactly as it did before M11A; only TypeChecker's own
+verdict has changed. See TYPE_SYSTEM.md's own "Function returns"
+subsection for the complete semantic model and DESIGN_QUESTIONS.md for
+the M10A/M10B/M11A resolution.
 
 ---
 

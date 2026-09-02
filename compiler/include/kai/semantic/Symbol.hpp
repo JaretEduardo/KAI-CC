@@ -3,7 +3,9 @@
 #include "kai/semantic/Type.hpp"
 #include "kai/source/SourceLocation.hpp"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string>
@@ -32,6 +34,15 @@ public:
 
 private:
     friend class SemanticModel;
+
+    /// KAI LANGUAGE M11A: grants ONLY the `std::hash` specialization
+    /// below raw-value access, so a SymbolId can be used as an
+    /// `std::unordered_map`/`std::unordered_set` key (SemanticModel's own
+    /// per-function SliceProvenance tracking needs exactly this) without
+    /// widening SymbolId's own "opaque token, no external raw access"
+    /// contract to any other caller - this is the standard, narrowly-
+    /// scoped C++ idiom for making an opaque ID type hashable.
+    friend struct std::hash<SymbolId>;
 
     constexpr explicit SymbolId(std::uint32_t id) noexcept : id_(id) {}
 
@@ -115,3 +126,14 @@ struct Symbol {
 };
 
 } // namespace kai::semantic
+
+/// KAI LANGUAGE M11A: makes SymbolId usable as an `std::unordered_map`/
+/// `std::unordered_set` key (see SymbolId's own `friend struct
+/// std::hash<SymbolId>` grant above) - implemented via its private
+/// `rawId()`, never a publicly exposed raw-value accessor.
+template <>
+struct std::hash<kai::semantic::SymbolId> {
+    std::size_t operator()(kai::semantic::SymbolId id) const noexcept {
+        return std::hash<std::uint32_t>{}(id.rawId());
+    }
+};

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -128,6 +129,62 @@ enum class SemanticErrorKind : std::uint8_t {
     /// the three accepted domains (a fixed-size array, a slice, or
     /// `str`). `actualType` records what `x` actually is.
     InvalidLenOperand,
+
+    /// KAI LANGUAGE M11A: a Slice-typed `return` expression whose
+    /// resolved SliceProvenance (see below) is Local or Unknown, for a
+    /// function declared to return a Slice - the returned view may
+    /// outlive the storage it was built from (Local), or the compiler
+    /// simply cannot yet prove otherwise (Unknown); both are rejected
+    /// uniformly by this ONE kind, matching this project's existing
+    /// one-kind-per-failure-shape convention (no per-instance free text -
+    /// see TypeChecker.cpp's checkReturnStmt() and SliceProvenance's own
+    /// class comment for the full model). Deliberately never a generic
+    /// TypeMismatch: the returned expression's Type is already correct;
+    /// only its PROVENANCE (an entirely separate, value-level property -
+    /// see SliceProvenance's own comment) makes the return unsafe.
+    EscapingLocalSlice,
+};
+
+/// KAI LANGUAGE M11A: a Slice VALUE's restricted provenance
+/// classification - a deliberately narrow substitute for general
+/// lifetime/borrow analysis (TYPE_SYSTEM.md's own "Slices" section has
+/// the full model). This is a property of a VALUE (an expression, or a
+/// Symbol's current tracked value as of a given point in its own
+/// function body), never of a Type: every `[i32]` Slice Type is exactly
+/// the same Type regardless of which of its VALUES this describes - see
+/// Type.hpp's own TypeKind::Slice comment, which deliberately carries no
+/// provenance/lifetime payload for exactly this reason.
+///
+///   External: the underlying storage is guaranteed to outlive the
+///   CURRENT function invocation - the only Slice source M11A recognizes
+///   as External is a Slice-typed function PARAMETER (its metadata is
+///   copied by value, M10B's own by-value ABI, but the ELEMENTS it
+///   refers to were never copied, and the parameter binding itself
+///   cannot be the callee's own local storage). "External" does not mean
+///   `'static`/globally-forever - only that returning this SAME view
+///   does not reference storage the CURRENT callee frame owns.
+///
+///   Local: the underlying storage belongs to the CURRENT function
+///   invocation - produced by `slice(x)` for EITHER a local fixed array
+///   OR a fixed-array PARAMETER (M8's fixed-array parameters are BY
+///   VALUE, copied into callee-owned storage - see
+///   TYPE_SYSTEM.md's own M11A note for why a fixed-array parameter is
+///   NOT treated like a Slice parameter here).
+///
+///   Unknown: the compiler cannot currently prove which of the above
+///   applies - e.g. an arbitrary Slice-returning function call (no
+///   interprocedural provenance contracts exist yet), or a mutable Slice
+///   binding whose provenance became ambiguous after a branch/loop
+///   (§ TypeChecker.cpp's checkIfStmt()/checkWhileStmt()/checkForStmt()).
+///
+/// Only External values may be returned from a function declared to
+/// return a Slice; Local and Unknown are both rejected
+/// (SemanticErrorKind::EscapingLocalSlice) - conservative rejection is
+/// the deliberate, accepted failure mode here, never unsound acceptance.
+enum class SliceProvenance : std::uint8_t {
+    External,
+    Local,
+    Unknown,
 };
 
 /// A minimal, message-free description of a semantic failure - the
@@ -328,6 +385,86 @@ private:
         symbols_[id.rawId()].type = type;
     }
 
+    /// KAI LANGUAGE M11A: `id`'s CURRENT tracked SliceProvenance, as of
+    /// wherever TypeChecker's own single, in-order pass over the
+    /// enclosing function body has reached so far - this is FLOW-
+    /// SENSITIVE state (the same `id` may report a different value at
+    /// different points during one checkFunctionBody() call, unlike
+    /// `symbol(id).type`, which is a fixed per-declaration fact). Only
+    /// ever meaningful for a Slice-typed Local/Parameter; querying an
+    /// `id` this model has no entry for (never explicitly seeded/
+    /// assigned - e.g. a non-Slice symbol, or a genuinely untracked one)
+    /// returns Unknown, never a guessed concrete value - "never silently
+    /// assume External" is the load-bearing safety property here (M11A
+    /// spec §12).
+    SliceProvenance sliceProvenanceOf(SymbolId id) const {
+        assert(id.isValid());
+        const auto it = sliceProvenance_.find(id);
+        if (it == sliceProvenance_.end()) {
+            return SliceProvenance::Unknown;
+        }
+        return it->second;
+    }
+
+    /// Records `id`'s current tracked SliceProvenance, overwriting any
+    /// previous entry - the ONE mutator behind every provenance update
+    /// (a `let`/inferred initializer, an assignment RHS, a branch/loop
+    /// merge result). Also marks `id` as "touched" for the CURRENT
+    /// touched-tracking scope (see beginSliceProvenanceTouchTracking()
+    /// below) - the mechanism checkWhileStmt()/checkForStmt() use to
+    /// conservatively demote any binding assigned anywhere within a loop
+    /// body to Unknown, without needing to re-run/re-check that body a
+    /// second time (which would risk duplicate diagnostics - see those
+    /// methods' own comments in TypeChecker.cpp for the full reasoning).
+    void setSliceProvenance(SymbolId id, SliceProvenance provenance) {
+        assert(id.isValid());
+        sliceProvenance_.insert_or_assign(id, provenance);
+        if (sliceProvenanceTouchTracking_) {
+            sliceProvenanceTouched_.insert(id);
+        }
+    }
+
+    /// A snapshot of every currently-tracked SliceProvenance entry, by
+    /// value - the fork half of the fork/merge pattern
+    /// checkIfStmt()/checkWhileStmt()/checkForStmt() use: taken once
+    /// before checking a branch/loop body, so that body's own provenance
+    /// updates (via setSliceProvenance() above) can be examined and then
+    /// discarded (restoreSliceProvenance() below) before checking the
+    /// NEXT branch from the SAME starting point - each branch of an
+    /// if/else is an independent alternate path, never a continuation of
+    /// the previous branch's own effects.
+    std::unordered_map<SymbolId, SliceProvenance> snapshotSliceProvenance() const { return sliceProvenance_; }
+
+    /// Replaces the entire live provenance map with `snapshot` (from a
+    /// prior snapshotSliceProvenance() call, or a freshly-computed merge
+    /// map) - the restore half of the fork/merge pattern above.
+    void restoreSliceProvenance(std::unordered_map<SymbolId, SliceProvenance> snapshot) {
+        sliceProvenance_ = std::move(snapshot);
+    }
+
+    /// Starts (or restarts) touched-tracking: every setSliceProvenance()
+    /// call from this point on additionally records its `id` into a
+    /// separate touched-set, until touchedSliceProvenanceSince() reads
+    /// (and clears) it. Used by checkWhileStmt()/checkForStmt() to answer
+    /// "which bindings did this loop body assign to at all" - the
+    /// question that drives their own conservative "assigned anywhere in
+    /// the loop -> Unknown" rule - without needing to compare before/after
+    /// provenance VALUES (which could miss an assignment that happens to
+    /// reassign the same value, an unsound shortcut this deliberately
+    /// avoids - see checkWhileStmt()'s own comment for a concrete
+    /// counterexample).
+    void beginSliceProvenanceTouchTracking() {
+        sliceProvenanceTouchTracking_ = true;
+        sliceProvenanceTouched_.clear();
+    }
+
+    /// Stops touched-tracking and returns everything touched since the
+    /// matching beginSliceProvenanceTouchTracking() call.
+    std::unordered_set<SymbolId> endSliceProvenanceTouchTracking() {
+        sliceProvenanceTouchTracking_ = false;
+        return std::move(sliceProvenanceTouched_);
+    }
+
     /// KAI LANGUAGE M7A: the one compile-scoped compound-type interner
     /// this model owns (see Type.hpp's CompoundTypeId/Type class
     /// comments for the full design rationale). `elementType` must
@@ -406,6 +543,21 @@ private:
     std::unordered_map<const ast::Expr*, Type> expressionTypes_;
     std::vector<ArrayTypeInfo> arrayTypes_;
     std::vector<SliceTypeInfo> sliceTypes_;
+
+    /// KAI LANGUAGE M11A: FLOW-SENSITIVE per-symbol state, unlike every
+    /// other map above (which record fixed, position-independent facts) -
+    /// see sliceProvenanceOf()'s own comment. Only ever meaningful during
+    /// TypeChecker's single in-order pass over ONE function body at a
+    /// time; entries for a PREVIOUS function's locals become simply dead
+    /// (never looked up again, since SymbolId values are never reused
+    /// across functions) rather than actively cleared between functions -
+    /// harmless, not a correctness concern.
+    std::unordered_map<SymbolId, SliceProvenance> sliceProvenance_;
+
+    /// The touched-tracking scratch state behind beginSliceProvenanceTouchTracking()/
+    /// endSliceProvenanceTouchTracking() above.
+    std::unordered_set<SymbolId> sliceProvenanceTouched_;
+    bool sliceProvenanceTouchTracking_ = false;
 };
 
 } // namespace kai::semantic

@@ -1252,30 +1252,53 @@ above) remains compiler-private - no C-compatible ABI is promised.
 
 ## Function returns
 
-A Slice RETURN type is UNCONDITIONALLY unsupported, even though the
-direct-aggregate ABI could mechanically lower one with no technical
-difficulty - this is a deliberate lifetime-safety restriction, not a
-lowering gap:
+A Slice RETURN type is UNCONDITIONALLY unsupported AT CODE GENERATION,
+even though the direct-aggregate ABI could mechanically lower one with
+no technical difficulty - this remains a deliberate lifetime-safety
+restriction, not a lowering gap. KAI LANGUAGE M11A adds a SEMANTIC-layer
+provenance analysis on top of this (still with no executable Slice
+return - that is a later milestone's job), so the two layers now draw
+genuinely different lines:
 
-- the slice return TYPE (syntax and semantic Type) may exist and
-  type-check fine (`fn identity(xs: [i32]) -> [i32] { return xs }` is
-  semantically well-typed - a parameter's own slice value can flow
-  straight to `return xs`)
-- code generation rejects it explicitly and cleanly regardless (the
-  SAME actionable diagnostic every other unsupported function return
-  already uses - never a crash)
-- this remains true even for a value that would, if allowed, have been
-  perfectly SOUND under the Lifetime model above (e.g. relaying a
-  parameter's own slice straight back out) - M10B does not yet
-  distinguish "sound to return" from "unsound to return," so ALL Slice
-  returns are rejected uniformly until a real lifetime/provenance
-  analysis can draw that distinction safely
+- SemanticAnalyzer/TypeChecker (M11A): a restricted, non-general
+  provenance analysis classifies every Slice-typed expression as
+  `External` (backed by storage that outlives the current invocation -
+  a Slice PARAMETER, or a plain copy/rebinding of one), `Local` (backed
+  by storage owned by the current invocation - `slice(...)` of a local
+  array OR of a fixed-array parameter, since M8's fixed-array parameters
+  are themselves passed by value into callee-owned storage), or
+  `Unknown` (anything this narrow analysis cannot classify precisely,
+  including the result of any other function call - no interprocedural
+  inference is performed). Only `External` may be returned from a
+  function declared to return Slice; `Local` and `Unknown` are rejected
+  with a dedicated `EscapingLocalSlice` diagnostic, never a generic
+  `TypeMismatch`. This means `fn identity(xs: [i32]) -> [i32] { return xs }`
+  and even `fn f(xs: [i32]) -> [i32] { let s = xs; return s }` now pass
+  semantic analysis cleanly - they are genuinely SOUND returns - while
+  `fn bad() -> [i32] { let a = [1, 2, 3]; return slice(a) }` is rejected
+  at this layer, before code generation ever runs
+- code generation (unchanged since M10B) still rejects EVERY Slice
+  return unconditionally, regardless of how safe its provenance was
+  proven to be - the SAME actionable diagnostic every other unsupported
+  function return already uses, never a crash. A return that is sound
+  under the Lifetime model AND passes M11A's provenance analysis (e.g.
+  `return xs` above) still fails cleanly here; only a later milestone
+  (M11B) may relax this once provenance analysis has had a chance for
+  human review
+- provenance is a property of VALUES/expressions/symbols at a given
+  point in a function body, deliberately never encoded into the Slice
+  `Type` itself - two Slice-typed expressions with the identical `[T]`
+  Type may have different provenance, and the same binding's provenance
+  can change across straight-line reassignment. It is compiler-internal
+  safety metadata with no public query surface (`kai inspect`/
+  `kai refs`/... never expose it, and schemaVersion is unaffected)
 
-Do not conflate TYPE correctness with safe EXECUTABLE behavior - they
-are answered by different layers of this compiler (SemanticAnalyzer/
-TypeChecker vs. LLVMCodeGenerator), exactly as COMPILER_ARCHITECTURE.md's
-own "Semantic value passing vs. physical ABI lowering" note already
-establishes for `[T; N]`.
+Do not conflate TYPE correctness, PROVENANCE-SAFE return eligibility,
+and safe EXECUTABLE behavior - they are three different questions,
+answered by different layers of this compiler (SemanticAnalyzer for the
+first two, LLVMCodeGenerator for the third), exactly as
+COMPILER_ARCHITECTURE.md's own "Semantic value passing vs. physical ABI
+lowering" note already establishes for `[T; N]`.
 
 ## Slice-containing aggregates
 

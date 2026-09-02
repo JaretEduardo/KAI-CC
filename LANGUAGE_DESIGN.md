@@ -196,6 +196,18 @@ case, simpler than Rust's own borrow checking by a wide margin, kept only as far
 use case requires. See TYPE_SYSTEM.md's own "Slices" section for the complete rule and DESIGN_QUESTIONS.md for
 what remains open (general slice-return safety, sub-slicing, mutable slices).
 
+**A third, still-narrow refinement (KAI LANGUAGE M11A):** "never be returned from a function" above is now
+more precise, not more permissive - a restricted PROVENANCE analysis (`External`/`Local`/`Unknown`, tracked
+per binding, never encoded into the Slice `Type` itself) lets TypeChecker recognize the specific case where a
+Slice being returned demonstrably traces back to a parameter (and hence storage that genuinely outlives the
+call) rather than to local storage, and accept only that case as SEMANTICALLY sound. This is still explicitly
+not a borrow checker: it recognizes a small, fixed set of expression shapes (a parameter, a plain copy/
+rebinding, `slice(...)` itself), performs no interprocedural inference (any other function's return is always
+`Unknown`), and code generation is entirely unchanged - every Slice return still fails cleanly at the backend
+regardless of how safe its provenance was proven, pending a later milestone's own decision to make a proven-
+safe return actually executable. See TYPE_SYSTEM.md's own "Function returns" subsection and
+DESIGN_QUESTIONS.md's own M11A resolution/open-questions.
+
 ---
 
 ## 5. AI Semantic Tooling
