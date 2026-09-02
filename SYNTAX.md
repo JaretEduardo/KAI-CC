@@ -268,19 +268,19 @@ for a length-4 array) is rejected at compile time; a dynamic
 out-of-bounds index traps the program immediately at runtime (not the
 language `panic` mechanism - no unwinding, no recovery, no stable exit-
 code guarantee) rather than ever reading or writing out of bounds.
-Still NOT implemented (native execution): arrays as a function
-parameter or return type, and whole-array assignment/copy (`let b = a`
-/ `a = b` for two array-typed values) - see the M8A paragraph below for
-what IS resolved about both. Slice syntax (`[T]`, §16 below) remains
-fully deferred at the type level too, not a semantic type at all yet.
+Slice syntax (`[T]`, §16 below) remains fully deferred at the type level
+too, not a semantic type at all yet. Indexing more than one level into a
+nested array (`m[0][1]`) also remains unimplemented - a codegen-only
+limitation distinct from nested-array VALUE transport (assigning/
+passing/returning a whole nested array), which M8B below makes real.
 
-**KAI LANGUAGE M8A (post-alpha.2): value semantics are resolved for the
-LANGUAGE (design/type-checking), native execution remains M8B.** Fixed-
-size arrays are KAI value types: `let b = a` and `mut a = ...; a = b`
-(exact matching structural type, `a` mutable) are ordinary value copies
-- no aliasing, no implicit sharing, `[T; N]` is Copy-like exactly when
-`T` is. A function parameter/return of array type is likewise
-semantically BY VALUE:
+**KAI LANGUAGE M8A (post-alpha.2): value semantics resolved for the
+LANGUAGE; KAI LANGUAGE M8B (post-alpha.2): native execution
+implemented.** Fixed-size arrays are KAI value types: `let b = a` and
+`mut a = ...; a = b` (exact matching structural type, `a` mutable) are
+ordinary value copies - no aliasing, no implicit sharing, `[T; N]` is
+Copy-like exactly when `T` is. A function parameter/return of array type
+is likewise semantically BY VALUE:
 
     fn sum(xs: [i32; 3]) -> i32 {
         return xs[0] + xs[1] + xs[2]
@@ -298,13 +298,15 @@ still uses ordinary contextual literal typing against the declared
 type, e.g. `sum([1, 2, 3])`) - never an implicit conversion between two
 already-typed arrays. Array parameters stay immutable under KAI's
 existing (unchanged) parameter rules. KAI performs NO array decay:
-`[T; N]` never implicitly becomes `[T]`, a pointer, or a reference.
-These are LANGUAGE semantics only - the physical ABI (how an array
-crosses a function boundary) is an unstable backend implementation
-detail, and a semantically-valid array-parameter/return or whole-array-
-copy program still fails cleanly at code generation until M8B
-implements the actual lowering. See TYPE_SYSTEM.md §18/§19 for the full
-rule and DESIGN_QUESTIONS.md for the resolution.
+`[T; N]` never implicitly becomes `[T]`, a pointer, or a reference. All
+of this is now real, native, executable code as of KAI LANGUAGE M8B
+(post-alpha.2): whole-array init/assignment/self-assignment, and array
+parameters/returns are lowered as a direct LLVM aggregate `[N x T]`
+argument/result - no `sret`/`byval`/hidden pointer, and no promised
+stable external C ABI (the physical ABI remains an unstable backend
+implementation detail, never a language-visible guarantee). See
+TYPE_SYSTEM.md §18/§19 for the full rule and DESIGN_QUESTIONS.md for the
+resolution.
 
 ---
 

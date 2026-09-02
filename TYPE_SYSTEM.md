@@ -754,24 +754,25 @@ any other statically-sized value.
 A zero-length array (`[T; 0]`) is a valid, ordinary fixed-size array
 type - it is not rejected merely because its length is zero.
 
-**Implementation status (KAI LANGUAGE M7A/M7B):** M7A established this as
-a real semantic type - `[T; N]` annotations resolve to it, array literals
-infer it (homogeneous elements only, using the same contextual-literal-
-adaptation rules arithmetic already uses - no new implicit-conversion
-system), and semantic tooling renders it canonically as `[T; N]`. M7B
-(post-alpha.2) implements native execution for a LOCAL fixed-size array:
-literal creation, checked indexed reads/writes (see "Array Indexing Is
-Checked" below), and integration with an M6 `for i in start..end` loop
-all compile to a real native executable. Still NOT implemented (native
-execution - see §18's own "Fixed-Size Arrays at a Function Boundary"
-subsection and §19 for the LANGUAGE semantics, resolved by KAI LANGUAGE
-M8A): arrays as a function parameter or return type (no array calling-
-convention/ABI has been implemented yet - such a parameter/return still
-fails the same "not yet backend-lowerable" diagnostic a slice- or
-reference-typed one already gets), whole-array assignment/copy (`let b
-= a` / `a = b` for two array-typed values - a deliberate backend guard
-still rejects this cleanly), and slices (`[T]`, still
-`Type::unresolved()`).
+**Implementation status (KAI LANGUAGE M7A/M7B/M8B):** M7A established this
+as a real semantic type - `[T; N]` annotations resolve to it, array
+literals infer it (homogeneous elements only, using the same contextual-
+literal-adaptation rules arithmetic already uses - no new implicit-
+conversion system), and semantic tooling renders it canonically as
+`[T; N]`. M7B (post-alpha.2) implemented native execution for a LOCAL
+fixed-size array: literal creation, checked indexed reads/writes (see
+"Array Indexing Is Checked" below), and integration with an M6
+`for i in start..end` loop all compile to a real native executable. KAI
+LANGUAGE M8B (post-alpha.2) then implemented native execution for the
+rest (see §18's own "Fixed-Size Arrays at a Function Boundary" subsection
+and §19 for the full LANGUAGE semantics, resolved by KAI LANGUAGE M8A):
+arrays as a function parameter or return type (a direct LLVM aggregate
+argument/result - see §18's "ABI vs. language semantics" below), and
+whole-array assignment/copy (`let b = a` / `a = b` for two array-typed
+values). Still NOT implemented: slices (`[T]`, still
+`Type::unresolved()`), and indexing more than one level into a nested
+array (`m[0][1]` - a codegen-only limitation distinct from nested-array
+VALUE transport, which works).
 
 The backend representation for a supported element type is LLVM's own
 fixed-size aggregate:
@@ -831,9 +832,10 @@ address computation.
 
 ## Fixed-Size Arrays at a Function Boundary
 
-**Resolved (KAI LANGUAGE M8A):** a fixed-size array parameter or return
-type is semantically passed/returned BY VALUE - the same value-copy rule
-§19 below states for `let`/assignment applies identically here.
+**Resolved (KAI LANGUAGE M8A); executable (KAI LANGUAGE M8B):** a
+fixed-size array parameter or return type is semantically passed/
+returned BY VALUE - the same value-copy rule §19 below states for
+`let`/assignment applies identically here.
 
 ```kai
 fn sum(xs: [i32; 3]) -> i32 {
@@ -884,15 +886,18 @@ future type; there is no array-to-slice conversion in KAI 0.1.
 **ABI vs. language semantics:** the LANGUAGE guarantees value semantics
 as described above. The language does NOT promise a stable, external,
 C-compatible ABI for how an array parameter/return value physically
-crosses the machine calling convention - the backend may eventually
-choose direct LLVM aggregate arguments/results, registers, stack,
-hidden temporaries, or indirect/`sret`/`byval`-style lowering, entirely
-as an implementation detail with no effect on the semantics above. KAI
-LANGUAGE M8A resolves the language-semantics question only; native
-execution (the actual LLVM aggregate argument/return lowering) remains
-M8B work - a semantically-valid array-parameter/return program still
-fails cleanly at code generation until then, never a crash and never a
-silent/partial success.
+crosses the machine calling convention. KAI LANGUAGE M8B (post-alpha.2)
+implemented the initial physical strategy - a DIRECT LLVM aggregate
+argument/result (`[T; N]` lowers straight to `[N x T]` as a
+`FunctionType` parameter/return type, no `sret`, no `byval`, no hidden
+pointer parameter) - as an internal backend implementation detail with no
+effect on the semantics above; a different physical strategy could
+replace this one in the future without changing any observable KAI
+source semantics. This is real, native, executable code as of KAI
+LANGUAGE M8B, including an existing array value or an inline array
+literal as an argument, both a literal and an existing value as a return
+expression, `str`-element arrays, zero-length (`[T; 0]`) arrays, and
+nested-array value transport.
 
 ---
 
@@ -925,8 +930,8 @@ let second = first
 
 `second` receives a real VALUE COPY of `first` - there is no aliasing
 relationship between them, no implicit sharing, and no copy-on-write.
-Modifying `second` (once whole-array mutation is executable) must never
-be observable through `first`.
+Modifying `second` must never be observable through `first`, and (as of
+KAI LANGUAGE M8B, post-alpha.2) this is real, native, executable code.
 
 The same value-copy rule governs whole-array ASSIGNMENT:
 
@@ -954,14 +959,14 @@ Zero-length arrays (`[T; 0]`) follow this value-copy rule with no special
 exception - copying/assigning a zero-length array is as valid as any
 other length.
 
-**Implementation status:** M8A resolves this as LANGUAGE semantics only.
-Whole-array copy/assignment does not yet compile to a native executable
-- the compiler must never silently perform this (whether cheap or
-expensive) until the backend genuinely implements it; a deliberate
-backend guard currently rejects it cleanly rather than ever emitting
-partial or incorrect LLVM IR. See §18 above (function parameters/
-returns, also value semantics, same implementation-status split) and
-COMPILER_ARCHITECTURE.md's own M8A note.
+**Implementation status:** M8A resolved this as LANGUAGE semantics; KAI
+LANGUAGE M8B (post-alpha.2) implemented it as real, native, executable
+code - whole-array initialization, assignment, and self-assignment all
+compile to a real native executable, via an ordinary
+alloca/GEP-or-load/store LLVM lowering with no aliasing introduced at
+any point. See §18 above (function parameters/returns, also value
+semantics, same implementation-status split) and
+COMPILER_ARCHITECTURE.md's own M8A/M8B note.
 
 ---
 

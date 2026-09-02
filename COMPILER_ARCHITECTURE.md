@@ -81,21 +81,20 @@ Currently implemented and native-executable-verified on Fedora Linux x86_64 only
 Windows/macOS support yet): primitive integer/Bool/f32/f64 values and arithmetic/comparison/logical
 expressions (`&&`/`||` are FINAL short-circuit, not eager), local variables, mutability/assignment, function
 parameters/calls/forward-calls/recursion, `if`/`else`/`else if`, `while`, `for i in start..end` over an
-integer range (KAI LANGUAGE M6, post-alpha.2), a LOCAL fixed-size array `[T; N]` with checked indexed reads/
+integer range (KAI LANGUAGE M6, post-alpha.2), a fixed-size array `[T; N]` with checked indexed reads/
 writes (KAI LANGUAGE M7B, post-alpha.2 - a compile-time-constant out-of-bounds index is a compile error; a
-dynamic one traps via `llvm.trap`, never an unchecked access), Unit functions, a minimal `print` builtin for
-those primitive types (lowered to the tiny static C runtime described in §12, `runtime/kai_runtime.c`),
-native object emission (`LLVMObjectEmitter`), and static runtime linking into a real executable
-(`NativeLinker`, invoking the host C compiler driver) via `kaicc <file.kai> -o <output>`.
+dynamic one traps via `llvm.trap`, never an unchecked access), whole-array initialization/assignment/self-
+assignment and array function parameters/returns lowered as a direct LLVM aggregate `[N x T]` argument/result
+(KAI LANGUAGE M8B, post-alpha.2 - no `sret`/`byval`/hidden pointer, no promised stable external C ABI), Unit
+functions, a minimal `print` builtin for those primitive types (lowered to the tiny static C runtime
+described in §12, `runtime/kai_runtime.c`), native object emission (`LLVMObjectEmitter`), and static runtime
+linking into a real executable (`NativeLinker`, invoking the host C compiler driver) via
+`kaicc <file.kai> -o <output>`.
 
-Still unimplemented (backend/native execution only - see the M8A note below for what is already resolved at
-the language-semantics level): general iterable/foreach semantics and array/slice iteration (`for x in
-someArray` - `for` only supports a literal `start..end` integer range, KAI LANGUAGE M6), a first-class
-`Range` value, arrays as a function parameter or return type (no array calling-convention/ABI has been
-IMPLEMENTED yet - KAI LANGUAGE M8A resolved that they are semantically BY VALUE; M8B implements the actual
-LLVM lowering), whole-array assignment/copy (`let b = a` / `a = b` for two array-typed values - KAI LANGUAGE
-M8A resolved this as ordinary value-copy semantics with no aliasing; a deliberate backend guard still
-rejects it cleanly until M8B implements it, never an unimplemented-by-oversight gap), slices (`[T]`, still
+Still unimplemented (backend/native execution only): general iterable/foreach semantics and array/slice
+iteration (`for x in someArray` - `for` only supports a literal `start..end` integer range, KAI LANGUAGE M6),
+a first-class `Range` value, indexing more than one level into a nested array (`m[0][1]` - a codegen-only
+limitation distinct from nested-array VALUE transport, which M8B makes real), slices (`[T]`, still
 no semantic Type at all), strings/`Char` as backend-
 lowerable values, references, ownership/borrowing, structs/enums/generics, `panic`/`assert` lowering,
 optimization passes, HIR, an LSP, and the higher-level `kai` CLI wrapper described in §14 (only `kaicc`
@@ -251,13 +250,19 @@ code, since none of that machinery ever special-cased "is this an aggregate." Th
 is a completely separate concern: it decides HOW an array value physically crosses a function boundary or
 gets copied in memory (LLVM aggregate arguments/results, registers, stack, hidden temporaries, indirect/
 `sret`/`byval`-style lowering, ...), and none of those choices may ever change the frontend's already-
-settled observable semantics. M8A intentionally implements none of that backend lowering - the M7B guards
-(`declareFunction()`'s explicit Array parameter/return rejection, `lowerAssignmentExpr()`'s/
-`generateArrayVarDeclStmt()`'s explicit whole-array-copy rejection) remain in place unchanged, so a
-semantically-valid array-parameter/return or whole-array-copy program still fails cleanly at code
-generation until M8B. KAI does not promise a stable, external, C-compatible ABI for how arrays cross a
-function boundary - that remains an M8B target/backend implementation decision, never a language-design
-question (see DESIGN_QUESTIONS.md's own M8A resolution).
+settled observable semantics. M8A itself intentionally implemented none of that backend lowering - the M7B
+guards (`declareFunction()`'s explicit Array parameter/return rejection, `lowerAssignmentExpr()`'s/
+`generateArrayVarDeclStmt()`'s explicit whole-array-copy rejection) stayed in place unchanged through M8A, so
+a semantically-valid array-parameter/return or whole-array-copy program still failed cleanly at code
+generation. **KAI LANGUAGE M8B (post-alpha.2)** then removed exactly those guards and implemented the chosen
+backend strategy: DIRECT LLVM aggregate arguments/results - `[T; N]` lowers straight to `[N x T]` as a
+`FunctionType` parameter/return type, with no `sret`, no `byval`, no hidden pointer parameter, and no
+reference/aliasing introduced anywhere in the lowering. `ArrayLiteralExpr` became a genuine value-producing
+expression for the first time (a temporary entry-block stack slot, initialized element-by-element, then
+loaded once as a complete aggregate value) so it can be used as a call argument or return expression, not
+only as a `VarDecl`'s own direct initializer. KAI still does not promise a stable, external, C-compatible ABI
+for how arrays cross a function boundary - the direct-aggregate choice remains an internal backend
+implementation detail, never a language-design guarantee (see DESIGN_QUESTIONS.md's own M8A/M8B resolution).
 
 Example errors:
 

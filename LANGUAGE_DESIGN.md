@@ -176,11 +176,13 @@ Example direction:
 
 The memory model will be designed incrementally and must remain simpler than Rust's full borrow-checking model unless stronger complexity is justified.
 
-**Settled so far (KAI LANGUAGE M8A):** fixed-size arrays (`[T; N]`) are KAI value types - `let b = a` and
-whole-array assignment are ordinary value copies, with no aliasing, no implicit sharing, and no copy-on-
-write, and `[T; N]` is Copy-like exactly when its element type `T` is. This is a narrow, concrete instance
-of the still-open direction above, not a declaration that the full ownership/borrowing model is finalized -
-see TYPE_SYSTEM.md §19 for the complete rule and DESIGN_QUESTIONS.md for what remains open.
+**Settled so far (KAI LANGUAGE M8A, executable as of M8B):** fixed-size arrays (`[T; N]`) are KAI value types -
+`let b = a` and whole-array assignment are ordinary value copies, with no aliasing, no implicit sharing, and
+no copy-on-write, and `[T; N]` is Copy-like exactly when its element type `T` is. This is real, native,
+executable code as of KAI LANGUAGE M8B (post-alpha.2), including array function parameters/returns. This is a
+narrow, concrete instance of the still-open direction above, not a declaration that the full ownership/
+borrowing model is finalized - see TYPE_SYSTEM.md §19 for the complete rule and DESIGN_QUESTIONS.md for what
+remains open.
 
 ---
 

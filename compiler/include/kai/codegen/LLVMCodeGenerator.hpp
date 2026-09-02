@@ -142,17 +142,24 @@ namespace kai::codegen {
 /// is Str all lower successfully - but this is deliberately narrow: `str`
 /// remains unspellable as a source type annotation, and `String`/`&str`/
 /// concatenation/formatting/string methods remain entirely unmodeled. KAI
-/// LANGUAGE M7B (post-alpha.2) additionally lowers a LOCAL fixed-size
-/// array (`let`/`mut xs = [elem, ...]`) to real `[N x T]` LLVM storage
-/// with checked indexed reads/writes (see generateArrayVarDeclStmt()/
-/// lowerArrayElementAddress() and this class's own header note above) -
-/// arrays as a function PARAMETER or RETURN type, and whole-array
-/// assignment/copy (`let b = a` / `a = b`), remain explicitly deferred
-/// (no array calling-convention/ABI exists, and whole-array Copy
-/// semantics are an unreviewed language-design question - see
-/// declareFunction()'s own explicit Array parameter/return guard and
-/// lowerAssignmentExpr()'s/generateArrayVarDeclStmt()'s own explicit
-/// whole-array guards, none of which are accidental omissions).
+/// LANGUAGE M7B (post-alpha.2) lowers a LOCAL fixed-size array
+/// (`let`/`mut xs = [elem, ...]`) to real `[N x T]` LLVM storage with
+/// checked indexed reads/writes (see generateArrayVarDeclStmt()/
+/// lowerArrayElementAddress() and this class's own header note above).
+/// KAI LANGUAGE M8B (post-alpha.2) completes array value semantics:
+/// whole-array initialization/assignment (`let b = a` / `a = b`),
+/// self-assignment, and array function parameters/returns are all real,
+/// executable, direct-LLVM-aggregate code - no sret/byval, no hidden
+/// pointer, no reference, matching TYPE_SYSTEM.md §18/§19's by-value
+/// language contract exactly. `lowerArrayLiteralExpr()` makes
+/// ArrayLiteralExpr a genuine value-producing expression (a temporary
+/// stack slot, initialized via the SAME lowerArrayLiteralIntoStorage()
+/// M7B already built, then loaded once) - this is what makes
+/// `f([1, 2, 3])`/`return [1, 2, 3]` work, reusing rather than
+/// duplicating M7B's own element-store logic. KAI does not promise a
+/// stable, external, C-compatible ABI for how an array crosses a
+/// function boundary - the direct-aggregate strategy is an internal
+/// compiler/target implementation detail, not a language guarantee.
 class LLVMCodeGenerator {
 public:
     /// `sources` must outlive every generate() call - it is the only way
@@ -416,15 +423,22 @@ private:
     bool generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llvm::Function& function, llvm::IRBuilder<>& builder,
                               const semantic::SemanticModel& model);
 
-    /// KAI LANGUAGE M7B: an array-typed local's own initialization path,
-    /// dispatched to from generateVarDeclStmt() the moment `arrayType`
-    /// (already lowered from the local's own Symbol Type) is an
-    /// llvm::ArrayType. Supports EXACTLY `let`/`mut xs = [elem, ...]` (a
-    /// possibly paren-wrapped ArrayLiteralExpr initializer, evaluated via
-    /// lowerArrayLiteralIntoStorage()) - any other initializer shape
-    /// (`let b = a`, copying one array-typed value into another) is
-    /// deliberately kept unsupported (returns false) per M7B spec §13 -
-    /// see this method's own .cpp comment for the full rationale.
+    /// An array-typed local's own initialization path, dispatched to
+    /// from generateVarDeclStmt() the moment `arrayType` (already
+    /// lowered from the local's own Symbol Type) is an llvm::ArrayType.
+    /// A direct (possibly paren-wrapped) ArrayLiteralExpr initializer
+    /// (`let`/`mut xs = [elem, ...]`) uses the efficient M7B fast path -
+    /// evaluated straight into the local's own storage via
+    /// lowerArrayLiteralIntoStorage(), never through an intermediate
+    /// temporary. KAI LANGUAGE M8B: any OTHER initializer shape (`let b
+    /// = a`, or any future array-valued expression) falls back to the
+    /// SAME generic "lower a value, compare its LLVM type, store it"
+    /// path generateVarDeclStmt() already uses for every non-array Type
+    /// - lowerExpr() now produces a real aggregate SSA value for both an
+    /// array identifier (already worked, unchanged since M3) and an
+    /// array literal in general value position (lowerArrayLiteralExpr(),
+    /// new in M8B) - so this fallback needs no array-specific lowering
+    /// logic of its own.
     bool generateArrayVarDeclStmt(const ast::VarDeclStmt& varDecl, semantic::SymbolId id, llvm::ArrayType* arrayType,
                                    llvm::Function& function, llvm::IRBuilder<>& builder,
                                    const semantic::SemanticModel& model);
@@ -620,6 +634,26 @@ private:
     std::optional<llvm::Value*> lowerIndexAssignmentExpr(const ast::IndexExpr& indexTarget, const ast::Expr& value,
                                                           const semantic::SemanticModel& model,
                                                           llvm::IRBuilder<>& builder);
+
+    /// KAI LANGUAGE M8B: makes ArrayLiteralExpr a genuine value-
+    /// producing expression - required for `f([1, 2, 3])`/
+    /// `return [1, 2, 3]`/`a = [1, 2, 3]`, none of which have an existing
+    /// local-storage slot of their own to initialize directly the way
+    /// generateArrayVarDeclStmt()'s fast path does. Strategy (chosen
+    /// over building the aggregate via a chain of `insertvalue`
+    /// instructions): allocate a compiler-temporary entry-block stack
+    /// slot (createEntryBlockAlloca(), independent of `builder`'s
+    /// current position - safe to call from anywhere mid-expression),
+    /// initialize it via the SAME lowerArrayLiteralIntoStorage() M7B
+    /// already built (left-to-right, exactly-once element evaluation,
+    /// recursive nested-array-literal support - never a second,
+    /// duplicated element-store implementation), then load the complete
+    /// aggregate value exactly once. No heap allocation; the temporary
+    /// is ordinary stack memory local to the current function, never
+    /// aliased or exposed beyond this one load.
+    std::optional<llvm::Value*> lowerArrayLiteralExpr(const ast::ArrayLiteralExpr& array, semantic::Type type,
+                                                       const semantic::SemanticModel& model,
+                                                       llvm::IRBuilder<>& builder);
 
     /// A direct (or transparently-parenthesized) call - the current
     /// frontend-supported call subset. Resolution is exclusively

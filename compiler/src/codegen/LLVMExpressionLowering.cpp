@@ -192,15 +192,18 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerExpr(const ast::Expr& expr, 
             // lowerIndexExpr()/lowerArrayElementAddress()'s own doc
             // comments for the full bounds-check/GEP/load design.
             return lowerIndexExpr(static_cast<const ast::IndexExpr&>(expr), model, builder);
-
-        // Explicitly deferred: ArrayLiteral is never a general value-
-        // producing expression (M7A/M7B - only lowered directly as a
-        // local's own initializer, see generateArrayVarDeclStmt() in
-        // LLVMCodeGenerator.cpp); Member needs compound/struct types;
-        // Unit is a legitimate value this milestone simply does not
-        // produce as an expression's own literal form yet; error
-        // propagation needs Result.
         case ast::ExprKind::ArrayLiteral:
+            // KAI LANGUAGE M8B: ArrayLiteralExpr is now a genuine value-
+            // producing expression (`f([1, 2, 3])`, `return [1, 2, 3]`,
+            // `a = [1, 2, 3]`), not only a VarDecl's own direct
+            // initializer - see lowerArrayLiteralExpr()'s own doc comment
+            // for the temp-storage-then-load strategy.
+            return lowerArrayLiteralExpr(static_cast<const ast::ArrayLiteralExpr&>(expr), *type, model, builder);
+
+        // Explicitly deferred: Member needs compound/struct types; Unit
+        // is a legitimate value this milestone simply does not produce
+        // as an expression's own literal form yet; error propagation
+        // needs Result.
         case ast::ExprKind::Member:
         case ast::ExprKind::Unit:
         case ast::ExprKind::ErrorPropagation:
@@ -639,23 +642,16 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerAssignmentExpr(const ast::As
         return std::nullopt;
     }
 
-    // KAI LANGUAGE M7B/M8A: whole-array reassignment (`a = b`) is
-    // deliberately kept unsupported here, even though it would otherwise
-    // "fall out" of this existing, array-agnostic scalar path for free
-    // the moment Array became a real lowerable LLVM aggregate type
-    // (CreateLoad/CreateStore both already support an aggregate SSA
-    // value structurally, with zero changes needed below). KAI LANGUAGE
-    // M8A already resolved the LANGUAGE semantics this would need
-    // (ordinary value-copy, no aliasing - TYPE_SYSTEM.md §19); what
-    // remains is purely the M8B backend implementation (the actual LLVM
-    // copy lowering), never something enabled silently as a side effect
-    // of Array becoming lowerable. Indexed ELEMENT assignment
-    // (`xs[i] = v`) is handled entirely separately above and IS fully
-    // supported.
-    if (slot->getAllocatedType()->isArrayTy()) {
-        return std::nullopt;
-    }
-
+    // KAI LANGUAGE M8B: whole-array reassignment (`a = b`, including
+    // self-assignment `a = a`) is now real - CreateLoad/CreateStore below
+    // already support an aggregate SSA value structurally with zero
+    // further changes, exactly like every other type this path handles.
+    // KAI LANGUAGE M8A resolved the LANGUAGE semantics (ordinary
+    // value-copy, no aliasing - TYPE_SYSTEM.md §19); M7B's own guard here
+    // deliberately deferred the backend implementation until this
+    // milestone rather than let it "fall out" unreviewed. Indexed ELEMENT
+    // assignment (`xs[i] = v`) is handled entirely separately above and
+    // was already fully supported.
     const std::optional<llvm::Value*> rhs = lowerExpr(assignment.value(), model, builder);
     if (!rhs.has_value() || *rhs == nullptr) {
         return std::nullopt;
@@ -677,15 +673,32 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerAssignmentExpr(const ast::As
 std::optional<LLVMCodeGenerator::ArrayElementAddress> LLVMCodeGenerator::lowerArrayElementAddress(
     const ast::IndexExpr& indexExpr, const SemanticModel& model, llvm::IRBuilder<>& builder) {
     // M7B spec §1/§12: only `xs[index]` where `xs` is a direct (through
-    // transparent ParenExpr only) identifier resolving to a
-    // SymbolKind::Local array binding is supported - see this method's
-    // own header doc comment for the full rationale.
+    // transparent ParenExpr only) identifier is supported (nested
+    // indexing, e.g. `m[0][1]`, stays unsupported).
+    //
+    // KAI LANGUAGE M8B: the root identifier may now resolve to a
+    // SymbolKind::Local OR a SymbolKind::Parameter array binding - array
+    // function parameters (M8B's own feature) need element READS to work
+    // the same way a local's do, and both are bound into the same
+    // `locals_` table via the same entry-alloca+store pattern (see
+    // declareFunction()'s parameter-binding loop), so `findLocalSlot()`
+    // already finds either uniformly. This does NOT reopen element
+    // WRITES through a parameter: lowerIndexAssignmentExpr() also calls
+    // this method, but TypeChecker's checkIndexAssignmentTarget() already
+    // rejects `xs[i] = v` for a non-Local (e.g. Parameter) base at the
+    // semantic layer - KAI parameters remain immutable - so this
+    // broadened check can never actually be reached for a write through a
+    // parameter in practice, and is not itself a mutability decision.
     const ast::IdentifierExpr* rootIdentifier = unwrapAssignmentTargetIdentifier(indexExpr.object());
     if (rootIdentifier == nullptr) {
         return std::nullopt;
     }
     const std::optional<SymbolId> rootId = model.resolution(*rootIdentifier);
-    if (!rootId.has_value() || model.symbol(*rootId).kind != SymbolKind::Local) {
+    if (!rootId.has_value()) {
+        return std::nullopt;
+    }
+    const SymbolKind rootKind = model.symbol(*rootId).kind;
+    if (rootKind != SymbolKind::Local && rootKind != SymbolKind::Parameter) {
         return std::nullopt;
     }
     llvm::AllocaInst* arraySlot = findLocalSlot(*rootId);
@@ -815,6 +828,44 @@ std::optional<llvm::Value*> LLVMCodeGenerator::lowerIndexAssignmentExpr(const as
     // Unit-valued, matching lowerAssignmentExpr()'s own identifier-target
     // convention exactly.
     return std::optional<llvm::Value*>(nullptr);
+}
+
+// KAI LANGUAGE M8B: makes ArrayLiteralExpr a genuine value-producing
+// expression - see this method's own doc comment in the header for the
+// full rationale (temp entry-block alloca, reuse
+// lowerArrayLiteralIntoStorage() rather than a second element-store
+// implementation, one final load). `type` is the ArrayLiteralExpr's own
+// already-resolved Type (from model.typeOf()), exactly like every other
+// lowerExpr() case that takes a `type` parameter - never re-derived here.
+std::optional<llvm::Value*> LLVMCodeGenerator::lowerArrayLiteralExpr(const ast::ArrayLiteralExpr& array, Type type,
+                                                                      const SemanticModel& model,
+                                                                      llvm::IRBuilder<>& builder) {
+    llvm::Type* llvmType = lowerType(type, model);
+    auto* arrayType = llvm::dyn_cast_or_null<llvm::ArrayType>(llvmType);
+    if (arrayType == nullptr) {
+        // nullptr: an unsupported element type (e.g. Char) somewhere in
+        // this literal's type. Not an ArrayType at all would mean `type`
+        // disagrees with this being an ArrayLiteralExpr in the first
+        // place - SemanticAnalyzer/TypeChecker never produce that, but
+        // this is rejected defensively rather than assumed.
+        return std::nullopt;
+    }
+
+    // createEntryBlockAlloca() targets the function's own entry block
+    // directly, independent of `builder`'s current insertion point - safe
+    // to call here, mid-expression-lowering, exactly like every other
+    // local-storage allocation in this class.
+    llvm::Function* function = builder.GetInsertBlock()->getParent();
+    llvm::AllocaInst* temp = createEntryBlockAlloca(*function, arrayType, "array.literal.tmp");
+    if (!lowerArrayLiteralIntoStorage(array, temp, arrayType, model, builder)) {
+        return std::nullopt;
+    }
+
+    // One load of the complete aggregate - the temporary itself is never
+    // exposed or aliased beyond this single point; the resulting SSA
+    // value is an ordinary independent copy, same as any other value this
+    // class produces.
+    return builder.CreateLoad(arrayType, temp, "array.literal.val");
 }
 
 std::optional<llvm::Value*> LLVMCodeGenerator::lowerCallExpr(const ast::CallExpr& call, Type type,
