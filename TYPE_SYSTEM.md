@@ -754,21 +754,25 @@ any other statically-sized value.
 A zero-length array (`[T; 0]`) is a valid, ordinary fixed-size array
 type - it is not rejected merely because its length is zero.
 
-**Implementation status (KAI LANGUAGE M7A/M7B):** M7A established this as
-a real semantic type - `[T; N]` annotations resolve to it, array literals
-infer it (homogeneous elements only, using the same contextual-literal-
-adaptation rules arithmetic already uses - no new implicit-conversion
-system), and semantic tooling renders it canonically as `[T; N]`. M7B
-(post-alpha.2) implements native execution for a LOCAL fixed-size array:
-literal creation, checked indexed reads/writes (see "Array Indexing Is
-Checked" below), and integration with an M6 `for i in start..end` loop
-all compile to a real native executable. Still NOT implemented: arrays
-as a function parameter or return type (no array calling-convention/ABI
-exists - such a parameter/return still fails the same "not yet backend-
-lowerable" diagnostic a slice- or reference-typed one already gets),
+**Implementation status (KAI LANGUAGE M7A/M7B/M8B):** M7A established this
+as a real semantic type - `[T; N]` annotations resolve to it, array
+literals infer it (homogeneous elements only, using the same contextual-
+literal-adaptation rules arithmetic already uses - no new implicit-
+conversion system), and semantic tooling renders it canonically as
+`[T; N]`. M7B (post-alpha.2) implemented native execution for a LOCAL
+fixed-size array: literal creation, checked indexed reads/writes (see
+"Array Indexing Is Checked" below), and integration with an M6
+`for i in start..end` loop all compile to a real native executable. KAI
+LANGUAGE M8B (post-alpha.2) then implemented native execution for the
+rest (see §18's own "Fixed-Size Arrays at a Function Boundary" subsection
+and §19 for the full LANGUAGE semantics, resolved by KAI LANGUAGE M8A):
+arrays as a function parameter or return type (a direct LLVM aggregate
+argument/result - see §18's "ABI vs. language semantics" below), and
 whole-array assignment/copy (`let b = a` / `a = b` for two array-typed
-values - deliberately kept unsupported pending explicit language-
-semantics review), and slices (`[T]`, still `Type::unresolved()`).
+values). Still NOT implemented: slices (`[T]`, still
+`Type::unresolved()`), and indexing more than one level into a nested
+array (`m[0][1]` - a codegen-only limitation distinct from nested-array
+VALUE transport, which works).
 
 The backend representation for a supported element type is LLVM's own
 fixed-size aggregate:
@@ -826,14 +830,96 @@ out-of-bounds index lowers to an actual `llvm.trap` + `unreachable`,
 guarded by a real runtime bounds check that always precedes the element
 address computation.
 
+## Fixed-Size Arrays at a Function Boundary
+
+**Resolved (KAI LANGUAGE M8A); executable (KAI LANGUAGE M8B):** a
+fixed-size array parameter or return type is semantically passed/
+returned BY VALUE - the same value-copy rule §19 below states for
+`let`/assignment applies identically here.
+
+```kai
+fn sum(xs: [i32; 3]) -> i32 {
+    return xs[0] + xs[1] + xs[2]
+}
+
+fn make() -> [i32; 3] {
+    return [1, 2, 3]
+}
+```
+
+Calling `sum(a)` gives the function its OWN array value - there is no
+source-level aliasing between the parameter `xs` and the caller's own
+binding `a`; a future mutable copy inside the callee must never be
+observable through the caller's own array. `make()`'s returned value has
+no borrowed view, no hidden source-level reference, and no lifetime
+relationship to `make`'s own locals - `xs` in `let xs = make()` simply
+owns the returned value.
+
+Argument/return type matching reuses the EXISTING generic type-
+compatibility machinery exactly, never a new implicit-conversion system:
+
+```kai
+fn f(xs: [i32; 3]) { ... }
+
+f(a)              // valid only if `a`'s type is exactly [i32; 3]
+f([1, 2, 3])      // valid - an inline literal still uses ordinary
+                  // contextual literal typing against the declared
+                  // parameter type, exactly like any other parameter
+```
+
+A wrong length (`[i32; 4]`) or wrong element type (`[u32; 3]`) argument
+or return value is rejected via the existing TypeMismatch diagnostic -
+no array-specific call/return-checking code exists. A zero-length array
+parameter/return type is valid with no special exception. Nested arrays
+(`[[i32; 2]; 3]`) as a parameter/return type follow the identical rule
+recursively, with no multidimensional-specific redesign needed. Array
+parameters remain immutable under KAI's EXISTING (unchanged) parameter-
+binding rules - no new mutable-parameter syntax was introduced to
+express "by value, no caller aliasing"; that property is already implied
+by ordinary value semantics, not by mutability.
+
+**No array decay:** `[T; N]` never implicitly becomes `[T]`, a pointer,
+a reference, or any future slice form - at a function boundary or
+anywhere else. Slices remain an entirely distinct, still-unimplemented
+future type; there is no array-to-slice conversion in KAI 0.1.
+
+**ABI vs. language semantics:** the LANGUAGE guarantees value semantics
+as described above. The language does NOT promise a stable, external,
+C-compatible ABI for how an array parameter/return value physically
+crosses the machine calling convention. KAI LANGUAGE M8B (post-alpha.2)
+implemented the initial physical strategy - a DIRECT LLVM aggregate
+argument/result (`[T; N]` lowers straight to `[N x T]` as a
+`FunctionType` parameter/return type, no `sret`, no `byval`, no hidden
+pointer parameter) - as an internal backend implementation detail with no
+effect on the semantics above; a different physical strategy could
+replace this one in the future without changing any observable KAI
+source semantics. This is real, native, executable code as of KAI
+LANGUAGE M8B, including an existing array value or an inline array
+literal as an argument, both a literal and an existing value as a return
+expression, `str`-element arrays, zero-length (`[T; 0]`) arrays, and
+nested-array value transport.
+
 ---
 
-# 19. Array Copy Behavior
+# 19. Array Copy / Value Semantics
 
-A fixed-size array may be `Copy` when:
+**Resolved (KAI LANGUAGE M8A):** fixed-size arrays are KAI value types.
 
-* its element type is `Copy`
-* the language permits the corresponding array size to be copied
+A fixed-size array `[T; N]` is Copy-like exactly when its element type `T`
+is Copy-like:
+
+```text
+[T; N] is Copy-like iff T is Copy-like
+```
+
+This is a plain, documented language rule - no `Copy` trait, user-defined
+trait machinery, or ownership system was introduced to express it. It is
+deliberately narrow: it describes KAI 0.1's currently-executable scalar/
+value element types (every integer width, `f32`/`f64`, `bool`, and `str`
+- see §15 below), and a future non-Copy element type (an owned `String`,
+a struct without its own Copy story, ...) may need to refine this rule
+once ownership/borrowing exists. That refinement is explicitly NOT
+solved here.
 
 Example:
 
@@ -842,11 +928,45 @@ let first: [i32; 4] = [1, 2, 3, 4]
 let second = first
 ```
 
-KAI may allow both arrays to remain valid.
+`second` receives a real VALUE COPY of `first` - there is no aliasing
+relationship between them, no implicit sharing, and no copy-on-write.
+Modifying `second` must never be observable through `first`, and (as of
+KAI LANGUAGE M8B, post-alpha.2) this is real, native, executable code.
 
-Exact automatic Copy rules for aggregate types should remain conservative during KAI 0.1.
+The same value-copy rule governs whole-array ASSIGNMENT:
 
-The compiler must never silently perform an unexpectedly expensive deep copy.
+```kai
+mut a: [i32; 3] = [1, 2, 3]
+let b: [i32; 3] = [4, 5, 6]
+a = b
+```
+
+is valid when `a` is mutable and `b` is the EXACT SAME structural array
+type - `[i32; 3]` to `[i32; 3]` only, never `[i32; 3]` to `[i32; 4]` or
+`[u32; 3]` (no implicit element-by-element conversion between two
+already-typed array values - reuses the existing TypeMismatch machinery,
+the same way any other type mismatch does). An ARRAY LITERAL may still
+use ordinary contextual literal typing regardless (`let xs: [u32; 3] =
+[1, 2, 3]` remains valid, since the literal itself - not an existing
+typed value - is what adapts) - this is unrelated to, and must never be
+generalized into, implicit conversion between two already-typed array
+values. Assigning through an immutable binding (`let a = ...; a = b`)
+is rejected via the existing immutable-assignment diagnostic, with no
+new array-specific error. Self-assignment (`a = a`) is ordinarily valid,
+with no special-cased language error for it either.
+
+Zero-length arrays (`[T; 0]`) follow this value-copy rule with no special
+exception - copying/assigning a zero-length array is as valid as any
+other length.
+
+**Implementation status:** M8A resolved this as LANGUAGE semantics; KAI
+LANGUAGE M8B (post-alpha.2) implemented it as real, native, executable
+code - whole-array initialization, assignment, and self-assignment all
+compile to a real native executable, via an ordinary
+alloca/GEP-or-load/store LLVM lowering with no aliasing introduced at
+any point. See §18 above (function parameters/returns, also value
+semantics, same implementation-status split) and
+COMPILER_ARCHITECTURE.md's own M8A/M8B note.
 
 ---
 

@@ -77,14 +77,17 @@ compiles and runs the same way, printing `Hello` then `KAI`.
 logical `&&`/`||` (short-circuit), assignment, function calls, recursion, `if`/`else if`/`else`, `while`,
 `for i in start..end` over a half-open integer range (KAI LANGUAGE M6, post-alpha.2), explicit `return`.
 
-**Fixed-size arrays (KAI LANGUAGE M7B, post-alpha.2):** a LOCAL fixed-size array `[T; N]` - `let xs = [1, 2,
+**Fixed-size arrays (KAI LANGUAGE M7B/M8B, post-alpha.2):** a fixed-size array `[T; N]` - `let xs = [1, 2,
 3]` or an explicitly-annotated `let xs: [i32; 3] = [1, 2, 3]` - is real, native, executable code: checked
 indexed reads (`xs[i]`) and, for a `mut` binding, checked indexed writes (`xs[i] = value`), including inside
 an M6 `for`-range loop. Indexing is CHECKED: a compile-time-constant out-of-bounds index (`xs[3]`/`xs[-1]` for
 a length-3 array) is a compile error, and a dynamic out-of-bounds index (positive, negative, signed, or
-unsigned) traps the program immediately at runtime rather than reading/writing out of bounds - see "Current
-limitations" below for exactly what array support does *not* yet cover (arrays as function parameters/
-returns, slices, whole-array copy).
+unsigned) traps the program immediately at runtime rather than reading/writing out of bounds. Fixed arrays
+are KAI value types (KAI LANGUAGE M8A, post-alpha.2), and this is now real executable code too (KAI LANGUAGE
+M8B, post-alpha.2): whole-array initialization/assignment/self-assignment are ordinary value copies with no
+aliasing, and array function parameters/returns are lowered as a direct LLVM aggregate `[N x T]`
+argument/result (no `sret`/`byval`/hidden pointer, and no promised stable external C ABI) - see "Current
+limitations" below for what remains out of scope (slices, nested-array indexing beyond one level).
 
 **Text:** string literals, explicit `str` local annotations, `str` function parameters and return types, and
 `print(str)`. `str` values (including those containing an embedded `\0` byte, which is valid UTF-8) are
@@ -317,18 +320,22 @@ adaptation rules as arithmetic; no implicit widening/narrowing). KAI 0.1 still h
 protocol, though: `for x in someCollection` over anything other than a literal `start..end` range is rejected
 as a semantic error, not silently ignored.
 
-A LOCAL fixed-size array `[T; N]` (`let`/`mut`, literal creation, checked indexed reads/writes, `for`-range
+A fixed-size array `[T; N]` (`let`/`mut`, literal creation, checked indexed reads/writes, `for`-range
 integration - see "What works today" above) is real, native, executable code as of KAI LANGUAGE M7B
-(post-alpha.2). What remains explicitly out of scope: arrays as a function PARAMETER or return type (no array
-calling-convention/ABI has been designed - such a parameter/return still fails with the same "not yet
-supported for this parameter's/return type" diagnostic any other still-unsupported type produces), whole-array
-assignment/copy (`let b = a` / `a = b` for two array-typed values - deliberately kept unsupported pending
-explicit language-semantics review, not merely unimplemented by oversight), and slice syntax (`[T]`, still
-fully deferred at the type level, `Type::unresolved()`). Also parses and/or type-checks in some form, but
-explicitly **not** backend-lowerable yet:
+(post-alpha.2). KAI LANGUAGE M8A (post-alpha.2) resolved the remaining LANGUAGE semantics: fixed arrays are
+value types (`let b = a` / whole-array `a = b` are ordinary value copies, no aliasing), and a function
+parameter/return of array type is likewise semantically by value (exact structural type required; an inline
+literal argument/return still uses ordinary contextual literal typing) - see "Documentation"'s TYPE_SYSTEM.md
+link for the complete rule. KAI LANGUAGE M8B (post-alpha.2) then implemented all of that as real native code:
+whole-array initialization/assignment/self-assignment, and arrays as a function PARAMETER or return type,
+lowered as a direct LLVM aggregate `[N x T]` argument/result (no `sret`/`byval`/hidden pointer, and no
+promised stable external C ABI - KAI performs no array decay to `[T]`/a pointer/a reference either way). What
+remains explicitly out of scope: slice syntax (`[T]`, still fully deferred at the type level,
+`Type::unresolved()`), and indexing more than one level into a nested array (`m[0][1]` - a codegen-only
+limitation distinct from nested-array VALUE transport, which already works). Also parses and/or type-checks in
+some form, but explicitly **not** backend-lowerable yet:
 
-- arrays as function parameters/returns, whole-array copy/assignment, and slices (`[T]`) as a semantic type at
-  all - see above
+- slices (`[T]`) as a semantic type at all, and multi-level nested-array indexing - see above
 - structs, enums, generics, traits
 - `Result`, general references (`&T`), and advanced ownership/borrowing
 - an owned, dynamic `String` type (`str` today is a `Copy`, immutable, non-owning view only)

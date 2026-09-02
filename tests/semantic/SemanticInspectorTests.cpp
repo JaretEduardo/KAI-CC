@@ -336,6 +336,44 @@ void testArrayLocalReportsCanonicalArrayType() {
     }
 }
 
+// KAI LANGUAGE M8A: array PARAMETER and RETURN types render canonically
+// too - the exact same generic Symbol/FunctionSignature machinery
+// already used for every other type, no ABI/implementation-detail state
+// involved (SemanticInspector never queries anything backend-related).
+void testArrayParameterAndReturnTypeReportCanonically() {
+    SourceManager sm;
+    const Inspected inspected =
+        inspectSource(sm, "fn sum(xs: [i32; 3]) -> [str; 4] {\n    return [\"a\", \"b\", \"c\", \"d\"]\n}");
+    KAI_CHECK(inspected.ok);
+    if (!inspected.ok) {
+        return;
+    }
+
+    const SemanticSymbolInfo* fn = findSymbol(inspected.result, "sum", SemanticSymbolKind::Function);
+    KAI_CHECK(fn != nullptr);
+    if (fn != nullptr) {
+        KAI_CHECK(fn->returnType.isArray());
+        if (fn->returnType.isArray()) {
+            KAI_CHECK(inspected.model.arrayElementType(fn->returnType) == kai::semantic::Type::str());
+            KAI_CHECK(inspected.model.arrayLength(fn->returnType) == 4);
+            KAI_CHECK(typeName(fn->returnType, inspected.model) == "[str; 4]");
+        }
+        KAI_CHECK(fn->parameters.size() == 1);
+        if (fn->parameters.size() == 1) {
+            KAI_CHECK(fn->parameters[0].type.isArray());
+            if (fn->parameters[0].type.isArray()) {
+                KAI_CHECK(typeName(fn->parameters[0].type, inspected.model) == "[i32; 3]");
+            }
+        }
+    }
+
+    const SemanticSymbolInfo* param = findSymbol(inspected.result, "xs", SemanticSymbolKind::Parameter);
+    KAI_CHECK(param != nullptr);
+    if (param != nullptr) {
+        KAI_CHECK(typeName(param->type, inspected.model) == "[i32; 3]");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -350,6 +388,7 @@ int main() {
     testSourcePositionsAreCorrect();
     testForLoopVariableIsDiscoveredAsALocal();
     testArrayLocalReportsCanonicalArrayType();
+    testArrayParameterAndReturnTypeReportCanonically();
 
     return kai::test::failureCount == 0 ? 0 : 1;
 }

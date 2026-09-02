@@ -771,6 +771,245 @@ void testUnsupportedParameterTypeDiagnosticIsActionable() {
     std::filesystem::remove(sourcePath, ignored);
 }
 
+// --- KAI LANGUAGE M8B: array value copying + function ABI, native E2E ---
+//
+// M8A was a semantic-contract milestone only, and these three programs
+// previously asserted a CLEAN BACKEND FAILURE (exit 6, an actionable
+// unsupportedConstruct() message) through the full CLI, since no array
+// function ABI or whole-array-copy codegen existed yet. KAI LANGUAGE M8B
+// removes those guards and implements the approved by-value semantics as
+// a direct LLVM aggregate ABI - these three are retargeted to run for
+// real and assert exact stdout. See the A-M suite further below for the
+// full M8B spec §20 matrix (independence, assignment, self-assignment,
+// parameters, arguments, returns, no-aliasing, str/zero-length transport,
+// evaluation order).
+
+void testArrayParameterEndToEnd() {
+    const CompileAndRunResult result =
+        compileAndRun("kai_e2e_array_param.kai",
+                       "fn sum(xs: [i32; 3]) -> i32 {\n    return xs[0] + xs[1] + xs[2]\n}\n"
+                       "fn main() {\n    let a = [1, 2, 3]\n    print(sum(a))\n}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "6\n");
+}
+
+void testArrayReturnTypeEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_return.kai",
+                                                       "fn make() -> [i32; 3] {\n    return [7, 8, 9]\n}\n"
+                                                       "fn main() {\n"
+                                                       "    let m = make()\n"
+                                                       "    print(m[0])\n"
+                                                       "    print(m[1])\n"
+                                                       "    print(m[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "7\n8\n9\n");
+}
+
+// Whole-array initialization (`let b = a`, M8A §1/§18.A) is a real,
+// independent value copy - see testArrayLocalCopyIndependenceEndToEnd()
+// below for the mutation-independence proof.
+void testWholeArrayInitializationEndToEnd() {
+    const CompileAndRunResult result = compileAndRun(
+        "kai_e2e_array_whole_copy.kai", "fn main() {\n    let a = [1, 2, 3]\n    let b = a\n    print(b[0])\n}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "1\n");
+}
+
+// A. Local copy independence (spec §20.A): mutating the copy must not
+// mutate the original.
+void testArrayLocalCopyIndependenceEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_copy_independence.kai",
+                                                       "fn main() {\n"
+                                                       "    mut a = [1, 2, 3]\n"
+                                                       "    mut b = a\n"
+                                                       "    b[0] = 99\n"
+                                                       "    print(a[0])\n"
+                                                       "    print(b[0])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "1\n99\n");
+}
+
+// B. Whole-array assignment (spec §20.B): `a = b` replaces every element.
+void testArrayWholeAssignmentEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_whole_assignment.kai",
+                                                       "fn main() {\n"
+                                                       "    mut a = [1, 2, 3]\n"
+                                                       "    let b = [4, 5, 6]\n"
+                                                       "    a = b\n"
+                                                       "    print(a[0])\n"
+                                                       "    print(a[1])\n"
+                                                       "    print(a[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "4\n5\n6\n");
+}
+
+// C. Self-assignment (spec §20.C): `a = a` must leave `a` unchanged.
+void testArraySelfAssignmentEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_self_assignment.kai",
+                                                       "fn main() {\n"
+                                                       "    mut a = [1, 2, 3]\n"
+                                                       "    a = a\n"
+                                                       "    print(a[0])\n"
+                                                       "    print(a[1])\n"
+                                                       "    print(a[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "1\n2\n3\n");
+}
+
+// E. Existing array value used as a call argument (spec §20.E).
+void testArrayExistingValueAsArgumentEndToEnd() {
+    const CompileAndRunResult result =
+        compileAndRun("kai_e2e_array_arg_existing.kai",
+                       "fn sum(xs: [i32; 3]) -> i32 {\n    return xs[0] + xs[1] + xs[2]\n}\n"
+                       "fn main() {\n    let a = [1, 2, 3]\n    print(sum(a))\n}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "6\n");
+}
+
+// F. Inline array literal used directly as a call argument (spec §20.F).
+void testArrayInlineLiteralAsArgumentEndToEnd() {
+    const CompileAndRunResult result = compileAndRun(
+        "kai_e2e_array_arg_literal.kai",
+        "fn sum(xs: [i32; 3]) -> i32 {\n    return xs[0] + xs[1] + xs[2]\n}\nfn main() {\n    print(sum([10, 20, 30]))\n}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "60\n");
+}
+
+// H. Return of an EXISTING local array value, as opposed to G's inline
+// literal (spec §20.G/§20.H).
+void testArrayReturnExistingLocalEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_return_existing.kai",
+                                                       "fn make() -> [i32; 3] {\n"
+                                                       "    let a = [7, 8, 9]\n"
+                                                       "    return a\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let m = make()\n"
+                                                       "    print(m[0])\n"
+                                                       "    print(m[1])\n"
+                                                       "    print(m[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "7\n8\n9\n");
+}
+
+// I. Parameter -> return round trip (spec §20.I): the returned value has
+// the SAME contents as what was passed in.
+void testArrayParameterToReturnRoundTripEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_roundtrip.kai",
+                                                       "fn echo(xs: [i32; 3]) -> [i32; 3] {\n    return xs\n}\n"
+                                                       "fn main() {\n"
+                                                       "    let a = [1, 2, 3]\n"
+                                                       "    let b = echo(a)\n"
+                                                       "    print(b[0])\n"
+                                                       "    print(b[1])\n"
+                                                       "    print(b[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "1\n2\n3\n");
+}
+
+// J. No-alias round trip (spec §20.J): mutating the caller's `a` AFTER
+// passing it by value into `echo()` must NOT affect the already-returned
+// `b` - proves the callee received an independent copy, not a reference.
+void testArrayNoAliasRoundTripEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_no_alias.kai",
+                                                       "fn echo(xs: [i32; 3]) -> [i32; 3] {\n    return xs\n}\n"
+                                                       "fn main() {\n"
+                                                       "    mut a = [1, 2, 3]\n"
+                                                       "    let b = echo(a)\n"
+                                                       "    a[0] = 99\n"
+                                                       "    print(a[0])\n"
+                                                       "    print(b[0])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "99\n1\n");
+}
+
+// K. `str`-element array value transport through a parameter and return
+// (spec §20.K) - `str` elements copy the view, never deep-copying text
+// (TYPE_SYSTEM.md's existing `str` ownership design is unchanged by M8B).
+void testArrayStrElementValueTransportEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_str.kai",
+                                                       "fn first(xs: [str; 2]) -> str {\n    return xs[0]\n}\n"
+                                                       "fn main() {\n"
+                                                       "    let a = [\"hi\", \"bye\"]\n"
+                                                       "    print(first(a))\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "hi\n");
+}
+
+// L. Zero-length array through a parameter AND a return (spec §20.L) -
+// exercises the direct aggregate ABI at its degenerate `[N x T]` = `[0 x
+// T]` case end to end.
+void testArrayZeroLengthParameterAndReturnEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_zero_length.kai",
+                                                       "fn echo(xs: [i32; 0]) -> [i32; 0] {\n    return xs\n}\n"
+                                                       "fn main() {\n"
+                                                       "    let a: [i32; 0] = []\n"
+                                                       "    let b = echo(a)\n"
+                                                       "    print(0)\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "0\n");
+}
+
+// M. An array-literal return value's elements are evaluated EXACTLY ONCE,
+// left to right (spec §20.M) - each `sideEffect(n)` call prints once, in
+// source order, strictly before the returned array's own elements are
+// read back out by main().
+void testArrayReturnLiteralEvaluationOrderEndToEnd() {
+    const CompileAndRunResult result = compileAndRun("kai_e2e_array_return_eval_order.kai",
+                                                       "fn sideEffect(n: i32) -> i32 {\n"
+                                                       "    print(n)\n"
+                                                       "    return n\n"
+                                                       "}\n"
+                                                       "fn make() -> [i32; 3] {\n"
+                                                       "    return [sideEffect(1), sideEffect(2), sideEffect(3)]\n"
+                                                       "}\n"
+                                                       "fn main() {\n"
+                                                       "    let m = make()\n"
+                                                       "    print(m[0])\n"
+                                                       "    print(m[1])\n"
+                                                       "    print(m[2])\n"
+                                                       "}");
+
+    KAI_CHECK(result.compileSucceeded);
+    KAI_CHECK(result.runExitCode == 0);
+    KAI_CHECK_STDOUT_BYTES(result.stdoutText, "1\n2\n3\n1\n2\n3\n");
+}
+
 // NATIVE LINKER (M7 spec §22): emit an object, link it with kai_runtime
 // via NativeLinker directly, confirm the executable exists AND runs.
 
@@ -1097,6 +1336,20 @@ int main() {
     testLiteralOutOfRangeDiagnosticIncludesTargetType();
     testUnsupportedForIterableDiagnosticIsActionable();
     testUnsupportedParameterTypeDiagnosticIsActionable();
+    testArrayParameterEndToEnd();
+    testArrayReturnTypeEndToEnd();
+    testWholeArrayInitializationEndToEnd();
+    testArrayLocalCopyIndependenceEndToEnd();
+    testArrayWholeAssignmentEndToEnd();
+    testArraySelfAssignmentEndToEnd();
+    testArrayExistingValueAsArgumentEndToEnd();
+    testArrayInlineLiteralAsArgumentEndToEnd();
+    testArrayReturnExistingLocalEndToEnd();
+    testArrayParameterToReturnRoundTripEndToEnd();
+    testArrayNoAliasRoundTripEndToEnd();
+    testArrayStrElementValueTransportEndToEnd();
+    testArrayZeroLengthParameterAndReturnEndToEnd();
+    testArrayReturnLiteralEvaluationOrderEndToEnd();
 
     testNativeLinkerProducesRunnableExecutable();
 

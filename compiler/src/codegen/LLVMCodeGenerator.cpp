@@ -137,25 +137,18 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
     std::vector<llvm::Type*> paramTypes;
     paramTypes.reserve(signature.parameterTypes.size());
     for (std::size_t i = 0; i < signature.parameterTypes.size(); ++i) {
-        // KAI LANGUAGE M7B: arrays as PARAMETERS are explicitly out of
-        // scope (no array function ABI exists or is decided) - checked
-        // here, structurally, BEFORE calling lowerType() at all, even
-        // though lowerType() itself would now happily produce a real
-        // `[N x T]` LLVM type for a supported element type (M7B makes
-        // Array a real lowerable local-storage type - see lowerType()'s
-        // own Array case). Passing this straight to lowerType() would
-        // silently start accepting an array-typed parameter the moment
-        // its element type also happens to be backend-lowerable, which
-        // would mean inventing an array-by-value calling convention as
-        // an unreviewed side effect - never appropriate here. Same
-        // "unsupported parameter type" message/diagnostic path as every
-        // other unsupported parameter shape - never a distinct message
-        // that would suggest this is a different kind of limitation.
-        if (signature.parameterTypes[i].isArray()) {
-            recordUnsupportedConstruct("code generation is not yet supported for this parameter's type",
-                                        fn.params()[i].type->span());
-            return false;
-        }
+        // KAI LANGUAGE M8B: array parameters now use lowerType()'s own
+        // Array case directly, exactly like every other type - no
+        // separate isArray() guard. lowerType() already produces a real
+        // `[N x T]` for a supported element type, or nullptr (falling
+        // into the SAME "unsupported parameter type" path below) for a
+        // genuinely unsupported one (Char, a still-deferred shape) -
+        // never a distinct message that would suggest array parameters
+        // are a different kind of limitation. See declareFunction()'s
+        // own header note and TYPE_SYSTEM.md §18 for the by-value
+        // language contract this now implements (direct LLVM aggregate
+        // parameter, per the M8B-approved ABI strategy - no sret/byval,
+        // no hidden pointer, no reference).
         llvm::Type* llvmParamType = lowerType(signature.parameterTypes[i], model);
         if (llvmParamType == nullptr) {
             // RELEASE HARDENING M2: a parameter type that never resolved
@@ -171,13 +164,8 @@ bool LLVMCodeGenerator::declareFunction(const ast::FunctionDecl& fn, const Seman
         paramTypes.push_back(llvmParamType);
     }
 
-    // KAI LANGUAGE M7B: arrays as RETURN VALUES are equally out of scope,
-    // for the identical "no array ABI decided" reason above.
-    if (signature.returnType.isArray()) {
-        const SourceSpan span = fn.returnType() != nullptr ? fn.returnType()->span() : fn.name().span;
-        recordUnsupportedConstruct("code generation is not yet supported for this function's return type", span);
-        return false;
-    }
+    // KAI LANGUAGE M8B: array RETURN values likewise now use lowerType()
+    // directly - a direct LLVM aggregate return, no sret.
     llvm::Type* returnType = lowerType(signature.returnType, model);
     if (returnType == nullptr) {
         const SourceSpan span = fn.returnType() != nullptr ? fn.returnType()->span() : fn.name().span;
@@ -667,36 +655,62 @@ bool LLVMCodeGenerator::generateVarDeclStmt(const ast::VarDeclStmt& varDecl, llv
     return true;
 }
 
-// KAI LANGUAGE M7B: an array-typed local's own initialization path.
-// Supported initializer shape: a (possibly paren-wrapped) ArrayLiteralExpr
-// directly - `let xs = [10, 20, 30]` / `mut xs = [10, 20, 30]`. Any OTHER
-// initializer shape (an identifier, a call, ...) - i.e. `let b = a` for
-// two array-typed values - is deliberately kept unsupported (returns
-// false, the same clean "LLVM IR generation failed" every other
-// unsupported construct produces): M7B spec §13 explicitly forbids
-// silently enabling whole-array value copying just because Array became
-// a real lowerable LLVM aggregate type - that is a real language-
-// semantics (Copy/aliasing) question for separate, explicit review, not
-// a side effect of this milestone. See lowerAssignmentExpr()'s own
-// identical guard for `a = b` (LLVMExpressionLowering.cpp).
+// KAI LANGUAGE M7B/M8B: an array-typed local's own initialization path.
+// Two supported initializer shapes:
+//
+//   1. A (possibly paren-wrapped) ArrayLiteralExpr directly -
+//      `let xs = [10, 20, 30]` / `mut xs = [10, 20, 30]` - the fast path,
+//      unchanged since M7B: elements are lowered straight into this
+//      local's own storage via lowerArrayLiteralIntoStorage(), never
+//      through an intermediate aggregate SSA value/temporary.
+//   2. KAI LANGUAGE M8B: any OTHER initializer shape that evaluates to an
+//      array-typed value - `let b = a` (an identifier), a call result, a
+//      parenthesized expression, ... - now falls back to the same
+//      generic lowerExpr()-then-store path generateVarDeclStmt() already
+//      uses for every non-array type, since ArrayLiteralExpr becoming a
+//      general lowerExpr()-producible value (M8B's lowerArrayLiteralExpr)
+//      means that path is already fully array-agnostic. This is exactly
+//      KAI LANGUAGE M8A's approved LANGUAGE semantics (ordinary
+//      value-copy, no aliasing - TYPE_SYSTEM.md §19), not something
+//      broadened silently: the fast path above is kept because it is
+//      strictly more efficient (no temporary, no extra load) and remains
+//      correct, not because the fallback couldn't also handle a literal.
+// See lowerAssignmentExpr()'s own identical two-path shape for `a = b`
+// (LLVMExpressionLowering.cpp).
 bool LLVMCodeGenerator::generateArrayVarDeclStmt(const ast::VarDeclStmt& varDecl, SymbolId id,
                                                   llvm::ArrayType* arrayType, llvm::Function& function,
                                                   llvm::IRBuilder<>& builder, const SemanticModel& model) {
     const ast::ArrayLiteralExpr* literal = unwrapArrayLiteralInitializer(varDecl.initializer());
-    if (literal == nullptr) {
+    if (literal != nullptr) {
+        // The alloca is created FIRST (entry block, per this class's
+        // existing local-storage convention) and bound into `locals_`
+        // only AFTER its contents are successfully initialized below - so
+        // a failed initialization never leaves a half-bound local
+        // reachable by any later statement.
+        llvm::AllocaInst* slot = createEntryBlockAlloca(function, arrayType, sources_.text(varDecl.name().span));
+        if (!lowerArrayLiteralIntoStorage(*literal, slot, arrayType, model, builder)) {
+            return false;
+        }
+
+        locals_.emplace_back(id, slot);
+        return true;
+    }
+
+    // KAI LANGUAGE M8B: generic fallback - `let b = a` and friends.
+    // Mirrors generateVarDeclStmt()'s own scalar path exactly (lower the
+    // initializer, verify its LLVM type matches, allocate, store, bind) -
+    // no array-specific logic beyond the isArrayTy() dispatch that
+    // already routed us here.
+    const std::optional<llvm::Value*> initializer = lowerExpr(varDecl.initializer(), model, builder);
+    if (!initializer.has_value() || *initializer == nullptr) {
+        return false;
+    }
+    if ((*initializer)->getType() != arrayType) {
         return false;
     }
 
-    // The alloca is created FIRST (entry block, per this class's
-    // existing local-storage convention) and bound into `locals_` only
-    // AFTER its contents are successfully initialized below - so a
-    // failed initialization never leaves a half-bound local reachable by
-    // any later statement.
     llvm::AllocaInst* slot = createEntryBlockAlloca(function, arrayType, sources_.text(varDecl.name().span));
-    if (!lowerArrayLiteralIntoStorage(*literal, slot, arrayType, model, builder)) {
-        return false;
-    }
-
+    builder.CreateStore(*initializer, slot);
     locals_.emplace_back(id, slot);
     return true;
 }

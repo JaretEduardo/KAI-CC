@@ -8,6 +8,7 @@
 #include "kai/semantic/TypeChecker.hpp"
 #include "kai/source/SourceManager.hpp"
 
+#include <llvm/IR/Attributes.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
@@ -3150,6 +3151,156 @@ void testM6ForLoopIndexedMutationIntegrationVerifies() {
     }
 }
 
+// --- KAI LANGUAGE M8B: array value copying + function ABI now real ---
+//
+// M8A was a semantic-contract milestone only and implemented NO array
+// function ABI/whole-array-copy codegen; the tests here previously locked
+// in that the M7B backend guards produced a clean, actionable
+// unsupportedConstruct() failure for each of these programs. KAI LANGUAGE
+// M8B removes those guards and implements the approved behavior as a
+// direct LLVM aggregate ABI - these tests are retargeted to assert
+// SUCCESSFUL generation and a verified module, per M8B spec §19. See
+// NativeCompilationTests.cpp for the same programs exercised through the
+// full CLI pipeline with observed stdout, and the dedicated aggregate-IR
+// assertions further below for the ABI shape itself
+// (FunctionType/alloca/call/return).
+
+void testArrayParameterNowGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn sum(xs: [i32; 3]) -> i32 {\n    return xs[0]\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+void testArrayReturnTypeNowGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn make() -> [i32; 3] {\n    return [1, 2, 3]\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+void testWholeArrayInitializationFromAnotherArrayNowGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn f() {\n    let a = [1, 2, 3]\n    let b = a\n}");
+
+    // A real value copy, not aliasing (M8A §1/§18.A) - now implemented.
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+void testWholeArrayAssignmentNowGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result =
+        compileToLLVM(sm, codegen, "fn f() {\n    mut a = [1, 2, 3]\n    let b = [4, 5, 6]\n    a = b\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// Self-assignment (M8A spec §5): semantically valid, with NO special
+// language error - now generates and verifies successfully under M8B.
+void testWholeArraySelfAssignmentNowGeneratesSuccessfully() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn f() {\n    mut a = [1, 2, 3]\n    a = a\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// --- KAI LANGUAGE M8B: aggregate ABI shape assertions (spec §19) ---
+
+// Direct aggregate FunctionType for both a parameter and a return - no
+// sret, no hidden pointer parameter, no byval attribute.
+void testArrayParameterAndReturnUseDirectAggregateFunctionType() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen, "fn echo(xs: [i32; 3]) -> [i32; 3] {\n    return xs\n}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (!result.generationSucceeded) {
+        return;
+    }
+    llvm::Function* echo = codegen.module().getFunction("echo");
+    KAI_CHECK(echo != nullptr);
+    if (echo == nullptr) {
+        return;
+    }
+    llvm::FunctionType* fnType = echo->getFunctionType();
+    KAI_CHECK(fnType->getNumParams() == 1);
+    KAI_CHECK(fnType->getParamType(0)->isArrayTy());
+    KAI_CHECK(fnType->getReturnType()->isArrayTy());
+    KAI_CHECK(echo->arg_size() == 1);
+    KAI_CHECK(!echo->hasStructRetAttr());
+    KAI_CHECK(!echo->getAttributes().hasParamAttr(0, llvm::Attribute::ByVal));
+    KAI_CHECK(!echo->getAttributes().hasParamAttr(0, llvm::Attribute::StructRet));
+    KAI_CHECK(!llvm::verifyModule(codegen.module()));
+}
+
+// Call with an existing array value, an inline literal argument, and the
+// call result used to initialize a local (spec §19).
+void testArrayCallWithExistingValueAndInlineLiteralVerifies() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn echo(xs: [i32; 3]) -> [i32; 3] {\n"
+                                      "    return xs\n"
+                                      "}\n"
+                                      "fn main() {\n"
+                                      "    let a = [1, 2, 3]\n"
+                                      "    let b = echo(a)\n"
+                                      "    let c = echo([4, 5, 6])\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
+// Zero-length arrays through a parameter and a return (spec §14).
+void testZeroLengthArrayParameterAndReturnVerify() {
+    SourceManager sm;
+    LLVMCodeGenerator codegen(sm);
+    Generated result = compileToLLVM(sm, codegen,
+                                      "fn echo(xs: [i32; 0]) -> [i32; 0] {\n"
+                                      "    return xs\n"
+                                      "}\n"
+                                      "fn main() {\n"
+                                      "    let a: [i32; 0] = []\n"
+                                      "    let b = echo(a)\n"
+                                      "}");
+
+    KAI_CHECK(result.model.errors().empty());
+    KAI_CHECK(result.generationSucceeded);
+    if (result.generationSucceeded) {
+        KAI_CHECK(!llvm::verifyModule(codegen.module()));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -3273,6 +3424,15 @@ int main() {
     testUnsignedDynamicIndexBoundsCFG();
     testM6ForLoopIndexIntegrationVerifies();
     testM6ForLoopIndexedMutationIntegrationVerifies();
+
+    testArrayParameterNowGeneratesSuccessfully();
+    testArrayReturnTypeNowGeneratesSuccessfully();
+    testWholeArrayInitializationFromAnotherArrayNowGeneratesSuccessfully();
+    testWholeArrayAssignmentNowGeneratesSuccessfully();
+    testWholeArraySelfAssignmentNowGeneratesSuccessfully();
+    testArrayParameterAndReturnUseDirectAggregateFunctionType();
+    testArrayCallWithExistingValueAndInlineLiteralVerifies();
+    testZeroLengthArrayParameterAndReturnVerify();
 
     testPrintLiteralI32SignExtendsToI64();
     testPrintVariableI64();

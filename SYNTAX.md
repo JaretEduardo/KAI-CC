@@ -268,10 +268,45 @@ for a length-4 array) is rejected at compile time; a dynamic
 out-of-bounds index traps the program immediately at runtime (not the
 language `panic` mechanism - no unwinding, no recovery, no stable exit-
 code guarantee) rather than ever reading or writing out of bounds.
-Still NOT implemented: arrays as a function parameter or return type (no
-array calling convention/ABI exists), whole-array assignment/copy (`let
-b = a` / `a = b` for two array-typed values), and slice syntax (`[T]`,
-§16 below - still fully deferred, not a semantic type at all yet).
+Slice syntax (`[T]`, §16 below) remains fully deferred at the type level
+too, not a semantic type at all yet. Indexing more than one level into a
+nested array (`m[0][1]`) also remains unimplemented - a codegen-only
+limitation distinct from nested-array VALUE transport (assigning/
+passing/returning a whole nested array), which M8B below makes real.
+
+**KAI LANGUAGE M8A (post-alpha.2): value semantics resolved for the
+LANGUAGE; KAI LANGUAGE M8B (post-alpha.2): native execution
+implemented.** Fixed-size arrays are KAI value types: `let b = a` and
+`mut a = ...; a = b` (exact matching structural type, `a` mutable) are
+ordinary value copies - no aliasing, no implicit sharing, `[T; N]` is
+Copy-like exactly when `T` is. A function parameter/return of array type
+is likewise semantically BY VALUE:
+
+    fn sum(xs: [i32; 3]) -> i32 {
+        return xs[0] + xs[1] + xs[2]
+    }
+
+    fn make() -> [i32; 3] {
+        return [1, 2, 3]
+    }
+
+`sum(a)` gives the function its OWN value, with no source-level
+aliasing to the caller's `a`; `make()`'s return value has no lifetime
+relationship to `make`'s own locals. Argument/return matching requires
+the EXACT structural array type (an inline literal argument/return
+still uses ordinary contextual literal typing against the declared
+type, e.g. `sum([1, 2, 3])`) - never an implicit conversion between two
+already-typed arrays. Array parameters stay immutable under KAI's
+existing (unchanged) parameter rules. KAI performs NO array decay:
+`[T; N]` never implicitly becomes `[T]`, a pointer, or a reference. All
+of this is now real, native, executable code as of KAI LANGUAGE M8B
+(post-alpha.2): whole-array init/assignment/self-assignment, and array
+parameters/returns are lowered as a direct LLVM aggregate `[N x T]`
+argument/result - no `sret`/`byval`/hidden pointer, and no promised
+stable external C ABI (the physical ABI remains an unstable backend
+implementation detail, never a language-visible guarantee). See
+TYPE_SYSTEM.md §18/§19 for the full rule and DESIGN_QUESTIONS.md for the
+resolution.
 
 ---
 
