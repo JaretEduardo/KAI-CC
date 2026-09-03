@@ -51,10 +51,10 @@
 #     below - the exact set is discovered empirically from kaicc.exe's
 #     own PE import table on THIS build, never assumed)
 #   dist/kai-windows-x86_64/lib/kai/libkai_runtime.a
-#   dist/kai-windows-x86_64/examples/{hello,functions,conditions,variables}.kai
-#     (the SAME curated set as the Linux release - see examples/README.md
-#     - unless a genuine Windows incompatibility is found; none was as of
-#     this milestone)
+#   dist/kai-windows-x86_64/examples/{hello,functions,conditions,variables,
+#     loops,fibonacci,arrays,slices}.kai (the SAME curated set as the
+#     Linux release - see examples/README.md - unless a genuine Windows
+#     incompatibility is found; none was as of this milestone)
 #   dist/kai-windows-x86_64/{LICENSE,README.md,THIRD_PARTY_NOTICES.md}
 #   dist/kai-windows-x86_64/third_party/licenses/...
 #   dist/kai-windows-x86_64-dependencies.txt  (build-evidence dependency
@@ -67,8 +67,9 @@
 #     is read from the just-installed release kaicc.exe's own `--version`
 #     output, never a second hard-coded literal here)
 #   dist/kai-<version>-windows-x86_64.zip.sha256  (informational only -
-#     this is NOT the official release's SHA256SUMS; that is a future,
-#     separate alpha.2 release step)
+#     this is NOT the official release's SHA256SUMS; that combined file
+#     covers all four final release assets and is assembled at actual
+#     GitHub Release publish time - see docs/RELEASING.md)
 #
 # The staging directory itself is left UNVERSIONED
 # (dist/kai-windows-x86_64/), exactly like the Linux release's
@@ -315,6 +316,19 @@ check_release_example "hello.kai" "$(printf "Hello from KAI")"
 check_release_example "functions.kai" "$(printf "Hello\nKAI\n42\n84")"
 check_release_example "conditions.kai" "$(printf "adult\npositive\nnegative\nzero")"
 check_release_example "variables.kai" "$(printf "KAI\n0.1\n2026\n1")"
+# KAI LANGUAGE M6 (post-alpha.2): while + a for loop over an integer
+# literal range - same curated set as the Linux release.
+check_release_example "loops.kai" "$(printf "0\n1\n2\n3\n4\n0\n1\n2\n3\n4")"
+# KAI LANGUAGE M6 (post-alpha.2): recursion + a for-range loop.
+check_release_example "fibonacci.kai" "$(printf "0\n1\n1\n2\n3\n5\n8\n13\n21\n34")"
+# KAI LANGUAGE M7B/M8B/M9 (post-alpha.2): fixed-size arrays - literal
+# creation, checked indexed reads/writes, array function
+# parameters/returns by value, and nested-array indexing.
+check_release_example "arrays.kai" "$(printf "10\n40\n100\n10\n20\n30\n40\n1\n1\n1\n2\n99")"
+# KAI LANGUAGE M10B/M11B (post-alpha.2): immutable slices - a Slice
+# function parameter, len()/checked indexing, and an executable safe
+# Slice RETURN.
+check_release_example "slices.kai" "$(printf "4\n100\n4\n10")"
 
 echo "==> Verifying semantic tooling from the installed staging tree (WINDOWS"
 echo "    PORTABLE PACKAGE M2 spec §19 - proves the public binary contains"

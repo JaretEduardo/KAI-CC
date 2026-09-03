@@ -64,7 +64,7 @@ These will be introduced after the frontend is stable.
 
 ---
 
-### Current Implementation Status (as of LLVM Codegen Milestone 7)
+### Current Implementation Status (kept current through KAI LANGUAGE M11B, post-alpha.2)
 
 The ACTUAL current pipeline (see `compiler/include/kai/codegen/LLVMCodeGenerator.hpp`'s own class comment) is:
 
@@ -77,8 +77,12 @@ LLVM IR for the MVP. This is a deliberate, deadline-driven decision, not an aban
 planned (see §8) once the frontend/backend MVP is stable, consistent with this section's own "introduced after
 the frontend is stable" framing.
 
-Currently implemented and native-executable-verified on Fedora Linux x86_64 only (no cross-compilation, no
-Windows/macOS support yet): primitive integer/Bool/f32/f64 values and arithmetic/comparison/logical
+Currently implemented and native-executable-verified on **Linux x86_64** (developed/tested on Fedora, portable
+release built from an Ubuntu 22.04 baseline) **and Windows x86_64** (MSYS2 UCRT64 + Clang/LLVM 22.1.8 baseline
+- see the WINDOWS M1 note below and README.md's "Portable Windows release") - both released as real binary
+artifacts since `v0.1.0-alpha.2`. No cross-compilation (each platform's `kaicc` is built and verified on that
+same platform), and no macOS or ARM64 (any OS) support exists or is claimed: primitive integer/Bool/f32/f64
+values and arithmetic/comparison/logical
 expressions (`&&`/`||` are FINAL short-circuit, not eager), local variables, mutability/assignment, function
 parameters/calls/forward-calls/recursion, `if`/`else`/`else if`, `while`, `for i in start..end` over an
 integer range (KAI LANGUAGE M6, post-alpha.2), a fixed-size array `[T; N]` (including nested fixed arrays)
@@ -113,12 +117,15 @@ the explicit `slice(...)` builtin, sub-slicing, slice-of-slice,
 structs/enums/generics, `panic`/`assert` lowering, optimization passes, HIR, an LSP, and the higher-level
 `kai` CLI wrapper described in §14 (only `kaicc` itself exists today).
 
-**WINDOWS M1 (portability baseline, in progress):** the same source tree also builds and runs its CTest suite
-natively on Windows x86_64, targeting exactly one Windows toolchain baseline - MSYS2 UCRT64 with Clang/LLVM
-22.1.8 (never MSVC, never WSL) - via a dedicated `compiler-windows` CI job. This is a build/test portability
-milestone only, not a packaged Windows release: no Windows tag/release/version bump has happened, and
-README.md's platform claim is not updated until a packaging milestone actually validates end-to-end Windows
-distribution. The only native-code changes this required were `NativeLinker::currentExecutablePath()` (Windows
+**WINDOWS M1 (portability baseline) + Windows packaging (shipped in `v0.1.0-alpha.2`):** the same source tree
+builds and runs its CTest suite natively on Windows x86_64, targeting exactly one Windows toolchain baseline -
+MSYS2 UCRT64 with Clang/LLVM 22.1.8 (never MSVC, never WSL) - via a dedicated `compiler-windows` CI job.
+WINDOWS M1 itself was originally a build/test portability milestone only, with no packaged release yet - that
+historical scope note is preserved here for context, but it is no longer the current state: a subsequent
+packaging milestone shipped a portable Windows x86_64 `.zip` distribution and a Windows x64 VS Code VSIX as
+real, CI-proven, released artifacts starting with `v0.1.0-alpha.2` (see README.md's "Portable Windows release"
+and `docs/releases/0.1.0-alpha.2.md`) - Windows is a fully supported release platform today, not merely a
+build/test target. The only native-code changes Windows support required were `NativeLinker::currentExecutablePath()` (Windows
 has no `/proc/self/exe`; uses `GetModuleFileNameW` instead) and `kai::cli::resolveNativeExecutablePath()` (a
 small, Windows-only `.exe`-suffix decision for `-o <output>`, since MinGW-style host compiler drivers' own
 output-naming behavior around a missing extension is not something to depend on implicitly) - everything else

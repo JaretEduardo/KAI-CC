@@ -2,12 +2,24 @@
 
 [![CI](https://github.com/JaretEduardo/KAI-CC/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/JaretEduardo/KAI-CC/actions/workflows/ci.yml)
 
-**KAI** is an experimental, statically-typed, compiled systems programming language explored with AI-assisted
-software development in mind from the start. **KAI-CC** is its reference compiler.
+**KAI** is an experimental, statically-typed, compiled systems programming language: `.kai` source compiles
+straight to a native executable via LLVM, with explicit, low-level semantics (no GC, no hidden allocation).
+**KAI-CC** is its reference compiler.
 
-> **Status: alpha / pre-release (v0.1.0-alpha.2).** KAI-CC targets **Linux x86_64 and Windows x86_64**. It
-> compiles a real (but still small) subset of KAI source directly to a native executable via LLVM. Syntax,
-> semantics, and tooling may change significantly. Do not use KAI for production software.
+> **Status: alpha / pre-release ([v0.1.0-alpha.3](https://github.com/JaretEduardo/KAI-CC/releases)).** KAI-CC
+> targets **Linux x86_64 and Windows x86_64**. It compiles a real (but still small) subset of KAI source to a
+> native executable. Syntax, semantics, and tooling may change significantly. **Do not use KAI for production
+> software** - this is an early alpha looking for testers and design/implementation feedback, not a finished
+> language.
+
+**What "AI-native" means here, concretely:** `kaicc` exposes its own compiler-resolved semantic model directly
+- `kaicc inspect`, `definition`, `references`, `callers`, `callees`, and `call-graph` (see "Semantic tooling"
+below) answer structural questions (what does this symbol resolve to, who calls this function) straight from
+the compiler's own resolved types/symbols/call graph, rather than requiring a tool or a coding agent to
+re-derive that from text search. That is a description of what the compiler exposes today, not a performance
+claim - KAI does **not** claim proven lower token usage, fewer agent iterations, better correctness, or faster
+AI coding; an experimental benchmark harness exists to measure exactly that (see "AI-native benchmark status"
+below), and formal trial counts remain zero.
 
 ---
 
@@ -69,6 +81,13 @@ compiles and runs the same way, printing `Hello` then `KAI`.
 ---
 
 ## What works today
+
+At a glance (details and exact semantics below): primitive static types, functions and recursion, `if`/
+`while`, half-open integer range `for` loops, fixed-size arrays with checked indexing (including nested
+arrays), fixed-array value semantics across function boundaries, immutable slices (`slice(array)`,
+`len(array | slice | str)`, checked indexing), a restricted class of provably-safe slice returns, compiler-
+resolved semantic query tooling, and native executables on both Linux x86_64 and Windows x86_64. See "Current
+limitations" below for what's designed but not yet implemented.
 
 **Types:** `i8`/`i16`/`i32`/`i64`, `u8`/`u16`/`u32`/`u64`, `f32`/`f64`, `bool`, `char`, the unit type `()`, and
 `str` (an immutable, non-owning text view - see "Current limitations" for what `str` does *not* yet include).
@@ -154,6 +173,14 @@ kaicc call-graph <file.kai> --json
 correctly distinguishing shadowed locals or a user function that shadows a builtin, for example - not textual
 grep. See [`docs/CLI.md`](docs/CLI.md) for the full reference.
 
+### AI-native benchmark status
+
+This repository contains an experimental, controlled benchmark harness
+([`benchmarks/ai-native/v1/`](benchmarks/ai-native/v1/)) comparing two agent workflows on the same KAI
+code-editing tasks: one restricted to textual exploration (file reads, grep), the other additionally permitted
+to use the compiler semantic queries above. **Formal trial counts remain zero (textual: 0, semantic: 0) - no
+benchmark result exists yet.** This is infrastructure for measuring the hypothesis above, not evidence for it.
+
 ---
 
 ## VS Code extension
@@ -219,7 +246,7 @@ This uses Podman (or Docker as a fallback) to build KAI-CC inside an Ubuntu 22.0
 
 ```
 dist/kai-linux-x86_64/
-dist/kai-linux-x86_64.tar.gz
+dist/kai-<version>-linux-x86_64.tar.gz
 ```
 
 with the layout:
@@ -245,6 +272,29 @@ most desktop Linux installs and `build-essential`-style metapackages already inc
 This artifact is built from an Ubuntu 22.04 baseline and has been tested running on both Ubuntu 22.04 and a
 current Fedora host. This is **not** a claim of universal Linux compatibility - only what has actually been
 verified.
+
+### Linux quickstart (for someone who has never touched this repository)
+
+This is the exact, minimal sequence a Linux x86_64 user follows using a published release - no LLVM, CMake,
+Ninja, or source build needed for any of it:
+
+1. Download `kai-<version>-linux-x86_64.tar.gz` from the
+   [GitHub Releases page](https://github.com/JaretEduardo/KAI-CC/releases) and extract it anywhere (no root
+   required, no install into `/usr/bin` or any system location - it runs from wherever you extract it):
+   `tar xzf kai-<version>-linux-x86_64.tar.gz`.
+2. Make sure a host C toolchain is on `PATH` - **only needed to compile KAI programs, not to run `kaicc`
+   itself.** `--version`, `--help`, and the semantic-tooling commands all work with no toolchain installed at
+   all. Most desktop Linux installs already have `gcc`/`clang`; if not, install one plus its libc development
+   package (e.g. `gcc` + `libc6-dev` on Ubuntu).
+3. `cd` into the extracted `kai-linux-x86_64/` folder.
+4. `./bin/kaicc --version` - confirms the exact version (`KAI-CC 0.1.0-alpha.3`); works with no toolchain
+   installed at all, as do `inspect`/`references`/`call-graph` (see [`docs/CLI.md`](docs/CLI.md)) - only the
+   final native link step needs the toolchain from step 2.
+5. `./bin/kaicc examples/hello.kai -o hello` produces `hello`.
+6. `./hello` prints `Hello from KAI`.
+7. Browse `examples/` for the other bundled, verified-executable programs (see
+   [`examples/README.md`](examples/README.md)) and the [design documents](#documentation) for where the
+   language is headed next.
 
 ---
 
@@ -295,16 +345,18 @@ remaining requirement for this alpha, not an oversight.
 
 This packaging, plus a from-scratch "download -> extract -> compile -> run" smoke test using an independently
 obtained host toolchain (no KAI/MSYS2 build tooling present), is validated end to end by CI on every commit.
-**`v0.1.0-alpha.2` release artifacts will include this `.zip`** once published; until then it is CI build
-evidence, not yet an attached GitHub Release asset.
+This `.zip` has been an attached asset on every [GitHub Release](https://github.com/JaretEduardo/KAI-CC/releases)
+since `v0.1.0-alpha.2`.
 
 ### Windows quickstart (for someone who has never touched this repository)
 
-This is the exact, minimal sequence a Windows x86_64 user follows once `v0.1.0-alpha.2` release artifacts are
-published - **no MSYS2, no LLVM, no CMake/Ninja, no source build** is needed for any of it:
+This is the exact, minimal sequence a Windows x86_64 user follows using a published release - **no MSYS2, no
+LLVM, no CMake/Ninja, no source build, and no repository checkout** is needed for any of it:
 
-1. Download and extract `kai-<version>-windows-x86_64.zip` anywhere (an ordinary `Downloads` folder is fine -
-   this works even from a path containing spaces, e.g. `C:\Users\Jane Doe\Downloads\kai-windows-x86_64\`).
+1. Download `kai-<version>-windows-x86_64.zip` from the
+   [GitHub Releases page](https://github.com/JaretEduardo/KAI-CC/releases) and extract it anywhere (an
+   ordinary `Downloads` folder is fine - this works even from a path containing spaces, e.g.
+   `C:\Users\Jane Doe\Downloads\kai-windows-x86_64\`).
 2. Install a host C toolchain - **only needed to compile KAI programs, not to run `kaicc.exe` itself.** The
    one route this project actually tests is
    [WinLibs GCC](https://github.com/brechtsanders/winlibs_mingw) (a standalone build of GCC/MinGW-w64,
@@ -338,6 +390,14 @@ design/future sketches that don't compile with the current backend yet.
 ---
 
 ## Current limitations
+
+At a glance, **not implemented** (parses and/or type-checks in some form for several of these, but none are
+backend-lowerable): structs, enums, generics, traits, `Result`/`Option`, an owned dynamic `String` type,
+modules/packages, general references (`&T`), mutable slices, sub-slicing, a full ownership/move/borrow model
+(KAI LANGUAGE M11's provenance analysis is a narrow, restricted safety check, not a general borrow checker),
+closures, async, FFI, raw pointers, a stable external ABI for any lowered aggregate, macOS, ARM64 (any OS),
+LSP support, and semantic editor features beyond the syntax highlighting/basic completion the VS Code extension
+already provides. Details and exact boundaries below.
 
 `for i in start..end` over a half-open integer range is real, native, executable code (KAI LANGUAGE M6,
 post-alpha.2 - both endpoints must be the same concrete integer type, following the same contextual-literal-
@@ -416,6 +476,18 @@ Windows binary artifacts once published.
   show for the eventual, longer-term architecture)
 - [Roadmap](ROADMAP.md)
 - [CLI Reference](docs/CLI.md) - commands, flags, exit codes
+
+---
+
+## Contributing and feedback
+
+Alpha.3 is looking for testers and design/implementation feedback: bug reports with a minimal reproduction,
+language/design feedback (does a restriction get in the way of something reasonable?), and tooling feedback
+(VS Code extension, semantic queries) are all welcome via
+[GitHub Issues](https://github.com/JaretEduardo/KAI-CC/issues). See [`CONTRIBUTING.md`](CONTRIBUTING.md) before
+sending a pull request - how to build, how to run the test suite, and where language design questions belong,
+since KAI 0.1's feature boundary is deliberately narrow and most missing features are deferred on purpose, not
+overlooked. Filing an issue or opening a PR does not guarantee a proposal will be accepted or scheduled.
 
 ---
 

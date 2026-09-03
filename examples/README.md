@@ -9,9 +9,13 @@ executable then exits `0`.
 ## Verified executable examples
 
 These compile and run today, and their stdout is asserted exactly by
-`scripts/build-release-linux-x86_64.sh` before they are allowed into a
-release artifact (see that script and `dist/kai-linux-x86_64/examples/`
-after a release build).
+`scripts/build-release-linux-x86_64.sh` (and, identically, by
+`scripts/build-release-windows-x86_64.sh` for the Windows package) before
+they are allowed into a release artifact (see those scripts and
+`dist/kai-linux-x86_64/examples/`/`dist/kai-windows-x86_64/examples/` after
+a release build). As of alpha.3, every example in this table is packaged in
+both release archives - there is currently no example that's verified
+executable but excluded from packaging.
 
 | File | What it demonstrates | Exact stdout |
 |---|---|---|

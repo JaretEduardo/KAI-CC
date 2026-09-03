@@ -141,6 +141,19 @@ mkdir -p "${DIST_DIR}"
         check_release_example "functions.kai" "$(printf "Hello\nKAI\n42\n84")"
         check_release_example "conditions.kai" "$(printf "adult\npositive\nnegative\nzero")"
         check_release_example "variables.kai" "$(printf "KAI\n0.1\n2026\n1")"
+        # KAI LANGUAGE M6 (post-alpha.2): while + a for loop over an
+        # integer literal range.
+        check_release_example "loops.kai" "$(printf "0\n1\n2\n3\n4\n0\n1\n2\n3\n4")"
+        # KAI LANGUAGE M6 (post-alpha.2): recursion + a for-range loop.
+        check_release_example "fibonacci.kai" "$(printf "0\n1\n1\n2\n3\n5\n8\n13\n21\n34")"
+        # KAI LANGUAGE M7B/M8B/M9 (post-alpha.2): fixed-size arrays -
+        # literal creation, checked indexed reads/writes, array function
+        # parameters/returns by value, and nested-array indexing.
+        check_release_example "arrays.kai" "$(printf "10\n40\n100\n10\n20\n30\n40\n1\n1\n1\n2\n99")"
+        # KAI LANGUAGE M10B/M11B (post-alpha.2): immutable slices - a
+        # Slice function parameter, len()/checked indexing, and an
+        # executable safe Slice RETURN.
+        check_release_example "slices.kai" "$(printf "4\n100\n4\n10")"
         rm -f /tmp/release_example_check.out
 
         # RELEASE HARDENING M2.1 / v0.1.0-alpha.1: root README, project
@@ -198,6 +211,18 @@ if command -v tar >/dev/null 2>&1; then
     echo "==> Producing dist/${VERSIONED_ARCHIVE_NAME}"
     tar -C "${DIST_DIR}" -czf "${DIST_DIR}/${VERSIONED_ARCHIVE_NAME}" "${ARTIFACT_NAME}"
     echo "    $(du -h "${DIST_DIR}/${VERSIONED_ARCHIVE_NAME}" | cut -f1)"
+
+    # Mirrors the Windows release script's own per-archive .sha256
+    # sidecar (informational only, same as there - NOT the official
+    # release's combined SHA256SUMS. That file covers all four final
+    # release assets - this archive, the Windows .zip, and both VSIXes -
+    # and is assembled once every asset exists together at actual GitHub
+    # Release publish time; see docs/RELEASING.md for that process. This
+    # sidecar exists purely so a local/CI run of this script has
+    # something to compare against before that final step.)
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "${DIST_DIR}" && sha256sum "${VERSIONED_ARCHIVE_NAME}" | tee "${VERSIONED_ARCHIVE_NAME}.sha256")
+    fi
 fi
 
 echo "==> Done."
