@@ -616,7 +616,7 @@ jobs:
           retention-days: 7
 
       - name: Bundled kaicc.exe --version (informational)
-        # RELEASE PREP v0.1.0-alpha.2: expected to report 0.1.0-alpha.2 on
+        # RELEASE PREP v0.1.0-alpha.3: expected to report 0.1.0-alpha.3 on
         # this release-prep branch (KAI_CC_PRERELEASE_SUFFIX bumped in
         # CMakeLists.txt) - informational sanity check, not a hard
         # assertion here (see test-windows-fresh-user.ps1 for the real
